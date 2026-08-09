@@ -1,0 +1,28 @@
+DogeBuddy Info
+
+Color Codes:
+
+	black: #10171a
+
+	puppy:
+		red: #ff3641
+		beige: #ffe3ae
+		orange: #ffb327
+
+	banner:
+		black: #0c1417
+		dark cerulean: #145069
+
+	buddy tag:
+		dark blue: #005ec2
+		light blue: #00e1ff
+
+	gold gradient:
+		dark orange: #bb6402
+		orange yellow: #f6ce18
+		light yellow: #f5f39e
+
+Fonts:
+
+	main text: FunkyDori
+	sub text: Poppins Medium
