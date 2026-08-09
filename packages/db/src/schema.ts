@@ -6,7 +6,7 @@ import {
 
 const id = () => uuid('id').primaryKey().defaultRandom()
 const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
-const updatedAt = () => timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+const updatedAt = () => timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
 
 export const productStatus = pgEnum('product_status', ['draft', 'active', 'deprecated'])
 export const supplierKey = pgEnum('supplier_key', ['cj', 'mock'])

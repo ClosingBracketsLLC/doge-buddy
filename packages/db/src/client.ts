@@ -4,8 +4,11 @@ import pg from 'pg'
 import { fileURLToPath } from 'node:url'
 import * as schema from './schema.ts'
 
-export function createDb(connectionString: string): { db: NodePgDatabase<typeof schema>; pool: pg.Pool } {
-  const pool = new pg.Pool({ connectionString })
+export function createDb(
+  connectionString: string,
+  poolConfig?: Omit<pg.PoolConfig, 'connectionString'>,
+): { db: NodePgDatabase<typeof schema>; pool: pg.Pool } {
+  const pool = new pg.Pool({ ...poolConfig, connectionString })
   return { db: drizzle(pool, { schema }), pool }
 }
 

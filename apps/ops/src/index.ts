@@ -4,7 +4,7 @@ import { startQueue } from './queue.ts'
 import { buildServer } from './server.ts'
 
 const config = loadConfig(process.env)
-const { pool } = createDb(config.databaseUrl)
+const { pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
 const queue = await startQueue(config.databaseUrl)
 const app = buildServer({ pool, isQueueReady: queue.ready })
 
@@ -16,10 +16,31 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
   app.log.info(`${signal} received, shutting down`)
-  await app.close()
-  await queue.stop()
-  await pool.end()
-  process.exit(0)
+
+  let ok = true
+
+  try {
+    await app.close()
+  } catch (err) {
+    ok = false
+    app.log.error({ err }, 'error closing server during shutdown')
+  }
+
+  try {
+    await queue.stop()
+  } catch (err) {
+    ok = false
+    app.log.error({ err }, 'error stopping queue during shutdown')
+  }
+
+  try {
+    await pool.end()
+  } catch (err) {
+    ok = false
+    app.log.error({ err }, 'error closing db pool during shutdown')
+  }
+
+  process.exit(ok ? 0 : 1)
 }
 process.on('SIGINT', () => void shutdown('SIGINT'))
 process.on('SIGTERM', () => void shutdown('SIGTERM'))

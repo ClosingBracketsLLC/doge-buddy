@@ -1,6 +1,7 @@
 import { Client } from 'pg'
+import { eq } from 'drizzle-orm'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { runMigrations } from '@doge-buddy/db'
+import { createDb, runMigrations, settings } from '@doge-buddy/db'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 // Isolated database per run so the test always starts fresh.
@@ -61,5 +62,22 @@ describe('migrations', () => {
       ),
     ).rejects.toThrow(/unique|duplicate/i)
     await c.end()
+  })
+
+  it('bumps updated_at on a drizzle update via $onUpdate', async () => {
+    const { db, pool } = createDb(testUrl)
+    try {
+      await db.insert(settings).values({ key: 'onupdate-test', value: { n: 1 } })
+      const [before] = await db.select().from(settings).where(eq(settings.key, 'onupdate-test'))
+
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      await db.update(settings).set({ value: { n: 2 } }).where(eq(settings.key, 'onupdate-test'))
+      const [after] = await db.select().from(settings).where(eq(settings.key, 'onupdate-test'))
+
+      expect(after!.updatedAt.getTime()).toBeGreaterThan(before!.updatedAt.getTime())
+    } finally {
+      await pool.end()
+    }
   })
 })

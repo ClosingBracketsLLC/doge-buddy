@@ -6,7 +6,7 @@ Requires: Robert's Railway account. One project, two services (ops + Postgres).
 2. Add a **PostgreSQL** database service. Copy its `DATABASE_URL` (private network URL preferred).
 3. Add a service from this GitHub repo:
    - Root directory: `/` (monorepo — build from root so workspace deps resolve)
-   - Build command: `corepack enable && pnpm install --frozen-lockfile`
+   - Build command: `corepack enable && pnpm install --frozen-lockfile --prod=false` (Railway builders set `NODE_ENV=production`, which makes pnpm skip devDependencies by default; `--prod=false` keeps devDependencies like `tsx`, which run the migrate/start commands, installed under that `NODE_ENV=production`)
    - Pre-deploy command: `pnpm --filter @doge-buddy/db migrate`
    - Start command: `pnpm --filter @doge-buddy/ops start`
    - Watch paths: `apps/ops/**`, `packages/**`

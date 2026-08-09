@@ -20,6 +20,17 @@ describe('GET /healthz', () => {
     await app.close()
   })
 
+  it('returns 200 with degraded status when the queue is stopped', async () => {
+    const app = buildServer({ pool, isQueueReady: () => false })
+    const res = await app.inject({ method: 'GET', url: '/healthz' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.status).toBe('degraded')
+    expect(body.db).toBe('ok')
+    expect(body.queue).toBe('stopped')
+    await app.close()
+  })
+
   it('returns 503 when the db is unreachable', async () => {
     const badPool = new pg.Pool({ connectionString: 'postgres://doge:doge@localhost:1/nope', connectionTimeoutMillis: 300 })
     const app = buildServer({ pool: badPool, isQueueReady: () => true })

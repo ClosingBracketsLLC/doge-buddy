@@ -18,12 +18,15 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       db = 'error'
     }
     const queue = deps.isQueueReady() ? 'ok' : 'stopped'
+    const status = db === 'ok' && queue === 'ok' ? 'ok' : 'degraded'
     const body = {
-      status: db === 'ok' ? 'ok' : 'degraded',
+      status,
       db,
       queue,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
     }
+    // A stopped queue is a graceful-drain state, not a liveness failure — stay 200 so
+    // orchestrators don't kill the service mid-drain. Only a db error is a hard failure.
     return reply.code(db === 'ok' ? 200 : 503).send(body)
   })
 

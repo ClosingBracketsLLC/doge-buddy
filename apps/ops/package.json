@@ -17,6 +17,7 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22",
     "@types/pg": "^8.15.0",
     "drizzle-orm": "^0.44.0",
     "tsx": "^4.20.0",
