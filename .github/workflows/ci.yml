@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: doge
+          POSTGRES_PASSWORD: doge
+          POSTGRES_DB: doge_buddy
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U doge -d doge_buddy"
+          --health-interval 2s --health-timeout 3s --health-retries 15
+    env:
+      DATABASE_URL: postgres://doge:doge@localhost:5433/doge_buddy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm --filter @doge-buddy/db migrate
+      - run: pnpm test
+      - run: pnpm db:check
