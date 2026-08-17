@@ -142,6 +142,18 @@ describe('CJSupplierAdapter.placeOrder', () => {
 
     expect(bodyOf(calls[1]!)).toEqual({ ...EXPECTED_CREATE_ORDER_BODY, sandbox: true })
   })
+
+  it('proceeds to createOrderV3 without crashing when the order-list response omits `list` entirely', async () => {
+    const { adapter, calls } = await makeAdapter((url) => {
+      if (url.includes('/shopping/order/list')) return ok({}) // no `list` key at all
+      return ok(loadFixture('order-create'))
+    })
+    const result = await adapter.placeOrder(PLACE_REQ)
+
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.url).toBe(`${BASE}/shopping/order/createOrderV3`)
+    expect(result).toEqual(EXPECTED_ORDER_RESULT)
+  })
 })
 
 describe('CJSupplierAdapter.payOrder', () => {

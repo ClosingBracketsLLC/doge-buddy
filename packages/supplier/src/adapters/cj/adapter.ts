@@ -156,13 +156,14 @@ export class CJSupplierAdapter implements SupplierAdapter {
   /** Idempotent on idempotencyKey: pre-checks order/list for an existing order (by orderNumber)
    * before ever calling createOrderV3, so a repeated call never creates a second CJ order. */
   async placeOrder(req: PlaceOrderRequest): Promise<PlaceOrderResult> {
-    const existing = await this.client.request<{ list: Parameters<typeof mapOrderAmounts>[0][] }>(
+    const existing = await this.client.request<{ list?: Parameters<typeof mapOrderAmounts>[0][] }>(
       'GET',
       '/shopping/order/list',
       { query: { orderNumbers: req.idempotencyKey }, points: 0, priority: true },
     )
-    if (existing.list.length > 0) {
-      return mapOrderAmounts(existing.list[0]!)
+    const existingList = existing.list ?? []
+    if (existingList.length > 0) {
+      return mapOrderAmounts(existingList[0]!)
     }
 
     const body = {
@@ -233,12 +234,16 @@ export class CJSupplierAdapter implements SupplierAdapter {
     return mapOrderTracking(data)
   }
 
+  // Disputes are post-shipment and lower urgency than the money-path calls above, so — unlike
+  // placeOrder/confirmOrder/payOrder/getOrderDetail — these respect the daily points budget
+  // instead of bypassing it with priority: true.
   async getDisputeOptions(supplierOrderId: string): Promise<DisputeOptions> {
-    const products = await this.client.request<Parameters<typeof mapDisputeOptions>[0]>(
+    const products = await this.client.request<{ list?: Parameters<typeof mapDisputeOptions>[0]['list'] }>(
       'GET',
       '/disputes/disputeProducts',
-      { query: { orderId: supplierOrderId }, points: 10, priority: true },
+      { query: { orderId: supplierOrderId }, points: 10 },
     )
+    const productList = products.list ?? []
     const confirm = await this.client.request<Parameters<typeof mapDisputeOptions>[1]>(
       'POST',
       '/disputes/disputeConfirmInfo',
@@ -246,12 +251,11 @@ export class CJSupplierAdapter implements SupplierAdapter {
         // FIXTURE-ASSUMPTION: disputeConfirmInfo takes the order + the disputable line items
         // returned by disputeProducts; the exact request shape is unconfirmed against a live
         // CJ response.
-        body: { orderId: supplierOrderId, products: products.list.map((p) => ({ lineItemId: p.lineItemId, vid: p.vid })) },
+        body: { orderId: supplierOrderId, products: productList.map((p) => ({ lineItemId: p.lineItemId, vid: p.vid })) },
         points: 10,
-        priority: true,
       },
     )
-    return mapDisputeOptions(products, confirm)
+    return mapDisputeOptions({ list: productList }, confirm)
   }
 
   async openDispute(req: Parameters<SupplierAdapter['openDispute']>[0]): Promise<{ disputeId: string }> {
@@ -266,7 +270,6 @@ export class CJSupplierAdapter implements SupplierAdapter {
         imageUrls: req.evidenceUrls ?? [],
       },
       points: 10,
-      priority: true,
     })
     return { disputeId: data.disputeId }
   }
@@ -275,7 +278,7 @@ export class CJSupplierAdapter implements SupplierAdapter {
     const data = await this.client.request<Parameters<typeof mapDisputeStatusDetail>[0]>(
       'GET',
       '/disputes/getDisputeDetail',
-      { query: { disputeId }, points: 10, priority: true },
+      { query: { disputeId }, points: 10 },
     )
     return mapDisputeStatusDetail(data)
   }
