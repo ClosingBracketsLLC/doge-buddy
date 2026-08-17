@@ -1,13 +1,29 @@
 import { createDb } from '@doge-buddy/db'
+import { ShopifyAdminClient, ShopifyTokenManager } from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, InMemoryCjTokenStore } from '@doge-buddy/supplier'
 import { loadConfig } from './config.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
-import { startQueue } from './queue.ts'
+import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
+import { registerCron, startQueue } from './queue.ts'
 import { buildServer } from './server.ts'
 
 const config = loadConfig(process.env)
 const { db, pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
 const queue = await startQueue(config.databaseUrl)
+
+if (config.shopify && config.adminBaseUrl) {
+  const { shopify, adminBaseUrl } = config
+  const tokenManager = new ShopifyTokenManager({
+    shopDomain: shopify.shopDomain,
+    clientId: shopify.clientId,
+    clientSecret: shopify.clientSecret,
+  })
+  const shopifyClient = new ShopifyAdminClient({ shopDomain: shopify.shopDomain, tokenManager })
+
+  await registerCron(queue.boss, 'shopify.webhook-audit', '0 6 * * *', async () => {
+    await shopifyWebhookAudit({ client: shopifyClient, adminBaseUrl })
+  })
+}
 
 const enqueue: WebhookDeps['enqueue'] = async (name, data) => {
   await queue.boss.send(name, data)
