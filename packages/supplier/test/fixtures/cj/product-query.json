@@ -1,0 +1,10 @@
+{
+  "pid": "cjp-1", "productNameEn": "Interactive Dog Rope Toy",
+  "description": "<p>Durable cotton rope toy.</p>",
+  "productImageSet": ["https://cdn.cj.example/rope.jpg", "https://cdn.cj.example/rope2.jpg"],
+  "categoryName": "Pet Toys",
+  "variants": [
+    { "vid": "cjv-1", "variantSku": "CJ-ROPE-S", "variantNameEn": "Small", "variantSellPrice": 6.20, "variantWeight": 120, "variantImage": "https://cdn.cj.example/rope-s.jpg" },
+    { "vid": "cjv-2", "variantSku": "CJ-ROPE-L", "variantNameEn": "Large", "variantSellPrice": 7.10, "variantWeight": 200, "variantImage": null }
+  ]
+}

@@ -1,0 +1,4 @@
+[
+  { "logisticName": "USPS+", "logisticPrice": 4.99, "logisticAging": "3-7" },
+  { "logisticName": "CJPacket US", "logisticPrice": "12.50", "logisticAging": "2" }
+]

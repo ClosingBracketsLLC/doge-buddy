@@ -1,0 +1,7 @@
+{
+  "pageNum": 1, "pageSize": 20, "total": 2,
+  "list": [
+    { "pid": "cjp-1", "productNameEn": "Interactive Dog Rope Toy", "productImage": "https://cdn.cj.example/rope.jpg", "sellPrice": 6.20, "listedNum": 1200, "categoryName": "Pet Toys" },
+    { "pid": "cjp-2", "productNameEn": "Slow Feeder Dog Bowl", "productImage": "https://cdn.cj.example/bowl.jpg", "sellPrice": "4.80", "listedNum": 800, "categoryName": "Pet Bowls" }
+  ]
+}
