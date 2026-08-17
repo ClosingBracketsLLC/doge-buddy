@@ -123,19 +123,6 @@ describe('CJSupplierAdapter read methods', () => {
     expect(balance).toEqual({ availableCents: 15320, frozenCents: 1000 })
     expect(client.pointsSpentToday()).toBe(0) // 0 points, priority
   })
-
-  it('write/order/dispute/webhook methods are not yet implemented', async () => {
-    const { adapter } = await makeAdapter({})
-    await expect(
-      adapter.placeOrder({
-        idempotencyKey: 'x',
-        shippingAddress: { name: 'a', line1: 'b', city: 'c', state: 'd', zip: 'e', country: 'US' },
-        items: [],
-        logisticName: 'x',
-        fromCountry: 'US',
-      }),
-    ).rejects.toThrow('implemented in Task 6')
-  })
 })
 
 describe('parseAgingDays', () => {

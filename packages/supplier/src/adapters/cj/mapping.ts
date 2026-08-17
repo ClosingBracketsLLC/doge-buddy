@@ -1,9 +1,15 @@
 import { usdToCents } from '@doge-buddy/core'
 import type {
+  DisputeOptions,
+  DisputeStatus,
+  PlaceOrderResult,
   ShippingOption,
+  SupplierOrderStatus,
+  SupplierOrderStatusValue,
   SupplierProductDetail,
   SupplierProductSummary,
   SupplierVariantDetail,
+  TrackingInfo,
   WarehouseStock,
 } from '../../types.ts'
 
@@ -134,4 +140,132 @@ export function parseAgingDays(aging: string): { minDays: number; maxDays: numbe
     // fall through to the fallback below
   }
   return AGING_FALLBACK
+}
+
+// --- Order lifecycle (Task 6) -----------------------------------------------------------
+
+/** Shared shape of createOrderV3's response and each entry of order/list's `list` array —
+ * both carry the same order-identity + amount fields, so one mapper covers both call sites. */
+interface CjOrderAmounts {
+  orderId: string
+  shipmentOrderId: string
+  productAmount: number | string
+  postageAmount: number | string
+  orderAmount: number | string
+}
+
+export function mapOrderAmounts(o: CjOrderAmounts): PlaceOrderResult {
+  return {
+    supplierOrderId: o.orderId,
+    shipmentOrderId: o.shipmentOrderId,
+    productAmountCents: usdToCents(o.productAmount),
+    postageAmountCents: usdToCents(o.postageAmount),
+    totalAmountCents: usdToCents(o.orderAmount),
+  }
+}
+
+/** Status normalization table for order/getOrderDetail's `orderStatus` (case-insensitive). */
+export function mapCjOrderStatus(raw: string): SupplierOrderStatusValue {
+  switch ((raw ?? '').toUpperCase()) {
+    case 'CREATED':
+    case 'IN_CART':
+      return 'created'
+    case 'UNPAID':
+      return 'unpaid'
+    case 'PENDING':
+      return 'pending'
+    case 'PROCESSING':
+      return 'processing'
+    case 'SHIPPED':
+      return 'shipped'
+    case 'DELIVERED':
+      return 'delivered'
+    case 'CANCELLED':
+      return 'cancelled'
+    default:
+      return 'unknown'
+  }
+}
+
+// FIXTURE-ASSUMPTION: trackNumber/logisticName/lastMileTrackNumber are CJ's field names on
+// shopping/order/getOrderDetail; trackNumber is absent until the order actually ships.
+interface CjOrderDetail {
+  orderId: string
+  orderStatus: string
+  trackNumber?: string
+  logisticName?: string
+  lastMileTrackNumber?: string
+}
+
+export function mapOrderStatusDetail(detail: CjOrderDetail): SupplierOrderStatus {
+  return { value: mapCjOrderStatus(detail.orderStatus), raw: detail.orderStatus }
+}
+
+export function mapOrderTracking(detail: CjOrderDetail): TrackingInfo | null {
+  if (!detail.trackNumber) return null
+  return {
+    trackingNumber: detail.trackNumber,
+    carrier: detail.logisticName,
+    lastMileTrackingNumber: detail.lastMileTrackNumber,
+  }
+}
+
+// --- Disputes (Task 6) -------------------------------------------------------------------
+
+// FIXTURE-ASSUMPTION: disputes/disputeProducts returns the order's disputable line items
+// (lineItemId/vid/maxRefundAmount); a non-empty list is our signal the order is disputable.
+interface CjDisputeProductsResponse {
+  list: { lineItemId: string; vid: string; maxRefundAmount: number | string }[]
+}
+
+// FIXTURE-ASSUMPTION: disputes/disputeConfirmInfo returns the overall maxRefundAmount, the
+// numeric expectResultOptions CJ allows (1 = refund, 2 = reissue), and the reason catalog.
+interface CjDisputeConfirmInfo {
+  maxRefundAmount: number | string
+  expectResultOptions: number[]
+  reasons: { reasonId: string; reasonNameEn: string }[]
+}
+
+const DISPUTE_RESULT_OPTIONS: Record<number, 'refund' | 'reissue'> = { 1: 'refund', 2: 'reissue' }
+
+export function mapDisputeOptions(
+  products: CjDisputeProductsResponse,
+  confirm: CjDisputeConfirmInfo,
+): DisputeOptions {
+  return {
+    disputable: products.list.length > 0,
+    maxRefundCents: usdToCents(confirm.maxRefundAmount),
+    reasons: confirm.reasons.map((r) => ({ id: r.reasonId, label: r.reasonNameEn })),
+    allowedKinds: confirm.expectResultOptions
+      .map((o) => DISPUTE_RESULT_OPTIONS[o])
+      .filter((k): k is 'refund' | 'reissue' => k !== undefined),
+  }
+}
+
+/** Dispute status normalization table for disputes/getDisputeDetail's `disputeStatus`
+ * (case-insensitive). */
+export function mapCjDisputeStatus(raw: string): DisputeStatus['value'] {
+  switch ((raw ?? '').toLowerCase()) {
+    case 'pending':
+    case 'processing':
+      return 'pending'
+    case 'refunded':
+      return 'refunded'
+    case 'reissued':
+      return 'reissued'
+    case 'rejected':
+    case 'closed':
+      return 'rejected'
+    default:
+      return 'unknown'
+  }
+}
+
+interface CjDisputeDetail {
+  disputeId: string
+  disputeStatus: string
+}
+
+export function mapDisputeStatusDetail(detail: CjDisputeDetail): DisputeStatus {
+  return { value: mapCjDisputeStatus(detail.disputeStatus), raw: detail.disputeStatus }
 }

@@ -1,0 +1,8 @@
+{
+  "maxRefundAmount": 18.29,
+  "expectResultOptions": [1, 2],
+  "reasons": [
+    { "reasonId": "r-42", "reasonNameEn": "Damaged on arrival" },
+    { "reasonId": "r-43", "reasonNameEn": "Package lost" }
+  ]
+}
