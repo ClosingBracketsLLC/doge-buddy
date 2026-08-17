@@ -94,7 +94,15 @@ export function webhookRoutes(deps: WebhookDeps): FastifyPluginAsync {
         return reply.code(401).send({ error: 'invalid signature' })
       }
 
-      const parsed = deps.cjParse(rawBody)
+      // A valid signature must always result in a recorded event, even if cjParse throws
+      // on malformed JSON — fall back to a deterministic id/topic so the request still
+      // gets a definite 200 instead of an unhandled 500.
+      let parsed: { externalEventId: string; type: string }
+      try {
+        parsed = deps.cjParse(rawBody)
+      } catch {
+        parsed = { externalEventId: sha256hex(rawBody), type: 'other' }
+      }
       const externalEventId = parsed.externalEventId || sha256hex(rawBody)
 
       const result = await recordAndEnqueue('cj', externalEventId, parsed.type, rawBody, 'webhook.cj.process')

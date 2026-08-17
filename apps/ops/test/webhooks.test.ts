@@ -26,10 +26,12 @@ describe('POST /webhooks', () => {
       enqueue,
       shopifyWebhookSecret: SHOPIFY_SECRET,
       cjVerify: (raw: Buffer) => raw.toString().includes('valid'),
-      cjParse: (raw: Buffer) => ({
-        externalEventId: (JSON.parse(raw.toString()) as { id?: string }).id ?? 'cj-x',
-        type: 'order',
-      }),
+      cjParse: (raw: Buffer) => {
+        // Deliberately unguarded JSON.parse, mirroring the real CJSupplierAdapter.parseWebhook
+        // — the route itself is responsible for catching a throw here (test 7).
+        const body = JSON.parse(raw.toString()) as { id?: string }
+        return { externalEventId: body.id ?? 'cj-x', type: 'order' }
+      },
       ...overrides,
     }
   }
@@ -247,6 +249,36 @@ describe('POST /webhooks', () => {
     const match = rows.find((r) => r.payload && (r.payload as { id?: string }).id === JSON.parse(body).id)
     expect(match).toBeDefined()
     expect(match!.externalEventId).toMatch(/^[a-f0-9]{64}$/)
+
+    await app.close()
+  })
+
+  it('7. CJ valid signature but cjParse throws on malformed JSON -> still 200, row with 64-hex external_event_id', async () => {
+    const deps = makeDeps()
+    const app = buildServer({
+      pool,
+      isQueueReady: () => true,
+      webhooks: deps,
+    })
+    // Passes cjVerify (contains "valid") but is not parseable JSON, so the test harness's
+    // cjParse (a bare JSON.parse, like the real CJSupplierAdapter.parseWebhook) throws.
+    const body = `not-json-but-valid-signature-{{{${Date.now()}-7`
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/webhooks/cj',
+      headers: { 'content-type': 'application/json' },
+      payload: Buffer.from(body),
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true, duplicate: false })
+
+    const rows = await db.select().from(webhookEvents).where(eq(webhookEvents.source, 'cj'))
+    const match = rows.find((r) => (r.payload as { raw?: string } | null)?.raw === Buffer.from(body).toString('base64'))
+    expect(match).toBeDefined()
+    expect(match!.externalEventId).toMatch(/^[a-f0-9]{64}$/)
+    expect(deps.enqueue).toHaveBeenCalledWith('webhook.cj.process', { webhookEventId: match!.id })
 
     await app.close()
   })
