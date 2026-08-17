@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assertCents, formatCents, grossMarginBps } from '@doge-buddy/core'
+import { assertCents, formatCents, grossMarginBps, usdToCents } from '@doge-buddy/core'
 
 describe('formatCents', () => {
   it('formats integer cents as USD', () => {
@@ -31,5 +31,21 @@ describe('assertCents', () => {
     expect(() => assertCents(100)).not.toThrow()
     expect(() => assertCents(1.5)).toThrow(RangeError)
     expect(() => assertCents(Number.MAX_SAFE_INTEGER + 1)).toThrow(RangeError)
+  })
+})
+
+describe('usdToCents', () => {
+  it('converts numbers and numeric strings to integer cents', () => {
+    expect(usdToCents(19.99)).toBe(1999)
+    expect(usdToCents('7.5')).toBe(750)
+    expect(usdToCents(0)).toBe(0)
+    expect(usdToCents('12')).toBe(1200)
+    expect(usdToCents(1.005)).toBe(101) // rounds half-up despite float representation
+  })
+  it('rejects negatives, non-finite, and junk strings', () => {
+    expect(() => usdToCents(-1)).toThrow(RangeError)
+    expect(() => usdToCents(Number.NaN)).toThrow(RangeError)
+    expect(() => usdToCents('12,50')).toThrow(RangeError)
+    expect(() => usdToCents('')).toThrow(RangeError)
   })
 })
