@@ -48,4 +48,10 @@ describe('usdToCents', () => {
     expect(() => usdToCents('12,50')).toThrow(RangeError)
     expect(() => usdToCents('')).toThrow(RangeError)
   })
+  it('handles exponential notation correctly', () => {
+    expect(usdToCents('1e2')).toBe(10000) // 100 USD
+    expect(usdToCents(1e2)).toBe(10000) // 100 USD
+    expect(usdToCents(1e-7)).toBe(0) // rounds to 0
+    expect(() => usdToCents(1e21)).toThrow(RangeError) // overflow
+  })
 })

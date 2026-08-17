@@ -19,14 +19,19 @@ export function grossMarginBps(revenueCents: number, costCents: number): number 
 }
 
 export function usdToCents(value: number | string): number {
-  const str = typeof value === 'string' ? value.trim() : String(value)
+  // First, validate and normalize to a number
+  const n = typeof value === 'string' ? Number(value.trim() === '' ? Number.NaN : value) : value
 
-  if (str === '') throw new RangeError(`invalid USD amount: ${String(value)}`)
-
-  const n = Number(str)
   if (!Number.isFinite(n) || n < 0) throw new RangeError(`invalid USD amount: ${String(value)}`)
 
-  const parts = str.split('.')
+  // Guard against huge magnitudes (toFixed switches to exponential at 1e21)
+  if (n >= 1e19) throw new RangeError(`invalid USD amount: ${String(value)}`)
+
+  // Normalize to decimal form (never exponential for n < 1e19)
+  const fixed = n.toFixed(3)
+
+  // Parse the normalized decimal string for half-up rounding
+  const parts = fixed.split('.')
   let cents = parseInt(parts[0] || '0', 10) * 100
 
   if (parts[1]) {
