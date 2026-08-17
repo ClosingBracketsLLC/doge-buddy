@@ -54,6 +54,17 @@ describe('loadConfig', () => {
     expect(c.cj).toEqual({ apiKey: 'api-key', openId: 'open-id' })
   })
 
+  it('accepts SUPPLIER=cj when the full CJ pair is set', () => {
+    const c = loadConfig({
+      DATABASE_URL: 'postgres://u:p@h:5432/d',
+      SUPPLIER: 'cj',
+      CJ_API_KEY: 'k',
+      CJ_OPEN_ID: 'o',
+    })
+    expect(c.supplier).toBe('cj')
+    expect(c.cj).toEqual({ apiKey: 'k', openId: 'o' })
+  })
+
   it('throws mentioning CJ_API_KEY when SUPPLIER=cj without the CJ pair', () => {
     expect(() =>
       loadConfig({
