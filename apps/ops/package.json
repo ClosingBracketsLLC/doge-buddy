@@ -6,7 +6,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts"
+    "start": "tsx src/index.ts",
+    "verify-live": "tsx scripts/verify-live.ts",
+    "replay-webhook": "tsx scripts/replay-webhook.ts"
   },
   "dependencies": {
     "@doge-buddy/core": "workspace:*",

@@ -21,9 +21,11 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
      `SHOPIFY_SHOP_DOMAIN=<store>.myshopify.com`, `SHOPIFY_CLIENT_ID=…`, `SHOPIFY_CLIENT_SECRET=…`, `SHOPIFY_WEBHOOK_SECRET=<same as client secret>`
   *Blocks:* 🔴 the **live-Shopify verification steps** of Phase 1 (scripted DRAFT-product creation, real webhook end-to-end). Building and fixture tests proceed without it. ~20–30 min.
   *Note:* Shopify retired admin-created custom apps for new apps (Jan 2026) — the Dev Dashboard flow above is the current path. If your account still shows the legacy "Develop apps" flow and it works, a legacy Admin API token also works — tell Claude which you ended up with.
+  *Check:* once `.env` is filled in, run `pnpm --filter @doge-buddy/ops verify-live` — the Shopify section should print `SHOPIFY OK`.
 
 - [ ] 🟡 **CJ Dropshipping account + API key.** cjdropshipping.com → register (free) → My CJ → Authorization → API → generate API key. Put in `apps/ops/.env`: `CJ_API_KEY=…` (CJ shows it as `<userNum>@api@<key>` — paste the whole string) and `CJ_OPEN_ID=…` (shown alongside; used to verify CJ webhooks).
   *Blocks:* 🔴 the **CJ live round-trip check** (token → `getBalance`) and recording real API fixtures. Mock-adapter and fixture builds proceed without it. ~15 min.
+  *Check:* once `.env` is filled in, run `pnpm --filter @doge-buddy/ops verify-live` — the CJ section should print `CJ OK`.
 
 - [ ] 🟡 **Ask Shopify support about the launch-store type** (do this early — the answer shapes Phase 7). Suggested message:
   > "I'm a developer building a store that must be free during development and become a live paid store at launch, without rebuilding. I understand Dev Dashboard development stores cannot be converted or transferred to a live store, and that the Partner Dashboard 'client transfer' store is the type meant for this. Can you confirm: (1) a Partner Dashboard client-transfer store can be transferred to my own merchant account and upgraded to a paid plan with all products/config intact, and (2) this is still the recommended path in 2026?"

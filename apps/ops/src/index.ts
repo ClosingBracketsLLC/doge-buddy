@@ -1,11 +1,12 @@
 import { createDb } from '@doge-buddy/db'
 import { ShopifyAdminClient, ShopifyTokenManager } from '@doge-buddy/shopify-admin'
-import { CJSupplierAdapter, CjHttpClient, InMemoryCjTokenStore } from '@doge-buddy/supplier'
+import { CJSupplierAdapter, CjHttpClient } from '@doge-buddy/supplier'
 import { loadConfig } from './config.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { registerCron, startQueue } from './queue.ts'
 import { buildServer } from './server.ts'
+import { DrizzleCjTokenStore } from './stores/cj-token-store.ts'
 
 const config = loadConfig(process.env)
 const { db, pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
@@ -31,7 +32,7 @@ const enqueue: WebhookDeps['enqueue'] = async (name, data) => {
 
 const cjAdapter = config.cj
   ? new CJSupplierAdapter({
-      client: new CjHttpClient({ apiKey: config.cj.apiKey, tokenStore: new InMemoryCjTokenStore() }),
+      client: new CjHttpClient({ apiKey: config.cj.apiKey, tokenStore: new DrizzleCjTokenStore(db) }),
       openId: config.cj.openId,
     })
   : undefined

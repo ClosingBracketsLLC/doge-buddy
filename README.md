@@ -20,3 +20,31 @@ pnpm --filter @doge-buddy/ops dev           # ops on :3001 (needs DATABASE_URL)
 
 Layout: `apps/ops` (Fastify + pg-boss + agents) · `apps/storefront` (Hydrogen, Phase 2) ·
 `packages/core|db|supplier|shopify-admin|gmail`.
+
+## Phase 1
+
+Two manual, credential-gated scripts in `apps/ops` back up the live Shopify/CJ integrations —
+neither is part of `pnpm test` (no mocked network); both are run by hand.
+
+**`verify-live`** — smoke-tests the real Shopify Admin API and CJ Dropshipping API using
+whatever credentials are in the environment. Each section (Shopify, CJ) is independent and
+prints `SKIPPED (missing ...)` when its vars aren't set; exits 1 only if a section that *was*
+attempted failed. Shopify creates a throwaway `DB-VERIFY <timestamp>` DRAFT product and deletes
+it again, so it's safe to run against a real store.
+
+```bash
+DATABASE_URL=postgres://doge:doge@localhost:5433/doge_buddy pnpm --filter @doge-buddy/ops verify-live
+```
+
+**`replay-webhook`** — one-command proof of the webhook dedup path: signs a sample `orders/paid`
+payload and POSTs it twice with the same `x-shopify-webhook-id` to a locally running ops
+instance, expecting `duplicate: false` then `duplicate: true`. Needs a second terminal running
+ops with a matching `SHOPIFY_WEBHOOK_SECRET`:
+
+```bash
+# terminal A
+SHOPIFY_WEBHOOK_SECRET=testsecret DATABASE_URL=postgres://doge:doge@localhost:5433/doge_buddy pnpm --filter @doge-buddy/ops dev
+
+# terminal B
+SHOPIFY_WEBHOOK_SECRET=testsecret pnpm --filter @doge-buddy/ops replay-webhook
+```

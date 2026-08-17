@@ -2,7 +2,10 @@
   "name": "@doge-buddy/supplier",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./contract": "./src/contract/adapter-contract.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

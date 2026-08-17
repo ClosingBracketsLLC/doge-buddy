@@ -1,5 +1,6 @@
 import { describe, it } from 'vitest'
-import { CJSupplierAdapter, CjHttpClient, InMemoryCjTokenStore, runAdapterContractTests } from '@doge-buddy/supplier'
+import { CJSupplierAdapter, CjHttpClient, InMemoryCjTokenStore } from '@doge-buddy/supplier'
+import { runAdapterContractTests } from '@doge-buddy/supplier/contract'
 
 const enabled = process.env.CJ_CONTRACT === '1' && !!process.env.CJ_API_KEY
 if (!enabled) {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { MockSupplierAdapter, runAdapterContractTests } from '@doge-buddy/supplier'
+import { MockSupplierAdapter } from '@doge-buddy/supplier'
+import { runAdapterContractTests } from '@doge-buddy/supplier/contract'
 
 runAdapterContractTests('mock', async () => {
   const adapter = new MockSupplierAdapter()
