@@ -42,8 +42,9 @@ instance, expecting `duplicate: false` then `duplicate: true`. Needs a second te
 ops with a matching `SHOPIFY_WEBHOOK_SECRET`:
 
 ```bash
-# terminal A
-SHOPIFY_WEBHOOK_SECRET=testsecret DATABASE_URL=postgres://doge:doge@localhost:5433/doge_buddy pnpm --filter @doge-buddy/ops dev
+# terminal A (config's Shopify vars are all-or-none, so all four must be set even though
+# only SHOPIFY_WEBHOOK_SECRET matters for this proof — the other three can be dummy values)
+SHOPIFY_SHOP_DOMAIN=dummy.myshopify.com SHOPIFY_CLIENT_ID=dummy SHOPIFY_CLIENT_SECRET=dummy SHOPIFY_WEBHOOK_SECRET=testsecret DATABASE_URL=postgres://doge:doge@localhost:5433/doge_buddy pnpm --filter @doge-buddy/ops dev
 
 # terminal B
 SHOPIFY_WEBHOOK_SECRET=testsecret pnpm --filter @doge-buddy/ops replay-webhook
