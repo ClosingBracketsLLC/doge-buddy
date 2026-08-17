@@ -1,4 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto'
+import { loadDotEnv } from './lib/load-env.ts'
 
 /**
  * One-command manual proof of the webhook dedup path: signs a sample `orders/paid` payload and
@@ -9,6 +10,10 @@ import { createHmac, randomUUID } from 'node:crypto'
  * Requires SHOPIFY_WEBHOOK_SECRET (must match the running ops instance's secret) and a running
  * `pnpm --filter @doge-buddy/ops dev` (or `start`) on PORT (default 3001).
  */
+
+if (loadDotEnv(import.meta.url)) {
+  console.log('replay-webhook: loaded apps/ops/.env (existing environment variables take precedence)')
+}
 
 const secret = process.env.SHOPIFY_WEBHOOK_SECRET
 if (!secret) {

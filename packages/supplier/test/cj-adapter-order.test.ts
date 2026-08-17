@@ -130,6 +130,20 @@ describe('CJSupplierAdapter.placeOrder', () => {
     expect(result).toEqual(EXPECTED_ORDER_RESULT)
   })
 
+  it('calls createOrderV3 when order/list returns an entry whose orderNumber does not match (CJ filter not trusted)', async () => {
+    const { adapter, calls } = await makeAdapter((url) => {
+      if (url.includes('/shopping/order/list')) return ok(loadFixture('order-list-nonmatching'))
+      return ok(loadFixture('order-create'))
+    })
+    const result = await adapter.placeOrder(PLACE_REQ)
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.url).toBe(`${BASE}/shopping/order/list?orderNumbers=DB-abc`)
+    expect(calls[1]!.url).toBe(`${BASE}/shopping/order/createOrderV3`)
+    expect(bodyOf(calls[1]!)).toEqual(EXPECTED_CREATE_ORDER_BODY)
+    expect(result).toEqual(EXPECTED_ORDER_RESULT)
+  })
+
   it('includes sandbox: true in the createOrderV3 body when constructed with sandbox: true', async () => {
     const { adapter, calls } = await makeAdapter(
       (url) => {

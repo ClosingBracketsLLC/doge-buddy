@@ -68,6 +68,14 @@ interface CjBalance {
   freezeAmount: number | string
 }
 
+// FIXTURE-ASSUMPTION: shopping/order/list's `list` array entries carry the same
+// orderId/shipmentOrderId/amount fields as createOrderV3's response (CjOrderAmounts in
+// mapping.ts), plus an `orderNumber` field echoing the client-supplied idempotency key. Neither
+// this shape nor the `orderNumbers` query param below (see placeOrder) has been confirmed
+// against a live CJ response, so placeOrder does not trust the server-side filter alone — it
+// re-checks `orderNumber` on each returned entry itself before treating it as a match.
+type CjOrderListEntry = Parameters<typeof mapOrderAmounts>[0] & { orderNumber: string }
+
 /**
  * CJ Dropshipping SupplierAdapter. Read methods (searchProducts, getProduct, getVariantStock,
  * quoteShipping, getBalance) were implemented in Phase 1 Task 5; the order lifecycle, payment,
@@ -154,16 +162,21 @@ export class CJSupplierAdapter implements SupplierAdapter {
   // --- Order lifecycle / payment / disputes / webhooks (Task 6) -------------------------
 
   /** Idempotent on idempotencyKey: pre-checks order/list for an existing order (by orderNumber)
-   * before ever calling createOrderV3, so a repeated call never creates a second CJ order. */
+   * before ever calling createOrderV3, so a repeated call never creates a second CJ order. The
+   * match is verified client-side against each entry's `orderNumber` — CJ's `orderNumbers` query
+   * filter is not trusted on its own (see the FIXTURE-ASSUMPTION on CjOrderListEntry above). */
   async placeOrder(req: PlaceOrderRequest): Promise<PlaceOrderResult> {
-    const existing = await this.client.request<{ list?: Parameters<typeof mapOrderAmounts>[0][] }>(
+    const existing = await this.client.request<{ list?: CjOrderListEntry[] }>(
       'GET',
       '/shopping/order/list',
+      // FIXTURE-ASSUMPTION: `orderNumbers` is CJ's query param name for filtering order/list by
+      // client order number — unconfirmed against live CJ docs/responses.
       { query: { orderNumbers: req.idempotencyKey }, points: 0, priority: true },
     )
     const existingList = existing.list ?? []
-    if (existingList.length > 0) {
-      return mapOrderAmounts(existingList[0]!)
+    const match = existingList.find((o) => o.orderNumber === req.idempotencyKey)
+    if (match) {
+      return mapOrderAmounts(match)
     }
 
     const body = {

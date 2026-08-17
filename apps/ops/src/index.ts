@@ -12,20 +12,6 @@ const config = loadConfig(process.env)
 const { db, pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
 const queue = await startQueue(config.databaseUrl)
 
-if (config.shopify && config.adminBaseUrl) {
-  const { shopify, adminBaseUrl } = config
-  const tokenManager = new ShopifyTokenManager({
-    shopDomain: shopify.shopDomain,
-    clientId: shopify.clientId,
-    clientSecret: shopify.clientSecret,
-  })
-  const shopifyClient = new ShopifyAdminClient({ shopDomain: shopify.shopDomain, tokenManager })
-
-  await registerCron(queue.boss, 'shopify.webhook-audit', '0 6 * * *', async () => {
-    await shopifyWebhookAudit({ client: shopifyClient, adminBaseUrl })
-  })
-}
-
 const enqueue: WebhookDeps['enqueue'] = async (name, data) => {
   await queue.boss.send(name, data)
 }
@@ -51,6 +37,25 @@ const webhookDeps: WebhookDeps = {
 }
 
 const app = buildServer({ pool, isQueueReady: queue.ready, webhooks: webhookDeps })
+
+if (config.shopify && config.adminBaseUrl) {
+  const { shopify, adminBaseUrl } = config
+  const tokenManager = new ShopifyTokenManager({
+    shopDomain: shopify.shopDomain,
+    clientId: shopify.clientId,
+    clientSecret: shopify.clientSecret,
+  })
+  const shopifyClient = new ShopifyAdminClient({ shopDomain: shopify.shopDomain, tokenManager })
+
+  await registerCron(queue.boss, 'shopify.webhook-audit', '0 6 * * *', async () => {
+    await shopifyWebhookAudit({ client: shopifyClient, adminBaseUrl })
+  })
+} else if (config.shopify) {
+  // Shopify creds are configured but ADMIN_BASE_URL isn't, so the daily webhook-audit cron
+  // (self-healing for dropped/misdirected subscriptions) never gets registered — a production
+  // deploy could silently lose this safety net, so make it loud instead of silent.
+  app.log.warn('shopify webhook-audit cron disabled: ADMIN_BASE_URL not set')
+}
 
 await app.listen({ port: config.port, host: config.host })
 app.log.info(`ops listening on :${config.port}`)

@@ -1,0 +1,13 @@
+{
+  "list": [
+    {
+      "orderId": "cjo-999",
+      "shipmentOrderId": "cjso-999",
+      "orderNumber": "DB-completely-different",
+      "productAmount": 1.00,
+      "postageAmount": 1.00,
+      "orderAmount": 2.00,
+      "orderStatus": "CREATED"
+    }
+  ]
+}

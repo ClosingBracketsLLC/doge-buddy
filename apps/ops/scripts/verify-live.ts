@@ -10,6 +10,7 @@ import {
 import { CJSupplierAdapter, CjHttpClient, InMemoryCjTokenStore, type CjTokenStore } from '@doge-buddy/supplier'
 import { loadConfig } from '../src/config.ts'
 import { DrizzleCjTokenStore } from '../src/stores/cj-token-store.ts'
+import { loadDotEnv } from './lib/load-env.ts'
 
 /**
  * Manual, credential-gated smoke test against the real Shopify Admin API and CJ Dropshipping
@@ -18,6 +19,10 @@ import { DrizzleCjTokenStore } from '../src/stores/cj-token-store.ts'
  * prints `SKIPPED (missing ...)` when its env vars aren't set; the process exits 1 only if a
  * section that *was* attempted failed.
  */
+
+if (loadDotEnv(import.meta.url)) {
+  console.log('verify-live: loaded apps/ops/.env (existing environment variables take precedence)')
+}
 
 const config = loadConfig(process.env)
 let failed = false
@@ -71,13 +76,30 @@ async function verifyShopify(): Promise<void> {
     const { productId } = await productSet(client, input)
     const numericId = productId.split('/').pop()
     const adminUrl = `https://${shopDomain}/admin/products/${numericId}`
-    console.log(`SHOPIFY: created "${title}" -> ${productId}`)
-    console.log(`SHOPIFY: admin URL -> ${adminUrl}`)
 
-    await productDelete(client, productId)
-    console.log('SHOPIFY: cleaned up (productDelete) — nothing left behind')
+    // Once the DRAFT product exists, cleanup must be attempted no matter what happens next in
+    // this span (including a hypothetical future step throwing) — otherwise a mid-span failure
+    // would leave a stray DRAFT product in the store with no error pointing at it.
+    let cleanupFailed = false
+    try {
+      console.log(`SHOPIFY: created "${title}" -> ${productId}`)
+      console.log(`SHOPIFY: admin URL -> ${adminUrl}`)
+    } finally {
+      try {
+        await productDelete(client, productId)
+        console.log('SHOPIFY: cleaned up (productDelete) — nothing left behind')
+      } catch (cleanupErr) {
+        cleanupFailed = true
+        console.error('SHOPIFY: cleanup FAILED —', formatError(cleanupErr))
+        console.error(`SHOPIFY: DRAFT product left behind at ${adminUrl}`)
+      }
+    }
 
-    console.log('SHOPIFY OK')
+    if (cleanupFailed) {
+      failed = true
+    } else {
+      console.log('SHOPIFY OK')
+    }
   } catch (err) {
     failed = true
     console.error('SHOPIFY: FAILED —', formatError(err))
