@@ -1,9 +1,11 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import type pg from 'pg'
+import { webhookRoutes, type WebhookDeps } from './http/webhooks.ts'
 
 export interface ServerDeps {
   pool: pg.Pool
   isQueueReady: () => boolean
+  webhooks?: WebhookDeps
 }
 
 export function buildServer(deps: ServerDeps): FastifyInstance {
@@ -29,6 +31,10 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // orchestrators don't kill the service mid-drain. Only a db error is a hard failure.
     return reply.code(db === 'ok' ? 200 : 503).send(body)
   })
+
+  if (deps.webhooks) {
+    app.register(webhookRoutes(deps.webhooks), { prefix: '/webhooks' })
+  }
 
   return app
 }

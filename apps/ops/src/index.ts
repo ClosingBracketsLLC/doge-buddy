@@ -1,12 +1,39 @@
 import { createDb } from '@doge-buddy/db'
+import { CJSupplierAdapter, CjHttpClient, InMemoryCjTokenStore } from '@doge-buddy/supplier'
 import { loadConfig } from './config.ts'
+import type { WebhookDeps } from './http/webhooks.ts'
 import { startQueue } from './queue.ts'
 import { buildServer } from './server.ts'
 
 const config = loadConfig(process.env)
-const { pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
+const { db, pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
 const queue = await startQueue(config.databaseUrl)
-const app = buildServer({ pool, isQueueReady: queue.ready })
+
+const enqueue: WebhookDeps['enqueue'] = async (name, data) => {
+  await queue.boss.send(name, data)
+}
+
+const cjAdapter = config.cj
+  ? new CJSupplierAdapter({
+      client: new CjHttpClient({ apiKey: config.cj.apiKey, tokenStore: new InMemoryCjTokenStore() }),
+      openId: config.cj.openId,
+    })
+  : undefined
+
+const webhookDeps: WebhookDeps = {
+  db,
+  enqueue,
+  ...(config.shopify ? { shopifyWebhookSecret: config.shopify.webhookSecret } : {}),
+  ...(cjAdapter
+    ? {
+        cjVerify: (rawBody: Buffer, headers: Record<string, string | string[] | undefined>) =>
+          cjAdapter.verifyWebhook(rawBody, headers),
+        cjParse: (rawBody: Buffer) => cjAdapter.parseWebhook(rawBody),
+      }
+    : {}),
+}
+
+const app = buildServer({ pool, isQueueReady: queue.ready, webhooks: webhookDeps })
 
 await app.listen({ port: config.port, host: config.host })
 app.log.info(`ops listening on :${config.port}`)

@@ -20,6 +20,11 @@ export async function startQueue(connectionString: string): Promise<Queue> {
   await boss.createQueue('demo.ping')
   await boss.work('demo.ping', demoPingHandler(db))
 
+  // Workers land in Task 12; creating the queues now keeps webhook enqueue-then-ack safe
+  // to call as soon as the ops service boots.
+  await boss.createQueue('webhook.shopify.process')
+  await boss.createQueue('webhook.cj.process')
+
   return {
     boss,
     ready: () => running,
