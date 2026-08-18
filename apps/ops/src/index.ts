@@ -1,8 +1,15 @@
 import { createDb } from '@doge-buddy/db'
-import { ShopifyAdminClient, ShopifyTokenManager } from '@doge-buddy/shopify-admin'
+import {
+  fulfillmentCreate,
+  fulfillmentTrackingInfoUpdate,
+  orderFulfillmentOrders,
+  ShopifyAdminClient,
+  ShopifyTokenManager,
+} from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdapter } from '@doge-buddy/supplier'
 import { createAlerter } from './alerts.ts'
 import { loadConfig } from './config.ts'
+import type { ShopifyFulfillmentOps } from './fulfillment/run-sync-tracking.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { registerCron, startQueue, type Queue } from './queue.ts'
@@ -69,17 +76,41 @@ const app = buildServer({ pool, isQueueReady: () => queue.ready(), webhooks: web
 
 const alert = createAlerter(db, app.log)
 
-queue = await startQueue(config.databaseUrl, { adapter: supplierAdapter, settings, alert })
+// Built here — before `startQueue` — because the `fulfillment.sync-tracking` queue it wires needs
+// a `shopifyOps` dep at registration time, not just at cron time (unlike the webhook-audit cron
+// below, which only needs the client once `adminBaseUrl` is also known). `shopifyClient` is
+// `undefined` whenever `config.shopify` is unset (dev without Shopify creds) — `shopifyOps` falls
+// back to a stub that throws `'shopify not configured'` on any call in that case, so a
+// `fulfillment.sync-tracking` job simply fails/retries (and eventually needs an operator) rather
+// than crashing on a missing method.
+const shopifyClient = config.shopify
+  ? new ShopifyAdminClient({
+      shopDomain: config.shopify.shopDomain,
+      tokenManager: new ShopifyTokenManager({
+        shopDomain: config.shopify.shopDomain,
+        clientId: config.shopify.clientId,
+        clientSecret: config.shopify.clientSecret,
+      }),
+    })
+  : undefined
 
-if (config.shopify && config.adminBaseUrl) {
-  const { shopify, adminBaseUrl } = config
-  const tokenManager = new ShopifyTokenManager({
-    shopDomain: shopify.shopDomain,
-    clientId: shopify.clientId,
-    clientSecret: shopify.clientSecret,
-  })
-  const shopifyClient = new ShopifyAdminClient({ shopDomain: shopify.shopDomain, tokenManager })
+const shopifyNotConfigured = (): Promise<never> => Promise.reject(new Error('shopify not configured'))
+const shopifyOps: ShopifyFulfillmentOps = shopifyClient
+  ? {
+      orderFulfillmentOrders: (orderGid) => orderFulfillmentOrders(shopifyClient, orderGid),
+      fulfillmentCreate: (args) => fulfillmentCreate(shopifyClient, args),
+      fulfillmentTrackingInfoUpdate: (gid, tracking) => fulfillmentTrackingInfoUpdate(shopifyClient, gid, tracking),
+    }
+  : {
+      orderFulfillmentOrders: shopifyNotConfigured,
+      fulfillmentCreate: shopifyNotConfigured,
+      fulfillmentTrackingInfoUpdate: shopifyNotConfigured,
+    }
 
+queue = await startQueue(config.databaseUrl, { adapter: supplierAdapter, settings, alert, shopify: shopifyOps })
+
+if (config.shopify && config.adminBaseUrl && shopifyClient) {
+  const { adminBaseUrl } = config
   await registerCron(queue.boss, 'shopify.webhook-audit', '0 6 * * *', async () => {
     await shopifyWebhookAudit({ client: shopifyClient, adminBaseUrl })
   })

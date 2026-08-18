@@ -3,39 +3,28 @@ import type { SupplierAdapter } from '@doge-buddy/supplier'
 import PgBoss from 'pg-boss'
 import type { createAlerter } from './alerts.ts'
 import type { PlaceOrderDeps } from './fulfillment/run-place-order.ts'
+import { type ShopifyFulfillmentOps, type SyncTrackingDeps } from './fulfillment/run-sync-tracking.ts'
 import type { SendOpts } from './fulfillment/types.ts'
 import { demoPingHandler } from './jobs/demo-ping.ts'
 import { fulfillmentPayOrderHandler } from './jobs/fulfillment-pay-order.ts'
 import { fulfillmentPlaceOrderHandler } from './jobs/fulfillment-place-order.ts'
+import { fulfillmentSyncTrackingHandler } from './jobs/fulfillment-sync-tracking.ts'
 import { webhookProcessHandler } from './jobs/webhook-process.ts'
 import type { createSettings } from './settings.ts'
-
-/**
- * Shopify fulfillment operations needed by `run-sync-tracking.ts` (Task 13) and
- * `run-reconcile.ts` (Task 14). Named here — even though nothing in this file calls it yet,
- * since both of those queues get placeholder handlers for now — so `FulfillmentQueueDeps` can
- * carry the (optional) shape its future callers will need without those tasks having to touch
- * this interface again.
- */
-export interface StubbableShopifyOps {
-  orderFulfillmentOrders(orderGid: string): Promise<{ id: string; status: string }[]>
-  fulfillmentCreate(args: {
-    fulfillmentOrderId: string
-    trackingNumber: string
-    trackingCompany: string
-    notifyCustomer: boolean
-  }): Promise<{ fulfillmentId: string }>
-  fulfillmentTrackingInfoUpdate(
-    gid: string,
-    tracking: { trackingNumber: string; trackingCompany: string },
-  ): Promise<void>
-}
 
 export interface FulfillmentQueueDeps {
   adapter: SupplierAdapter
   settings: ReturnType<typeof createSettings>
   alert: ReturnType<typeof createAlerter>
-  shopify?: StubbableShopifyOps
+  /**
+   * Shopify fulfillment operations backing `fulfillment.sync-tracking` (Task 13) and, later,
+   * `fulfillment.reconcile` (Task 14). Optional here purely so tests that never touch either of
+   * those queues (e.g. `queue-fulfillment.test.ts`'s place-order wiring checks) don't need to
+   * supply one — when omitted, `startQueue` below wires a stub that throws
+   * `'shopify not configured'` on any call, same as `index.ts` does when `config.shopify` is
+   * unset (see that file's own stub for the production-path reasoning).
+   */
+  shopify?: ShopifyFulfillmentOps
 }
 
 export interface Queue {
@@ -103,6 +92,21 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
     enqueue,
   }
 
+  // No-config fallback: mirrors `index.ts`'s own `config.shopify`-gated stub so a caller that
+  // doesn't wire `deps.shopify` (unconfigured Shopify creds, or a test that never exercises this
+  // queue) still gets a `FulfillmentQueueDeps.shopify`-shaped object — one that fails loudly (job
+  // retries, then dead-letters) instead of throwing a `TypeError` on a missing method.
+  const shopifyNotConfigured = (): Promise<never> => Promise.reject(new Error('shopify not configured'))
+  const syncTrackingDeps: SyncTrackingDeps = {
+    db,
+    alert: deps.alert,
+    shopifyOps: deps.shopify ?? {
+      orderFulfillmentOrders: shopifyNotConfigured,
+      fulfillmentCreate: shopifyNotConfigured,
+      fulfillmentTrackingInfoUpdate: shopifyNotConfigured,
+    },
+  }
+
   await createQueueRetrying(boss, 'demo.ping')
   await boss.work('demo.ping', demoPingHandler(db))
 
@@ -131,11 +135,7 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
   await boss.work(PAY_ORDER_QUEUE, { includeMetadata: true }, fulfillmentPayOrderHandler(placeOrderDeps))
 
   await createQueueRetrying(boss, SYNC_TRACKING_QUEUE, { name: SYNC_TRACKING_QUEUE, policy: 'singleton' })
-  await boss.work(SYNC_TRACKING_QUEUE, async () => {
-    // executeSyncTracking lands in Task 13 (run-sync-tracking.ts). Queue exists now so Task 12's
-    // CJ LOGISTICS webhook routing has a real send() target; no cron involved here.
-    throw new Error('fulfillment.sync-tracking lands in Task 13')
-  })
+  await boss.work(SYNC_TRACKING_QUEUE, fulfillmentSyncTrackingHandler(syncTrackingDeps))
 
   // No singletonKey producer for these two (both are cron-driven sweeps, not per-entity jobs),
   // so the default 'standard' policy is correct — left unspecified deliberately.

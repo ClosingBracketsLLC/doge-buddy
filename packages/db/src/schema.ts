@@ -99,6 +99,11 @@ export const supplierOrders = pgTable('supplier_orders', {
   totalAmountCents: integer('total_amount_cents'),
   trackingNumber: text('tracking_number'),
   trackingSyncedToShopifyAt: timestamp('tracking_synced_to_shopify_at', { withTimezone: true }),
+  // The `tracking_number` value that was actually pushed to Shopify as of
+  // `tracking_synced_to_shopify_at` — distinct from `tracking_number` itself, which can change
+  // again after a sync (e.g. a carrier correction). `run-sync-tracking.ts` compares the two to
+  // decide no-op vs. update without needing a second round-trip to Shopify.
+  trackingSyncedValue: text('tracking_synced_value'),
   shopifyFulfillmentGid: text('shopify_fulfillment_gid'),
   attempts: integer('attempts').notNull().default(0),
   lastError: text('last_error'),

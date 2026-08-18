@@ -15,6 +15,13 @@
       "when": 1787077192898,
       "tag": "0001_next_darwin",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787090449809,
+      "tag": "0002_overconfident_king_bedlam",
+      "breakpoints": true
     }
   ]
 }
