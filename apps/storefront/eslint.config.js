@@ -215,6 +215,23 @@ export default [
     },
   },
   {
+    // Playwright specs (apps/storefront/e2e) live outside the app's TS
+    // program and are parsed against their own tsconfig instead of the app
+    // tsconfig.json used above. The app program sets `types:
+    // ["vitest/globals", ...]`; folding e2e files into it would let a
+    // future spec that forgets to `import {test, expect} from
+    // '@playwright/test'` silently typecheck against vitest's ambient
+    // `test`/`expect` (wrong fixture signature) instead of failing loudly.
+    // See apps/storefront/e2e/tsconfig.json.
+    files: ['e2e/**/*.ts'],
+    languageOptions: {
+      parserOptions: {
+        project: './e2e/tsconfig.json',
+        tsconfigRootDir: __dirname,
+      },
+    },
+  },
+  {
     files: ['**/.eslintrc.cjs'],
     languageOptions: {
       globals: {

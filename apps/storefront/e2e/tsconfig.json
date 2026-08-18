@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // Deliberately NOT inheriting the app program's "types" (which includes
+    // "vitest/globals"). This is a separate TS project so Playwright's
+    // `test`/`expect` (explicitly imported from `@playwright/test` in every
+    // spec) can't silently resolve to vitest's ambient globals instead —
+    // an empty `types` array disables *automatic* global @types inclusion
+    // without affecting explicit imports.
+    "types": []
+  },
+  "include": ["**/*.ts"]
+}
