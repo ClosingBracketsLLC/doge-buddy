@@ -176,12 +176,17 @@ export function planFulfillment(inputs: FulfillmentInputs): Decision {
     }
   }
 
+  // items is aggregated per supplierVariantId from the same neededBySupplierVariant map gate 4
+  // already built (not a fresh map over resolvedItems) — two line items resolving to the same
+  // supplier variant must collapse into one entry with the summed quantity here. Emitting one row
+  // per line item would let a duplicate supplierVariantId reach the supplier's order API, which
+  // is an unverified hazard for CJ (controller ruling, Task 5 review).
   return {
     kind: 'proceed',
     logisticName: chosenFreight.name,
     freightCents,
     supplierItemsCents,
     projectedTotalCents,
-    items: resolvedItems.map((item) => ({ supplierVariantId: item.supplierVariantId, quantity: item.quantity })),
+    items: [...neededBySupplierVariant].map(([supplierVariantId, quantity]) => ({ supplierVariantId, quantity })),
   }
 }

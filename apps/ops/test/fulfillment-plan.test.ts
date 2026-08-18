@@ -130,6 +130,36 @@ describe('planFulfillment', () => {
     })
   })
 
+  it('proceed.items is aggregated per supplierVariantId: two line items mapping to the same supplier variant produce ONE entry with the summed quantity (CJ hazard: duplicate rows are unsafe)', () => {
+    // Two distinct Shopify line items both resolve to sv-1. Naively mapping resolvedItems 1:1
+    // would emit two { supplierVariantId: 'sv-1', ... } rows in proceed.items — this is the
+    // unverified CJ hazard the controller flagged in Task 5's review. items must instead be
+    // built from the same aggregated neededBySupplierVariant map gate 4 already computes.
+    const base = baseInputs()
+    const VARIANT_3 = 'gid://shopify/ProductVariant/3'
+    const mappings = new Map(base.mappings)
+    mappings.set(VARIANT_3, { supplierVariantId: 'sv-1', supplierCostCents: 500 })
+    const stock = new Map(base.stock)
+    stock.set('sv-1', [{ countryCode: 'US', quantity: 50, verified: true }])
+    const inputs: FulfillmentInputs = {
+      ...base,
+      mappings,
+      stock,
+      order: {
+        ...base.order,
+        lineItems: [
+          { variantGid: VARIANT_1, quantity: 3 },
+          { variantGid: VARIANT_3, quantity: 4 },
+        ],
+      },
+    }
+    const d = planFulfillment(inputs)
+    expect(d.kind).toBe('proceed')
+    expect((d as { items: { supplierVariantId: string; quantity: number }[] }).items).toEqual([
+      { supplierVariantId: 'sv-1', quantity: 7 },
+    ])
+  })
+
   describe('gate 4: US stock', () => {
     it('no US stock entry at all → no_us_stock', () => {
       const d = planFulfillment(withStock({ 'sv-1': [{ countryCode: 'CN', quantity: 999, verified: true }] }))
