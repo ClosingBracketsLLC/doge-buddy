@@ -8,9 +8,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ## Now / this week
 
-- [ ] 🟡 **Merge the Phase 0 PR.** Create it at
-  https://github.com/ClosingBracketsLLC/doge-buddy/pull/new/feat/phase-0-foundations (branch is already pushed), review, merge.
-  *Blocks:* nothing today (Phase 1 stacks on the Phase 0 branch), but the Phase 1 PR should retarget/land after it. ~5 min.
+- [x] ~~Merge the Phase 0 PR.~~ **Done differently (2026-08-18):** Phases 0, 1, and 2 were merged into local `main` directly at your request (all suites green; branches deleted locally). Remaining: `git push origin main` when you want GitHub caught up — or tell Claude to push it. The stale `feat/phase-0-foundations` / `feat/phase-1-plumbing` branches on origin can be deleted after the push.
 
 - [ ] 🟡 **Test Shopify store: API credentials.** Using your other Shopify account:
   1. Note the store's `*.myshopify.com` domain.
