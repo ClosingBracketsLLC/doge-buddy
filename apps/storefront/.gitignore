@@ -8,3 +8,5 @@ node_modules
 .shopify
 .react-router
 tsconfig.tsbuildinfo
+/playwright-report
+/test-results
