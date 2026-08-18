@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   ShopifyAdminClient, ShopifyTokenManager, ShopifyUserError,
-  fulfillmentCreate, fulfillmentTrackingInfoUpdate, inventorySetQuantities, listPublications,
-  listWebhookSubscriptions, orderFulfillmentOrders, productDelete, productSet, publishablePublish,
-  refundCreate, webhookSubscriptionCreate,
+  collectionCreate, findProductByHandle, fulfillmentCreate, fulfillmentTrackingInfoUpdate,
+  inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
+  listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, productDelete,
+  productSet, publishablePublish, refundCreate, webhookSubscriptionCreate,
 } from '@doge-buddy/shopify-admin'
 
 const tokenOk = () => new Response(JSON.stringify({ access_token: 'tok', expires_in: 86399 }), { status: 200 })
@@ -225,5 +226,93 @@ describe('productDelete', () => {
   it('throws ShopifyUserError on userErrors', async () => {
     const { client } = makeClient(() => gql({ productDelete: { userErrors: [{ message: 'not found' }] } }))
     await expect(productDelete(client, 'gid://shopify/Product/9')).rejects.toThrow(ShopifyUserError)
+  })
+})
+
+describe('metafieldDefinitionCreate', () => {
+  const def = { name: 'Ships from', namespace: 'dogebuddy', key: 'ships_from', type: 'single_line_text_field', ownerType: 'PRODUCT' as const }
+  it('creates with PUBLIC_READ storefront access', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ metafieldDefinitionCreate: { createdDefinition: { id: 'gid://shopify/MetafieldDefinition/1' }, userErrors: [] } }))
+    const result = await metafieldDefinitionCreate(client, def)
+    expect(result).toEqual({ id: 'gid://shopify/MetafieldDefinition/1' })
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/mutation[\s\S]*metafieldDefinitionCreate/)
+    expect(variables).toEqual({ definition: { ...def, access: { storefront: 'PUBLIC_READ' } } })
+    expect((variables as any).definition.access).toEqual({ storefront: 'PUBLIC_READ' })
+  })
+  it('throws ShopifyUserError on userErrors', async () => {
+    const { client } = makeClient(() =>
+      gql({ metafieldDefinitionCreate: { createdDefinition: null, userErrors: [{ message: 'Key is in use' }] } }))
+    await expect(metafieldDefinitionCreate(client, def)).rejects.toThrow(ShopifyUserError)
+  })
+})
+
+describe('listMetafieldDefinitions', () => {
+  it('sends the namespace and PRODUCT ownerType, maps id + key', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ metafieldDefinitions: { nodes: [{ id: 'gid://shopify/MetafieldDefinition/1', key: 'ships_from' }] } }))
+    const result = await listMetafieldDefinitions(client, 'dogebuddy')
+    expect(result).toEqual([{ id: 'gid://shopify/MetafieldDefinition/1', key: 'ships_from' }])
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*metafieldDefinitions/)
+    expect(query).toContain('ownerType: PRODUCT')
+    expect(variables).toEqual({ namespace: 'dogebuddy' })
+  })
+})
+
+describe('collectionCreate', () => {
+  const input = { title: 'Doge Tees', handle: 'doge-tees', tagCondition: 'doge-tees' }
+  it('builds a smart collection ruleSet, maps id', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ collectionCreate: { collection: { id: 'gid://shopify/Collection/1' }, userErrors: [] } }))
+    const result = await collectionCreate(client, input)
+    expect(result).toEqual({ id: 'gid://shopify/Collection/1' })
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/mutation[\s\S]*collectionCreate/)
+    expect(variables).toEqual({
+      input: {
+        title: 'Doge Tees',
+        handle: 'doge-tees',
+        ruleSet: {
+          appliedDisjunctively: false,
+          rules: [{ column: 'TAG', relation: 'EQUALS', condition: 'doge-tees' }],
+        },
+      },
+    })
+  })
+  it('throws ShopifyUserError on userErrors', async () => {
+    const { client } = makeClient(() =>
+      gql({ collectionCreate: { collection: null, userErrors: [{ message: 'Handle already in use' }] } }))
+    await expect(collectionCreate(client, input)).rejects.toThrow(ShopifyUserError)
+  })
+})
+
+describe('listCollections', () => {
+  it('maps collections and sends no variables', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ collections: { nodes: [{ id: 'gid://shopify/Collection/1', handle: 'doge-tees' }] } }))
+    const result = await listCollections(client)
+    expect(result).toEqual([{ id: 'gid://shopify/Collection/1', handle: 'doge-tees' }])
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*collections/)
+    expect(variables).toBeUndefined()
+  })
+})
+
+describe('findProductByHandle', () => {
+  it("sends handle:'<handle>' as the query variable, maps the first node", async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ products: { nodes: [{ id: 'gid://shopify/Product/9' }] } }))
+    const result = await findProductByHandle(client, 'doge-tee')
+    expect(result).toEqual({ id: 'gid://shopify/Product/9' })
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*products/)
+    expect(variables).toEqual({ query: "handle:'doge-tee'" })
+  })
+  it('returns null when there are no matching nodes', async () => {
+    const { client } = makeClient(() => gql({ products: { nodes: [] } }))
+    const result = await findProductByHandle(client, 'missing-handle')
+    expect(result).toBeNull()
   })
 })

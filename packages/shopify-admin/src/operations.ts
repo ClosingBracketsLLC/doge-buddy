@@ -327,3 +327,132 @@ export async function productDelete(client: ShopifyAdminClient, productGid: stri
   const data = await client.graphql<ProductDeleteData>(PRODUCT_DELETE_MUTATION, { input: { id: productGid } })
   assertNoUserErrors(data, 'productDelete')
 }
+
+// ---------------------------------------------------------------------------
+// metafieldDefinitionCreate
+// ---------------------------------------------------------------------------
+
+const METAFIELD_DEFINITION_CREATE_MUTATION = `#graphql
+  mutation MetafieldDefinitionCreate($definition: MetafieldDefinitionInput!) {
+    metafieldDefinitionCreate(definition: $definition) {
+      createdDefinition { id }
+      userErrors { field message }
+    }
+  }
+`
+
+interface MetafieldDefinitionCreateData {
+  metafieldDefinitionCreate: { createdDefinition: { id: string }; userErrors: UserErrorEntry[] }
+}
+
+export async function metafieldDefinitionCreate(
+  client: ShopifyAdminClient,
+  def: { name: string; namespace: string; key: string; type: string; ownerType: 'PRODUCT' },
+): Promise<{ id: string }> {
+  const definition = { ...def, access: { storefront: 'PUBLIC_READ' } }
+  const data = await client.graphql<MetafieldDefinitionCreateData>(METAFIELD_DEFINITION_CREATE_MUTATION, { definition })
+  assertNoUserErrors(data, 'metafieldDefinitionCreate')
+  return { id: data.metafieldDefinitionCreate.createdDefinition.id }
+}
+
+// ---------------------------------------------------------------------------
+// listMetafieldDefinitions
+// ---------------------------------------------------------------------------
+
+const LIST_METAFIELD_DEFINITIONS_QUERY = `#graphql
+  query ListMetafieldDefinitions($namespace: String) {
+    metafieldDefinitions(first: 250, ownerType: PRODUCT, namespace: $namespace) {
+      nodes { id key }
+    }
+  }
+`
+
+interface ListMetafieldDefinitionsData {
+  metafieldDefinitions: { nodes: { id: string; key: string }[] }
+}
+
+export async function listMetafieldDefinitions(
+  client: ShopifyAdminClient,
+  namespace: string,
+): Promise<{ id: string; key: string }[]> {
+  const data = await client.graphql<ListMetafieldDefinitionsData>(LIST_METAFIELD_DEFINITIONS_QUERY, { namespace })
+  return data.metafieldDefinitions.nodes.map((n) => ({ id: n.id, key: n.key }))
+}
+
+// ---------------------------------------------------------------------------
+// collectionCreate
+// ---------------------------------------------------------------------------
+
+const COLLECTION_CREATE_MUTATION = `#graphql
+  mutation CollectionCreate($input: CollectionInput!) {
+    collectionCreate(input: $input) {
+      collection { id }
+      userErrors { field message }
+    }
+  }
+`
+
+interface CollectionCreateData {
+  collectionCreate: { collection: { id: string }; userErrors: UserErrorEntry[] }
+}
+
+export async function collectionCreate(
+  client: ShopifyAdminClient,
+  input: { title: string; handle: string; tagCondition: string },
+): Promise<{ id: string }> {
+  const collectionInput = {
+    title: input.title,
+    handle: input.handle,
+    ruleSet: {
+      appliedDisjunctively: false,
+      rules: [{ column: 'TAG', relation: 'EQUALS', condition: input.tagCondition }],
+    },
+  }
+  const data = await client.graphql<CollectionCreateData>(COLLECTION_CREATE_MUTATION, { input: collectionInput })
+  assertNoUserErrors(data, 'collectionCreate')
+  return { id: data.collectionCreate.collection.id }
+}
+
+// ---------------------------------------------------------------------------
+// listCollections
+// ---------------------------------------------------------------------------
+
+const LIST_COLLECTIONS_QUERY = `#graphql
+  query ListCollections {
+    collections(first: 250) {
+      nodes { id handle }
+    }
+  }
+`
+
+interface ListCollectionsData {
+  collections: { nodes: { id: string; handle: string }[] }
+}
+
+export async function listCollections(client: ShopifyAdminClient): Promise<{ id: string; handle: string }[]> {
+  const data = await client.graphql<ListCollectionsData>(LIST_COLLECTIONS_QUERY)
+  return data.collections.nodes.map((n) => ({ id: n.id, handle: n.handle }))
+}
+
+// ---------------------------------------------------------------------------
+// findProductByHandle
+// ---------------------------------------------------------------------------
+
+const FIND_PRODUCT_BY_HANDLE_QUERY = `#graphql
+  query FindProductByHandle($query: String!) {
+    products(first: 1, query: $query) {
+      nodes { id }
+    }
+  }
+`
+
+interface FindProductByHandleData {
+  products: { nodes: { id: string }[] }
+}
+
+export async function findProductByHandle(client: ShopifyAdminClient, handle: string): Promise<{ id: string } | null> {
+  const query = `handle:'${handle}'`
+  const data = await client.graphql<FindProductByHandleData>(FIND_PRODUCT_BY_HANDLE_QUERY, { query })
+  const node = data.products.nodes[0]
+  return node ? { id: node.id } : null
+}
