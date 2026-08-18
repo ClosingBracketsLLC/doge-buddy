@@ -4,3 +4,20 @@
  */
 
 @import 'tailwindcss';
+
+@font-face { font-family: 'Poppins'; font-weight: 400; font-display: swap; src: url('../assets/fonts/poppins-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Poppins'; font-weight: 500; font-display: swap; src: url('../assets/fonts/poppins-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Poppins'; font-weight: 700; font-display: swap; src: url('../assets/fonts/poppins-latin-700-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Poppins'; font-weight: 800; font-display: swap; src: url('../assets/fonts/poppins-latin-800-normal.woff2') format('woff2'); }
+
+@theme {
+  --color-ink: #10171a;
+  --color-surface: #fff8ec;         /* cream tint of brand beige */
+  --color-surface-raised: #fffdf7;  /* cards on cream */
+  --color-badge: #ffe3ae;           /* full brand beige — badges/cards only */
+  --color-cta: #ff3641;
+  --color-accent: #ffb327;
+  --color-info: #145069;
+  --font-sans: 'Poppins', system-ui, sans-serif;
+  --font-display: 'Poppins', system-ui, sans-serif; /* FunkyDori swap point */
+}
