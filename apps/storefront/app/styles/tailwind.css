@@ -9,15 +9,29 @@
 @font-face { font-family: 'Poppins'; font-weight: 500; font-display: swap; src: url('../assets/fonts/poppins-latin-500-normal.woff2') format('woff2'); }
 @font-face { font-family: 'Poppins'; font-weight: 700; font-display: swap; src: url('../assets/fonts/poppins-latin-700-normal.woff2') format('woff2'); }
 @font-face { font-family: 'Poppins'; font-weight: 800; font-display: swap; src: url('../assets/fonts/poppins-latin-800-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Lilita One'; font-weight: 400; font-display: swap; src: url('../assets/fonts/lilita-one-latin-400-normal.woff2') format('woff2'); }
 
 @theme {
+  /* Retro badge Americana palette — every value derives from the brand sheet
+     (assets/Doge_Buddy_Brand/DogeBuddy Info.txt). Only place hex is allowed. */
   --color-ink: #10171a;
-  --color-surface: #fff8ec;         /* cream tint of brand beige */
-  --color-surface-raised: #fffdf7;  /* cards on cream */
-  --color-badge: #ffe3ae;           /* full brand beige — badges/cards only */
+  --color-paper: #fdf3e0;           /* warm paper, the page ground */
+  --color-surface: #fdf3e0;         /* alias of paper (pre-redesign name, used widely) */
+  --color-surface-raised: #fffcf5;  /* cards/stickers on paper */
+  --color-badge: #ffe3ae;           /* full brand beige — badges/tags */
   --color-cta: #ff3641;
   --color-accent: #ffb327;
-  --color-info: #145069;
+  --color-info: #145069;            /* brand cerulean — banners, links */
+  --color-sky: #00e1ff;             /* buddy-tag accent, sparing */
+  --color-gold: #f6ce18;
+  --color-gold-dark: #bb6402;
+  --color-gold-light: #f5f39e;
   --font-sans: 'Poppins', system-ui, sans-serif;
-  --font-display: 'Poppins', system-ui, sans-serif; /* FunkyDori swap point */
+  --font-display: 'Lilita One', system-ui, sans-serif; /* FunkyDori swap point */
+}
+
+/* Lilita One ships a single 400 weight; browsers would synthesize an ugly
+   faux-bold under the skeleton's font-bold/extrabold heading classes. */
+.font-display {
+  font-weight: 400;
 }

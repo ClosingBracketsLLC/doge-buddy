@@ -11,7 +11,7 @@ import {
   useRouteLoaderData,
 } from 'react-router';
 import type {Route} from './+types/root';
-import poppins800 from '~/assets/fonts/poppins-latin-800-normal.woff2';
+import lilitaOne from '~/assets/fonts/lilita-one-latin-400-normal.woff2';
 import {FOOTER_QUERY, HEADER_QUERY} from '~/lib/fragments';
 import {organizationJsonLd, webSiteJsonLd} from '~/lib/seo';
 import resetStyles from '~/styles/reset.css?url';
@@ -101,7 +101,7 @@ export function links() {
     {rel: 'icon', type: 'image/x-icon', href: '/favicon.ico'},
     {
       rel: 'preload',
-      href: poppins800,
+      href: lilitaOne,
       as: 'font',
       type: 'font/woff2',
       crossOrigin: 'anonymous',
