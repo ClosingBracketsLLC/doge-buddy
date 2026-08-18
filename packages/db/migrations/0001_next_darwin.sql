@@ -1,0 +1,1 @@
+ALTER TYPE "public"."supplier_order_status" ADD VALUE 'awaiting_funds';

@@ -12,6 +12,7 @@ export const productStatus = pgEnum('product_status', ['draft', 'active', 'depre
 export const supplierKey = pgEnum('supplier_key', ['cj', 'mock'])
 export const supplierOrderStatus = pgEnum('supplier_order_status', [
   'pending', 'created', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled', 'failed', 'needs_attention',
+  'awaiting_funds',
 ])
 export const webhookSource = pgEnum('webhook_source', ['shopify', 'cj'])
 export const ticketStatus = pgEnum('ticket_status', [
