@@ -40,4 +40,19 @@ describe('DrizzleCjTokenStore', () => {
     const rows = await db.select({ count: sql<string>`count(*)` }).from(cjAuth)
     expect(Number(rows[0]!.count)).toBe(1)
   })
+
+  it('invalidate() discards the stored tokens so a subsequent load() returns null', async () => {
+    const store = new DrizzleCjTokenStore(db)
+
+    await store.save({
+      accessToken: 'access-1',
+      accessExpiresAt: new Date('2026-09-01T00:00:00.000Z').toISOString(),
+      refreshToken: 'refresh-1',
+      refreshExpiresAt: new Date('2026-10-01T00:00:00.000Z').toISOString(),
+    })
+    await expect(store.load()).resolves.not.toBeNull()
+
+    await store.invalidate()
+    await expect(store.load()).resolves.toBeNull()
+  })
 })
