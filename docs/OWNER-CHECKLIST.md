@@ -36,6 +36,14 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 - [ ] 🟡 **Railway account + deploy ops** following `docs/deploy-railway.md` (~30–45 min).
   *Blocks:* 🔴 **receiving real webhooks from Shopify/CJ** (they need a public HTTPS URL) and the Phase 0 "demo job on deployed instance" exit criterion. Local webhook testing uses replay scripts, so building proceeds. Alternative for a quick test: a `cloudflared` tunnel to your machine.
 
+- [ ] 🟡 **Hydrogen channel + Oxygen for the test store.** Using your test Shopify store:
+  1. Install the Hydrogen sales channel on the test store.
+  2. Create a storefront named `doge-buddy`.
+  3. Connect the GitHub repo `ClosingBracketsLLC/doge-buddy` for Oxygen auto-deploys (dev-store deploys are password-protected — expected).
+  4. Copy the storefront env vars it issues into `apps/storefront/.env` (see `.env.example`).
+  5. Enable **Bogus Gateway** (test store → Settings → Payments → third-party → Bogus).
+  *Blocks:* 🔴 **Tier-2 verification of Phase 2** (real-store browse, Bogus checkout, Oxygen deploy) — Tier-1/mock.shop build proceeds without it.
+
 ## Later phases (no action yet — listed so nothing surprises you)
 
 - [ ] ⚪ **Anthropic API key** (Phase 5 — sourcing agent). 🔴 blocks agent runs when we get there.
@@ -44,8 +52,9 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 - [ ] ⚪ **FunkyDori webfont license check** (Phase 2). Not a blocker — Poppins is the fallback display face.
 - [ ] ⚪ **Apply for the Google Trends official API alpha** (free, approval is slow — applying early helps Phase 5). Not a blocker — SerpApi bridges it.
 - [ ] ⚪ **CJ wallet top-up ~$150** (Phase 7 canary). 🔴 blocks the first real order. Top-up is manual only — no API.
+- [ ] ⚪ **Policy pages → Shopify Settings** (Phase 7). Paste `apps/storefront/app/content/policies.tsx` copy into Shopify Settings → Policies and review/finalize before launch.
 - [ ] ⚪ **Business checks before launch** (Phase 7): Shopify Payments setup, US tax registrations in Shopify Tax, general liability insurance for the LLC (recommended), policy pages review.
 
 ---
 
-*Maintained by Claude; last updated 2026-08-17 (Phase 1 start). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
+*Maintained by Claude; last updated 2026-08-17 (Phase 2 storefront). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*

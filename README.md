@@ -16,10 +16,16 @@ pnpm db:up                                  # Postgres 17 on :5433
 DATABASE_URL=postgres://doge:doge@localhost:5433/doge_buddy pnpm --filter @doge-buddy/db migrate
 pnpm test
 pnpm --filter @doge-buddy/ops dev           # ops on :3001 (needs DATABASE_URL)
+pnpm --filter @doge-buddy/storefront dev    # storefront on :3000 (mock.shop, no credentials)
 ```
 
 Layout: `apps/ops` (Fastify + pg-boss + agents) · `apps/storefront` (Hydrogen, Phase 2) ·
 `packages/core|db|supplier|shopify-admin|gmail`.
+
+Note: the storefront's `build`/`dev`/`codegen` scripts pass `--path "$(pwd)"` explicitly. Under
+pnpm, `pnpm --filter @doge-buddy/storefront <script>` resolves the Shopify CLI's `INIT_CWD` to
+the repo root rather than `apps/storefront`, which breaks the Hydrogen CLI's project-root
+detection; the explicit `--path` works around it.
 
 ## Phase 1
 

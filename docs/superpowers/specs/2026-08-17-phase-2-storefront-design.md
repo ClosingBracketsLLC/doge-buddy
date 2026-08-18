@@ -75,6 +75,7 @@ Ship the customer-facing store: the Hydrogen skeleton scaffolded into the worksp
 - Creates: 3 metafield definitions, 4 smart collections, ~10 sample products (2–3 per category; realistic names/prices; category tag + delivery metafields; titles prefixed **"Sample —"** for easy later cleanup).
 - Publishes products to the storefront publication (`publishablePublish`), sets inventory.
 - **No product images.** The storefront's no-image fallback card (mascot art) covers them — needed for edge cases anyway; avoids staged-upload machinery. Real images arrive with real products (Phase 5 sourcing).
+- Inventory mechanism: sample variants are created untracked (`inventoryItem.tracked: false`) — always purchasable; no `inventorySetQuantities` call needed for samples.
 
 **Policy pages** — copy authored in the repo (versioned, PR-reviewable, renders on mock.shop too), replacing the skeleton's Storefront-API policy routes:
 
