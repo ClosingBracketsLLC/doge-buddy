@@ -98,6 +98,77 @@ describe('CjHttpClient envelope + errors', () => {
   })
 })
 
+describe('CjHttpClient auth-failure retry', () => {
+  it('on HTTP 401, invalidates the token store and retries once, succeeding', async () => {
+    const store = new InMemoryCjTokenStore()
+    await store.save(TOKENS)
+    const invalidateSpy = vi.spyOn(store, 'invalidate')
+    let dataCalls = 0
+    const { client, calls } = makeClient((url) => {
+      if (url.endsWith('/authentication/getAccessToken')) {
+        return ok({
+          accessToken: 'AT-2', accessTokenExpiryDate: '2026-09-15T00:00:00Z',
+          refreshToken: 'RT-2', refreshTokenExpiryDate: '2027-03-01T00:00:00Z',
+        })
+      }
+      dataCalls += 1
+      if (dataCalls === 1) return new Response('unauthorized', { status: 401 })
+      return ok({ hello: 'dog' })
+    }, { tokenStore: store })
+
+    const data = await client.request<{ hello: string }>('GET', '/x', { points: 0 })
+
+    expect(data).toEqual({ hello: 'dog' })
+    expect(invalidateSpy).toHaveBeenCalledTimes(1)
+    // first data call (401) -> re-auth (since invalidate cleared the store) -> retried data call
+    expect(calls).toHaveLength(3)
+    expect(calls[1]!.url).toBe(`${BASE}/authentication/getAccessToken`)
+    expect((calls[2]!.init!.headers as Record<string, string>)['CJ-Access-Token']).toBe('AT-2')
+    expect((await store.load())!.accessToken).toBe('AT-2')
+  })
+
+  it('on two consecutive HTTP 401s, invalidates once and propagates a CjApiError', async () => {
+    const store = new InMemoryCjTokenStore()
+    await store.save(TOKENS)
+    const invalidateSpy = vi.spyOn(store, 'invalidate')
+    let dataCalls = 0
+    const { client, calls } = makeClient((url) => {
+      if (url.endsWith('/authentication/getAccessToken')) {
+        return ok({
+          accessToken: 'AT-2', accessTokenExpiryDate: '2026-09-15T00:00:00Z',
+          refreshToken: 'RT-2', refreshTokenExpiryDate: '2027-03-01T00:00:00Z',
+        })
+      }
+      dataCalls += 1
+      return new Response('unauthorized', { status: 401 })
+    }, { tokenStore: store })
+
+    const err = await client.request('GET', '/x', { points: 0 }).catch((e) => e)
+
+    expect(err).toBeInstanceOf(CjApiError)
+    expect(err.code).toBe(401)
+    expect(invalidateSpy).toHaveBeenCalledTimes(1)
+    expect(dataCalls).toBe(2) // original + exactly one retry, no more
+  })
+
+  it('does not invalidate the token store or retry on a non-auth error', async () => {
+    const store = new InMemoryCjTokenStore()
+    await store.save(TOKENS)
+    const invalidateSpy = vi.spyOn(store, 'invalidate')
+    const { client, calls } = makeClient(
+      () => new Response(envelope(null, { code: 1600100, result: false, message: 'insufficient balance' }), { status: 200 }),
+      { tokenStore: store },
+    )
+
+    const err = await client.request('POST', '/shopping/pay/payBalanceV2', { body: {}, points: 10, priority: true }).catch((e) => e)
+
+    expect(err).toBeInstanceOf(CjApiError)
+    expect(err.code).toBe(1600100)
+    expect(invalidateSpy).not.toHaveBeenCalled()
+    expect(calls).toHaveLength(1) // no retry
+  })
+})
+
 describe('CjHttpClient rate limit + points', () => {
   it('spaces consecutive requests to 1 rps via sleep', async () => {
     const store = new InMemoryCjTokenStore(); await store.save(TOKENS)

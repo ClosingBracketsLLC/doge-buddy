@@ -37,4 +37,8 @@ export class DrizzleCjTokenStore implements CjTokenStore {
       .values({ id: 1, ...values })
       .onConflictDoUpdate({ target: cjAuth.id, set: values })
   }
+
+  async invalidate(): Promise<void> {
+    await this.db.delete(cjAuth).where(eq(cjAuth.id, 1))
+  }
 }

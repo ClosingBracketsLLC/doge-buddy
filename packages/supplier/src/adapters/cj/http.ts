@@ -10,6 +10,10 @@ export interface StoredCjTokens {
 export interface CjTokenStore {
   load(): Promise<StoredCjTokens | null>
   save(tokens: StoredCjTokens): Promise<void>
+  /** Discards any stored tokens so the next `load()` returns null, forcing a full
+   * re-authentication. Called by CjHttpClient when CJ rejects the current access token
+   * (HTTP 401) so a stale/revoked token is never reused on retry. */
+  invalidate(): Promise<void>
 }
 
 /** In-memory CjTokenStore used for tests/dev. Not for production (no persistence across restarts). */
@@ -22,6 +26,10 @@ export class InMemoryCjTokenStore implements CjTokenStore {
 
   async save(tokens: StoredCjTokens): Promise<void> {
     this.tokens = tokens
+  }
+
+  async invalidate(): Promise<void> {
+    this.tokens = null
   }
 }
 
@@ -111,15 +119,35 @@ export class CjHttpClient {
       )
     }
 
-    const accessToken = await this.ensureToken()
-    const data = await this.doHttp<T>(method, path, {
-      query: opts.query,
-      body: opts.body,
-      headers: { 'CJ-Access-Token': accessToken },
-    })
+    const data = await this.requestWithAuthRetry<T>(method, path, opts)
 
     this.spentToday += points
     return data
+  }
+
+  /** Issues the request with the current token. On HTTP 401 (CJ rejected the access token —
+   * e.g. revoked-but-unexpired), invalidates the token store and retries exactly once with a
+   * freshly obtained token; a second 401 propagates as-is. Non-auth errors (rate limits,
+   * envelope failures, other HTTP errors) are untouched by this path. */
+  private async requestWithAuthRetry<T>(method: CjHttpMethod, path: string, opts: CjRequestOptions): Promise<T> {
+    const accessToken = await this.ensureToken()
+    try {
+      return await this.doHttp<T>(method, path, {
+        query: opts.query,
+        body: opts.body,
+        headers: { 'CJ-Access-Token': accessToken },
+      })
+    } catch (err) {
+      if (!(err instanceof CjApiError) || err.code !== 401) throw err
+
+      await this.tokenStore.invalidate()
+      const retryToken = await this.ensureToken()
+      return await this.doHttp<T>(method, path, {
+        query: opts.query,
+        body: opts.body,
+        headers: { 'CJ-Access-Token': retryToken },
+      })
+    }
   }
 
   pointsSpentToday(): number {

@@ -170,6 +170,28 @@ describe('CJSupplierAdapter.placeOrder', () => {
   })
 })
 
+describe('CJSupplierAdapter.confirmOrder', () => {
+  it('PATCHes /shopping/order/confirmOrder with { orderId } and resolves', async () => {
+    const { adapter, calls } = await makeAdapter(() => ok({}))
+
+    await expect(adapter.confirmOrder('cjo-1')).resolves.toBeUndefined()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.init!.method).toBe('PATCH')
+    expect(calls[0]!.url).toBe(`${BASE}/shopping/order/confirmOrder`)
+    expect(bodyOf(calls[0]!)).toEqual({ orderId: 'cjo-1' })
+  })
+
+  it('propagates CjApiError on envelope failure', async () => {
+    const { adapter } = await makeAdapter(() =>
+      new Response(envelope(null, { code: 500, result: false, message: 'server error' }), { status: 200 }),
+    )
+    const err = await adapter.confirmOrder('cjo-1').catch((e) => e)
+    expect(err).toBeInstanceOf(CjApiError)
+    expect(err.code).toBe(500)
+  })
+})
+
 describe('CJSupplierAdapter.payOrder', () => {
   it('returns { paid: true } on success and posts payBalanceV2 with shipmentOrderId', async () => {
     const { adapter, calls } = await makeAdapter(() => ok({}))
