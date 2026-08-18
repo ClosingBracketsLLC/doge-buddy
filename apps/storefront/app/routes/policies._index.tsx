@@ -1,69 +1,27 @@
-import {useLoaderData, Link} from 'react-router';
+import {Link} from 'react-router';
 import type {Route} from './+types/policies._index';
-import type {PoliciesQuery, PolicyItemFragment} from 'storefrontapi.generated';
+import {POLICIES} from '~/content/policies';
 
-export async function loader({context}: Route.LoaderArgs) {
-  const data: PoliciesQuery = await context.storefront.query(POLICIES_QUERY);
-
-  const shopPolicies = data.shop;
-  const policies: PolicyItemFragment[] = [
-    shopPolicies?.privacyPolicy,
-    shopPolicies?.shippingPolicy,
-    shopPolicies?.termsOfService,
-    shopPolicies?.refundPolicy,
-    shopPolicies?.subscriptionPolicy,
-  ].filter((policy): policy is PolicyItemFragment => policy != null);
-
-  if (!policies.length) {
-    throw new Response('No policies found', {status: 404});
-  }
-
-  return {policies};
-}
+export const meta: Route.MetaFunction = () => {
+  return [{title: 'Policies — Doge Buddy'}];
+};
 
 export default function Policies() {
-  const {policies} = useLoaderData<typeof loader>();
-
   return (
-    <div className="policies">
-      <h1>Policies</h1>
-      <div>
-        {policies.map((policy) => (
-          <fieldset key={policy.id}>
-            <Link to={`/policies/${policy.handle}`}>{policy.title}</Link>
-          </fieldset>
+    <div className="mx-auto max-w-2xl px-4 py-8 md:py-12">
+      <h1 className="font-display font-bold text-3xl text-ink">Policies</h1>
+      <ul className="mt-6 flex flex-col gap-3">
+        {POLICIES.map((policy) => (
+          <li key={policy.handle}>
+            <Link
+              to={`/policies/${policy.handle}`}
+              className="text-info underline-offset-4 hover:underline"
+            >
+              {policy.title}
+            </Link>
+          </li>
         ))}
-      </div>
+      </ul>
     </div>
   );
 }
-
-const POLICIES_QUERY = `#graphql
-  fragment PolicyItem on ShopPolicy {
-    id
-    title
-    handle
-  }
-  query Policies ($country: CountryCode, $language: LanguageCode)
-    @inContext(country: $country, language: $language) {
-    shop {
-      privacyPolicy {
-        ...PolicyItem
-      }
-      shippingPolicy {
-        ...PolicyItem
-      }
-      termsOfService {
-        ...PolicyItem
-      }
-      refundPolicy {
-        ...PolicyItem
-      }
-      subscriptionPolicy {
-        id
-        title
-        handle
-      }
-    }
-  }
-` as const;
