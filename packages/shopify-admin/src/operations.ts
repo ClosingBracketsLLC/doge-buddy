@@ -1,4 +1,5 @@
 import { assertNoUserErrors, withIdempotencyKey, type ShopifyAdminClient } from './client.ts'
+import { type ShopifyUserErrorEntry } from './errors.ts'
 
 /**
  * Payload for `productSet`. Validated upstream by `@doge-buddy/core` schemas in later phases —
@@ -6,11 +7,6 @@ import { assertNoUserErrors, withIdempotencyKey, type ShopifyAdminClient } from 
  * validated.
  */
 export type ProductSetInput = Record<string, unknown>
-
-interface UserErrorEntry {
-  field?: string[] | null
-  message: string
-}
 
 // ---------------------------------------------------------------------------
 // listPublications
@@ -54,7 +50,7 @@ const PRODUCT_SET_MUTATION = `#graphql
 interface ProductSetData {
   productSet: {
     product: { id: string; variants: { nodes: { id: string; sku?: string | null }[] } }
-    userErrors: UserErrorEntry[]
+    userErrors: ShopifyUserErrorEntry[]
   }
 }
 
@@ -83,7 +79,7 @@ const PUBLISHABLE_PUBLISH_MUTATION = `#graphql
 `
 
 interface PublishablePublishData {
-  publishablePublish: { userErrors: UserErrorEntry[] }
+  publishablePublish: { userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function publishablePublish(
@@ -112,7 +108,7 @@ const INVENTORY_SET_QUANTITIES_MUTATION = `mutation InventorySetQuantities($inpu
 }`
 
 interface InventorySetQuantitiesData {
-  inventorySetQuantities: { userErrors: UserErrorEntry[] }
+  inventorySetQuantities: { userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function inventorySetQuantities(
@@ -138,7 +134,7 @@ const REFUND_CREATE_MUTATION = `mutation RefundCreate($input: RefundInput!) {
 }`
 
 interface RefundCreateData {
-  refundCreate: { refund: { id: string }; userErrors: UserErrorEntry[] }
+  refundCreate: { refund: { id: string }; userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function refundCreate(
@@ -192,7 +188,7 @@ const FULFILLMENT_CREATE_MUTATION = `#graphql
 `
 
 interface FulfillmentCreateData {
-  fulfillmentCreate: { fulfillment: { id: string }; userErrors: UserErrorEntry[] }
+  fulfillmentCreate: { fulfillment: { id: string }; userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function fulfillmentCreate(
@@ -225,7 +221,7 @@ const FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION = `#graphql
 `
 
 interface FulfillmentTrackingInfoUpdateData {
-  fulfillmentTrackingInfoUpdate: { userErrors: UserErrorEntry[] }
+  fulfillmentTrackingInfoUpdate: { userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function fulfillmentTrackingInfoUpdate(
@@ -288,7 +284,7 @@ const WEBHOOK_SUBSCRIPTION_CREATE_MUTATION = `#graphql
 `
 
 interface WebhookSubscriptionCreateData {
-  webhookSubscriptionCreate: { webhookSubscription: { id: string }; userErrors: UserErrorEntry[] }
+  webhookSubscriptionCreate: { webhookSubscription: { id: string }; userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function webhookSubscriptionCreate(
@@ -320,7 +316,7 @@ const PRODUCT_DELETE_MUTATION = `#graphql
 `
 
 interface ProductDeleteData {
-  productDelete: { userErrors: UserErrorEntry[] }
+  productDelete: { userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function productDelete(client: ShopifyAdminClient, productGid: string): Promise<void> {
@@ -342,7 +338,7 @@ const METAFIELD_DEFINITION_CREATE_MUTATION = `#graphql
 `
 
 interface MetafieldDefinitionCreateData {
-  metafieldDefinitionCreate: { createdDefinition: { id: string }; userErrors: UserErrorEntry[] }
+  metafieldDefinitionCreate: { createdDefinition: { id: string }; userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function metafieldDefinitionCreate(
@@ -393,7 +389,7 @@ const COLLECTION_CREATE_MUTATION = `#graphql
 `
 
 interface CollectionCreateData {
-  collectionCreate: { collection: { id: string }; userErrors: UserErrorEntry[] }
+  collectionCreate: { collection: { id: string }; userErrors: ShopifyUserErrorEntry[] }
 }
 
 export async function collectionCreate(
@@ -455,4 +451,53 @@ export async function findProductByHandle(client: ShopifyAdminClient, handle: st
   const data = await client.graphql<FindProductByHandleData>(FIND_PRODUCT_BY_HANDLE_QUERY, { query })
   const node = data.products.nodes[0]
   return node ? { id: node.id } : null
+}
+
+// ---------------------------------------------------------------------------
+// ordersUpdatedSince
+// ---------------------------------------------------------------------------
+
+const ORDERS_UPDATED_SINCE_QUERY = `#graphql
+  query OrdersUpdatedSince($query: String!) {
+    orders(first: 100, query: $query, sortKey: UPDATED_AT) {
+      nodes { id name test displayFinancialStatus email updatedAt }
+    }
+  }
+`
+
+interface OrdersUpdatedSinceData {
+  orders: { nodes: { id: string; name: string; test: boolean; displayFinancialStatus: string; email?: string | null; updatedAt: string }[] }
+}
+
+export async function ordersUpdatedSince(
+  client: ShopifyAdminClient,
+  sinceIso: string,
+): Promise<{ id: string; name: string; test: boolean; displayFinancialStatus: string; email?: string; updatedAt: string }[]> {
+  const query = `updated_at:>='${sinceIso}'`
+  const data = await client.graphql<OrdersUpdatedSinceData>(ORDERS_UPDATED_SINCE_QUERY, { query })
+  return data.orders.nodes.map((n) => ({ ...n, email: n.email ?? undefined }))
+}
+
+// ---------------------------------------------------------------------------
+// webhookSubscriptionDelete
+// ---------------------------------------------------------------------------
+
+const WEBHOOK_SUBSCRIPTION_DELETE_MUTATION = `#graphql
+  mutation WebhookSubscriptionDelete($id: ID!) {
+    webhookSubscriptionDelete(id: $id) {
+      userErrors { field message }
+    }
+  }
+`
+
+interface WebhookSubscriptionDeleteData {
+  webhookSubscriptionDelete: { userErrors: ShopifyUserErrorEntry[] }
+}
+
+export async function webhookSubscriptionDelete(
+  client: ShopifyAdminClient,
+  id: string,
+): Promise<void> {
+  const data = await client.graphql<WebhookSubscriptionDeleteData>(WEBHOOK_SUBSCRIPTION_DELETE_MUTATION, { id })
+  assertNoUserErrors(data, 'webhookSubscriptionDelete')
 }

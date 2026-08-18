@@ -3,8 +3,8 @@ import {
   ShopifyAdminClient, ShopifyTokenManager, ShopifyUserError,
   collectionCreate, findProductByHandle, fulfillmentCreate, fulfillmentTrackingInfoUpdate,
   inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
-  listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, productDelete,
-  productSet, publishablePublish, refundCreate, webhookSubscriptionCreate,
+  listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, ordersUpdatedSince, productDelete,
+  productSet, publishablePublish, refundCreate, webhookSubscriptionCreate, webhookSubscriptionDelete,
 } from '@doge-buddy/shopify-admin'
 
 const tokenOk = () => new Response(JSON.stringify({ access_token: 'tok', expires_in: 86399 }), { status: 200 })
@@ -314,5 +314,56 @@ describe('findProductByHandle', () => {
     const { client } = makeClient(() => gql({ products: { nodes: [] } }))
     const result = await findProductByHandle(client, 'missing-handle')
     expect(result).toBeNull()
+  })
+})
+
+describe('ordersUpdatedSince', () => {
+  it('sends query string with updated_at filter and sortKey UPDATED_AT, maps orders', async () => {
+    const sinceIso = '2026-08-18T12:00:00Z'
+    const { client, calls } = makeClient(() =>
+      gql({
+        orders: {
+          nodes: [
+            {
+              id: 'gid://shopify/Order/1',
+              name: '#1001',
+              test: false,
+              displayFinancialStatus: 'PAID',
+              email: 'customer@example.com',
+              updatedAt: '2026-08-18T12:30:00Z',
+            },
+          ],
+        },
+      }))
+    const result = await ordersUpdatedSince(client, sinceIso)
+    expect(result).toEqual([
+      {
+        id: 'gid://shopify/Order/1',
+        name: '#1001',
+        test: false,
+        displayFinancialStatus: 'PAID',
+        email: 'customer@example.com',
+        updatedAt: '2026-08-18T12:30:00Z',
+      },
+    ])
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*orders/)
+    expect(query).toContain('sortKey: UPDATED_AT')
+    expect(variables).toEqual({ query: `updated_at:>='${sinceIso}'` })
+  })
+})
+
+describe('webhookSubscriptionDelete', () => {
+  it('sends the webhook subscription id, resolves void', async () => {
+    const { client, calls } = makeClient(() => gql({ webhookSubscriptionDelete: { userErrors: [] } }))
+    await expect(webhookSubscriptionDelete(client, 'gid://shopify/WebhookSubscription/2')).resolves.toBeUndefined()
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/mutation[\s\S]*webhookSubscriptionDelete/)
+    expect(variables).toEqual({ id: 'gid://shopify/WebhookSubscription/2' })
+  })
+  it('throws ShopifyUserError on userErrors', async () => {
+    const { client } = makeClient(() =>
+      gql({ webhookSubscriptionDelete: { userErrors: [{ message: 'not found' }] } }))
+    await expect(webhookSubscriptionDelete(client, 'gid://shopify/WebhookSubscription/2')).rejects.toThrow(ShopifyUserError)
   })
 })
