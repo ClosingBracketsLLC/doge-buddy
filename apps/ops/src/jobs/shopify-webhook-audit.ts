@@ -24,6 +24,13 @@ export interface PrunedSubscription {
   callbackUrl?: string
 }
 
+export interface PruneFailure {
+  id: string
+  topic: string
+  callbackUrl?: string
+  error: string
+}
+
 /**
  * Reconciles the shop's webhook subscriptions against REQUIRED_TOPICS: any required topic with
  * no subscription pointing at `${adminBaseUrl}/webhooks/shopify` gets (re)created. Intended to
@@ -42,10 +49,17 @@ export interface PrunedSubscription {
  * of their URL or how many exist. Every deletion is audit-logged (`webhook.subscription_pruned`)
  * before moving on to the next candidate, so pruning is traceable even though it's a destructive,
  * unattended (cron-triggered) action.
+ *
+ * Each candidate's delete + success-audit is isolated in its own try/catch (same shape as
+ * `cj-wallet-monitor.ts`'s per-row enqueue isolation and `run-reconcile.ts`'s per-row sweeps): a
+ * `webhookSubscriptionDelete` throw (not-found race, permissions, rate limit — all realistic
+ * against a live Shopify API) is caught, audit-logged as `webhook.subscription_prune_failed`
+ * (with the error message), and recorded in the returned `pruneFailures` list — the loop moves on
+ * to the next candidate rather than aborting the whole cron run over one bad subscription.
  */
 export async function shopifyWebhookAudit(
   deps: ShopifyWebhookAuditDeps,
-): Promise<{ created: string[]; pruned: PrunedSubscription[] }> {
+): Promise<{ created: string[]; pruned: PrunedSubscription[]; pruneFailures: PruneFailure[] }> {
   const callbackUrl = `${deps.adminBaseUrl}/webhooks/shopify`
   const existing = await listWebhookSubscriptions(deps.client)
 
@@ -59,6 +73,7 @@ export async function shopifyWebhookAudit(
   }
 
   const pruned: PrunedSubscription[] = []
+  const pruneFailures: PruneFailure[] = []
   const keptCorrectTopics = new Set<string>()
   for (const sub of existing) {
     if (!REQUIRED_TOPIC_SET.has(sub.topic)) continue // topic we don't manage: never touched
@@ -71,16 +86,28 @@ export async function shopifyWebhookAudit(
       // else: falls through — a later duplicate of an already-kept correct-URL sub, prune it
     }
 
-    await webhookSubscriptionDelete(deps.client, sub.id)
-    await deps.db.insert(auditLog).values({
-      actor: 'system',
-      action: 'webhook.subscription_pruned',
-      entityType: 'webhook_subscription',
-      entityId: sub.id,
-      detail: { topic: sub.topic, callbackUrl: sub.callbackUrl, id: sub.id },
-    })
-    pruned.push({ id: sub.id, topic: sub.topic, callbackUrl: sub.callbackUrl })
+    try {
+      await webhookSubscriptionDelete(deps.client, sub.id)
+      await deps.db.insert(auditLog).values({
+        actor: 'system',
+        action: 'webhook.subscription_pruned',
+        entityType: 'webhook_subscription',
+        entityId: sub.id,
+        detail: { topic: sub.topic, callbackUrl: sub.callbackUrl, id: sub.id },
+      })
+      pruned.push({ id: sub.id, topic: sub.topic, callbackUrl: sub.callbackUrl })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      await deps.db.insert(auditLog).values({
+        actor: 'system',
+        action: 'webhook.subscription_prune_failed',
+        entityType: 'webhook_subscription',
+        entityId: sub.id,
+        detail: { topic: sub.topic, callbackUrl: sub.callbackUrl, id: sub.id, error: message },
+      })
+      pruneFailures.push({ id: sub.id, topic: sub.topic, callbackUrl: sub.callbackUrl, error: message })
+    }
   }
 
-  return { created, pruned }
+  return { created, pruned, pruneFailures }
 }
