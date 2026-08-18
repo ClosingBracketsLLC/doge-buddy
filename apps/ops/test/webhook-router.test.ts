@@ -1,15 +1,17 @@
-import { auditLog, createDb, orders, webhookEvents } from '@doge-buddy/db'
-import { MockSupplierAdapter } from '@doge-buddy/supplier'
+import { auditLog, createDb, orders, supplierOrders, webhookEvents } from '@doge-buddy/db'
+import { MockSupplierAdapter, type SupplierOrderStatusValue } from '@doge-buddy/supplier'
 import { and, eq } from 'drizzle-orm'
 import type PgBoss from 'pg-boss'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
+import { mapCjStatus } from '../src/fulfillment/cj-status-map.ts'
 import {
   decimalStringToCents,
   shopifyRestAddressToAddress,
   type ShopifyOrderPaidPayload,
   upsertOrderFromPaidPayload,
 } from '../src/fulfillment/order-upsert.ts'
+import type { SupplierOrderStatusDb } from '../src/fulfillment/transitions.ts'
 import { webhookProcessHandler, type WebhookProcessDeps } from '../src/jobs/webhook-process.ts'
 import type { SendOpts } from '../src/fulfillment/types.ts'
 import { startQueue } from '../src/queue.ts'
@@ -41,6 +43,23 @@ function makeJob(
   name = 'webhook.shopify.process',
 ): PgBoss.Job<{ webhookEventId: string }> {
   return { id: unique('job'), name, data: { webhookEventId }, expireInSeconds: 900 }
+}
+
+function cjOrderPayload(overrides: { orderId?: string; orderStatus?: string } = {}): object {
+  return { type: 'ORDER', messageId: unique('cj-msg'), orderId: unique('cj-order'), ...overrides }
+}
+
+function cjLogisticsPayload(
+  overrides: { orderId?: string; trackNumber?: string; logisticName?: string } = {},
+): object {
+  return {
+    type: 'LOGISTICS',
+    messageId: unique('cj-msg'),
+    orderId: unique('cj-order'),
+    trackNumber: unique('track'),
+    logisticName: 'CJPacket Ordinary',
+    ...overrides,
+  }
 }
 
 describe('decimalStringToCents', () => {
@@ -240,6 +259,21 @@ describe('upsertOrderFromPaidPayload', () => {
   })
 })
 
+describe('mapCjStatus', () => {
+  it.each<[SupplierOrderStatusValue, SupplierOrderStatusDb | null]>([
+    ['created', null],
+    ['unpaid', null],
+    ['pending', null],
+    ['processing', null],
+    ['shipped', 'shipped'],
+    ['delivered', 'delivered'],
+    ['cancelled', 'cancelled'],
+    ['unknown', null],
+  ])('%s -> %s', (value, expected) => {
+    expect(mapCjStatus(value)).toBe(expected)
+  })
+})
+
 describe('webhookProcessHandler', () => {
   const { db, pool } = createDb(url)
   afterAll(() => pool.end())
@@ -249,6 +283,29 @@ describe('webhookProcessHandler', () => {
       .insert(webhookEvents)
       .values({ source, externalEventId: unique('wh'), topic, payload: payload as object })
       .returning({ id: webhookEvents.id })
+    return row!.id
+  }
+
+  /** Seeds a `supplier_orders` row (supplier='cj') at the given status, with an optional
+   * `supplierOrderId` (the id CJ's webhook `orderId` field would look up by) and tracking fields. */
+  async function seedCjSupplierOrder(
+    status: SupplierOrderStatusDb,
+    overrides: Partial<{ supplierOrderId: string; trackingNumber: string; logisticName: string }> = {},
+  ): Promise<string> {
+    const [order] = await db
+      .insert(orders)
+      .values({ shopifyOrderGid: `gid://shopify/Order/${unique('cj-order')}`, isTest: false })
+      .returning({ id: orders.id })
+    const [row] = await db
+      .insert(supplierOrders)
+      .values({
+        orderId: order!.id,
+        supplier: 'cj',
+        idempotencyKey: unique('idem'),
+        status,
+        ...overrides,
+      })
+      .returning({ id: supplierOrders.id })
     return row!.id
   }
 
@@ -299,8 +356,8 @@ describe('webhookProcessHandler', () => {
     expect(enqueue).toHaveBeenCalledTimes(1)
   })
 
-  it('cj topics are stubbed: marks processed + audits webhook.ignored, never enqueues (Task 12 fills in routing)', async () => {
-    const webhookEventId = await insertEvent('cj', 'ORDER', { some: 'payload' })
+  it('cj topics other than order/logistics (e.g. stock) are stubbed: marks processed + audits webhook.ignored, never enqueues', async () => {
+    const webhookEventId = await insertEvent('cj', 'stock', { some: 'payload' })
     const enqueue = vi.fn(async () => {})
 
     await webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
@@ -315,6 +372,164 @@ describe('webhookProcessHandler', () => {
       .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
     expect(auditRows).toHaveLength(1)
     expect(auditRows[0]!.action).toBe('webhook.ignored')
+  })
+
+  describe('cj ORDER webhook routing', () => {
+    it('shipped moves paid -> shipped via applyTransition', async () => {
+      const supplierOrderId = unique('cj-order')
+      const rowId = await seedCjSupplierOrder('paid', { supplierOrderId })
+      const payload = cjOrderPayload({ orderId: supplierOrderId, orderStatus: 'SHIPPED' })
+      const webhookEventId = await insertEvent('cj', 'order', payload)
+      const enqueue = vi.fn(async () => {})
+
+      await webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
+
+      const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
+      expect(row!.status).toBe('shipped')
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows).toHaveLength(1)
+      expect(auditRows[0]!.action).toBe('webhook.processed')
+      expect(auditRows[0]!.detail).toEqual({
+        source: 'cj',
+        topic: 'order',
+        supplierOrderRowId: rowId,
+        from: 'paid',
+        to: 'shipped',
+      })
+      expect(enqueue).not.toHaveBeenCalled()
+    })
+
+    it('a backwards/illegal status (delivered row told "shipped" again) is ignored + audited, row untouched', async () => {
+      const supplierOrderId = unique('cj-order')
+      const rowId = await seedCjSupplierOrder('delivered', { supplierOrderId })
+      const payload = cjOrderPayload({ orderId: supplierOrderId, orderStatus: 'SHIPPED' })
+      const webhookEventId = await insertEvent('cj', 'order', payload)
+      const enqueue = vi.fn(async () => {})
+
+      await webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
+
+      const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
+      expect(row!.status).toBe('delivered')
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows).toHaveLength(1)
+      expect(auditRows[0]!.action).toBe('webhook.ignored')
+      expect(auditRows[0]!.detail).toMatchObject({
+        reason: 'illegal_transition',
+        supplierOrderRowId: rowId,
+        from: 'delivered',
+        to: 'shipped',
+      })
+    })
+
+    it('a non-actionable status (e.g. PROCESSING) is ignored + audited without touching the row', async () => {
+      const supplierOrderId = unique('cj-order')
+      const rowId = await seedCjSupplierOrder('confirmed', { supplierOrderId })
+      const payload = cjOrderPayload({ orderId: supplierOrderId, orderStatus: 'PROCESSING' })
+      const webhookEventId = await insertEvent('cj', 'order', payload)
+
+      await webhookProcessHandler({ db, enqueue: vi.fn(async () => {}) }, 'cj')([
+        makeJob(webhookEventId, 'webhook.cj.process'),
+      ])
+
+      const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
+      expect(row!.status).toBe('confirmed')
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows[0]!.action).toBe('webhook.ignored')
+      expect(auditRows[0]!.detail).toMatchObject({ reason: 'status_not_actionable' })
+    })
+
+    it('an unknown supplierOrderId is audited ignored, no throw, no row created or modified', async () => {
+      const payload = cjOrderPayload({ orderId: unique('never-seen-order'), orderStatus: 'SHIPPED' })
+      const webhookEventId = await insertEvent('cj', 'order', payload)
+      const enqueue = vi.fn(async () => {})
+
+      await expect(
+        webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')]),
+      ).resolves.toBeUndefined()
+
+      const [eventRow] = await db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookEventId))
+      expect(eventRow!.processedAt).not.toBeNull()
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows[0]!.action).toBe('webhook.ignored')
+      expect(auditRows[0]!.detail).toMatchObject({ reason: 'unknown_supplier_order' })
+      expect(enqueue).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('cj LOGISTICS webhook routing', () => {
+    it('persists trackingNumber/logisticName as a direct field update (no status change) and enqueues fulfillment.sync-tracking with singletonKey=rowId + standard retry opts', async () => {
+      const supplierOrderId = unique('cj-order')
+      const rowId = await seedCjSupplierOrder('paid', { supplierOrderId })
+      const payload = cjLogisticsPayload({
+        orderId: supplierOrderId,
+        trackNumber: 'TRACK123456',
+        logisticName: 'CJPacket Ordinary',
+      })
+      const webhookEventId = await insertEvent('cj', 'logistics', payload)
+      const enqueue = vi.fn(async () => {})
+
+      await webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
+
+      const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
+      expect(row!.status).toBe('paid') // untouched — tracking is a field update, never a status write
+      expect(row!.trackingNumber).toBe('TRACK123456')
+      expect(row!.logisticName).toBe('CJPacket Ordinary')
+
+      expect(enqueue).toHaveBeenCalledTimes(1)
+      expect(enqueue).toHaveBeenCalledWith(
+        'fulfillment.sync-tracking',
+        { supplierOrderRowId: rowId },
+        { singletonKey: rowId, retryLimit: 5, retryBackoff: true, retryDelay: 30 },
+      )
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows[0]!.action).toBe('webhook.processed')
+      expect(auditRows[0]!.detail).toEqual({
+        source: 'cj',
+        topic: 'logistics',
+        supplierOrderRowId: rowId,
+      })
+    })
+
+    it('an unknown supplierOrderId is audited ignored, no throw, never enqueues sync-tracking', async () => {
+      const payload = cjLogisticsPayload({ orderId: unique('never-seen-order') })
+      const webhookEventId = await insertEvent('cj', 'logistics', payload)
+      const enqueue = vi.fn(async () => {})
+
+      await expect(
+        webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')]),
+      ).resolves.toBeUndefined()
+
+      const [eventRow] = await db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookEventId))
+      expect(eventRow!.processedAt).not.toBeNull()
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows[0]!.action).toBe('webhook.ignored')
+      expect(auditRows[0]!.detail).toMatchObject({ reason: 'unknown_supplier_order' })
+      expect(enqueue).not.toHaveBeenCalled()
+    })
   })
 
   it('shopify topics other than orders/paid fall through to webhook.ignored too', async () => {
