@@ -123,8 +123,12 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
   await createQueueRetrying(boss, PLACE_ORDER_QUEUE, { name: PLACE_ORDER_QUEUE, policy: 'singleton' })
   await boss.work(PLACE_ORDER_QUEUE, fulfillmentPlaceOrderHandler(placeOrderDeps))
 
+  // `{ includeMetadata: true }` is required here (unlike the place-order worker above): the
+  // pay-order handler's retry-exhaustion dead-letter hook needs `job.retryCount`/`retryLimit`,
+  // which only `JobWithMetadata` (not the plain `Job` the 1-arg `work()` overload hands back)
+  // carries — see the handler's own doc comment in jobs/fulfillment-pay-order.ts.
   await createQueueRetrying(boss, PAY_ORDER_QUEUE, { name: PAY_ORDER_QUEUE, policy: 'singleton' })
-  await boss.work(PAY_ORDER_QUEUE, fulfillmentPayOrderHandler(placeOrderDeps))
+  await boss.work(PAY_ORDER_QUEUE, { includeMetadata: true }, fulfillmentPayOrderHandler(placeOrderDeps))
 
   await createQueueRetrying(boss, SYNC_TRACKING_QUEUE, { name: SYNC_TRACKING_QUEUE, policy: 'singleton' })
   await boss.work(SYNC_TRACKING_QUEUE, async () => {

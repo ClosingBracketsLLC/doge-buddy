@@ -27,8 +27,12 @@ export interface PlaceOrderDeps {
   enqueue: (name: string, data: object, opts?: SendOpts) => Promise<void>
 }
 
-/** Send options for the fulfillment queues this executor enqueues into (design spec, exact). */
-const FULFILLMENT_RETRY_OPTS: SendOpts = { retryLimit: 5, retryBackoff: true, retryDelay: 30 }
+/**
+ * Send options for the fulfillment queues this executor enqueues into (design spec, exact).
+ * Exported so `run-pay-order.ts` (Task 11) can apply the identical retry/backoff shape to its
+ * own self-requeues (paused settings) — one literal, not a second copy drifting out of sync.
+ */
+export const FULFILLMENT_RETRY_OPTS: SendOpts = { retryLimit: 5, retryBackoff: true, retryDelay: 30 }
 
 const PLACE_ORDER_QUEUE = 'fulfillment.place-order'
 const PAY_ORDER_QUEUE = 'fulfillment.pay-order'
@@ -159,16 +163,19 @@ function aggregateNeeded(
 }
 
 /**
- * Transitions the row to `needs_attention` (from `pending` or `created`), persists
- * `lastError = '<reason>: <detail>'`, and alerts. Shared by the planner's own `needs_attention`
- * decision, the post-create spend-cap re-check, and the missing-shipping-address guard — all
- * three park the order identically, so this is the one place that shape is defined.
+ * Transitions the row to `needs_attention` (from any status the legal-transition matrix allows
+ * into `needs_attention` — `pending`/`created` for this module's own callers, plus
+ * `confirmed`/`awaiting_funds` for `run-pay-order.ts`'s (Task 11) retry-exhaustion dead-letter),
+ * persists `lastError = '<reason>: <detail>'`, and alerts. Shared by the planner's own
+ * `needs_attention` decision, the post-create spend-cap re-check, the missing-shipping-address
+ * guard, and the pay-order dead-letter hook — all park the order identically, so this is the one
+ * place that shape is defined. Exported for that reuse.
  */
-async function parkNeedsAttention(
+export async function parkNeedsAttention(
   deps: PlaceOrderDeps,
   orderRow: OrderRow,
   supplierOrderRow: SupplierOrderRow,
-  from: 'pending' | 'created',
+  from: 'pending' | 'created' | 'confirmed' | 'awaiting_funds',
   reason: string,
   detail: string,
 ): Promise<void> {
