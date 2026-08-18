@@ -17,12 +17,13 @@ export interface FulfillmentQueueDeps {
   settings: ReturnType<typeof createSettings>
   alert: ReturnType<typeof createAlerter>
   /**
-   * Shopify fulfillment operations backing `fulfillment.sync-tracking` (Task 13) and, later,
-   * `fulfillment.reconcile` (Task 14). Optional here purely so tests that never touch either of
-   * those queues (e.g. `queue-fulfillment.test.ts`'s place-order wiring checks) don't need to
-   * supply one — when omitted, `startQueue` below wires a stub that throws
-   * `'shopify not configured'` on any call, same as `index.ts` does when `config.shopify` is
-   * unset (see that file's own stub for the production-path reasoning).
+   * Shopify fulfillment operations backing `fulfillment.sync-tracking` (Task 13). Optional here
+   * purely so tests that never touch that queue (e.g. `queue-fulfillment.test.ts`'s place-order
+   * wiring checks) don't need to supply one — when omitted, `startQueue` below wires a stub that
+   * throws `'shopify not configured'` on any call, same as `index.ts` does when `config.shopify`
+   * is unset (see that file's own stub for the production-path reasoning). `fulfillment.reconcile`
+   * (Task 14) needs the same interface too, but its own `shopifyOps` is assembled independently by
+   * `index.ts` (which registers that queue's worker directly), not threaded through here.
    */
   shopify?: ShopifyFulfillmentOps
 }
@@ -104,6 +105,7 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
       orderFulfillmentOrders: shopifyNotConfigured,
       fulfillmentCreate: shopifyNotConfigured,
       fulfillmentTrackingInfoUpdate: shopifyNotConfigured,
+      ordersUpdatedSince: shopifyNotConfigured,
     },
   }
 
@@ -137,14 +139,15 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
   await createQueueRetrying(boss, SYNC_TRACKING_QUEUE, { name: SYNC_TRACKING_QUEUE, policy: 'singleton' })
   await boss.work(SYNC_TRACKING_QUEUE, fulfillmentSyncTrackingHandler(syncTrackingDeps))
 
-  // No singletonKey producer for these two (both are cron-driven sweeps, not per-entity jobs),
+  // No singletonKey producer for either queue (both are cron-driven sweeps, not per-entity jobs),
   // so the default 'standard' policy is correct — left unspecified deliberately.
+  //
+  // RECONCILE_QUEUE's DDL is created here (eagerly, at boot, alongside the other fulfillment
+  // queues) but its worker and hourly schedule are registered by `index.ts` via `registerCron` —
+  // not here — because `registerCron` bundles create + work + schedule in one call and calling
+  // `boss.work` a second time for the same queue name would just be a redundant second poller.
+  // `createQueueRetrying` is idempotent, so index.ts's own call is a safe no-op on top of this one.
   await createQueueRetrying(boss, RECONCILE_QUEUE)
-  await boss.work(RECONCILE_QUEUE, async () => {
-    // executeReconcile lands in Task 14 (run-reconcile.ts). Cron registration (hourly) also
-    // lands in Task 14 — this task only creates the queue and its worker slot.
-    throw new Error('fulfillment.reconcile lands in Task 14')
-  })
 
   await createQueueRetrying(boss, WALLET_MONITOR_QUEUE)
   await boss.work(WALLET_MONITOR_QUEUE, async () => {

@@ -33,11 +33,14 @@ describe('executeSyncTracking', () => {
       overrides.fulfillmentCreate ?? (async () => ({ fulfillmentId: 'gid://shopify/Fulfillment/1' })),
     )
     const fulfillmentTrackingInfoUpdate = vi.fn(overrides.fulfillmentTrackingInfoUpdate ?? (async () => {}))
+    // Not exercised by this file's tests (that's `fulfillment-reconcile.test.ts`'s job) — present
+    // only so this object literal satisfies `ShopifyFulfillmentOps` in full.
+    const ordersUpdatedSince = vi.fn(overrides.ordersUpdatedSince ?? (async () => []))
     const mockLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const deps: SyncTrackingDeps = {
       db,
       alert: createAlerter(db, mockLog),
-      shopifyOps: { orderFulfillmentOrders, fulfillmentCreate, fulfillmentTrackingInfoUpdate },
+      shopifyOps: { orderFulfillmentOrders, fulfillmentCreate, fulfillmentTrackingInfoUpdate, ordersUpdatedSince },
     }
     return { deps, orderFulfillmentOrders, fulfillmentCreate, fulfillmentTrackingInfoUpdate }
   }
@@ -172,12 +175,16 @@ describe('executeSyncTracking', () => {
     )
   })
 
-  it('create path: picks the first OPEN/IN_PROGRESS node, skipping CLOSED ones', async () => {
+  it('create path: picks the first creatable (OPEN/IN_PROGRESS) node when multiple are returned', async () => {
+    // No CLOSED entry here (deliberately, unlike before Task 14's controller ruling): a CLOSED
+    // node anywhere in the list — even alongside an open one — now trips the suspected-duplicate
+    // guard below instead of being quietly skipped in favor of the first open node. This test's
+    // job is narrowed to just "multiple creatable nodes -> first one wins", which the ruling
+    // doesn't touch.
     const { orderRowId } = await seedOrder()
     const supplierOrderRow = await seedSupplierOrder({ orderRowId, trackingNumber: 'TRACK-PICK' })
     const { deps, fulfillmentCreate } = makeDeps({
       orderFulfillmentOrders: async () => [
-        { id: 'fo-closed', status: 'CLOSED' },
         { id: 'fo-in-progress', status: 'IN_PROGRESS' },
         { id: 'fo-open-too', status: 'OPEN' },
       ],
@@ -188,11 +195,14 @@ describe('executeSyncTracking', () => {
     expect(fulfillmentCreate).toHaveBeenCalledWith(expect.objectContaining({ fulfillmentOrderId: 'fo-in-progress' }))
   })
 
-  it('create path: no OPEN/IN_PROGRESS fulfillment order — audits + alerts (warning), no status change, never calls fulfillmentCreate', async () => {
+  it('create path: no OPEN/IN_PROGRESS/CLOSED fulfillment order at all — audits + alerts (warning), no status change, never calls fulfillmentCreate', async () => {
+    // Changed from a single CLOSED-only fixture (Task 13) to CANCELLED (Task 14): a CLOSED node
+    // now routes through the suspected-duplicate guard below, not this "nothing to fulfill" path
+    // — see the dedicated suspected-duplicate test for that case.
     const { orderGid, orderRowId } = await seedOrder()
     const supplierOrderRow = await seedSupplierOrder({ orderRowId, trackingNumber: 'TRACK-NONE' })
     const { deps, fulfillmentCreate } = makeDeps({
-      orderFulfillmentOrders: async () => [{ id: 'fo-closed', status: 'CLOSED' }],
+      orderFulfillmentOrders: async () => [{ id: 'fo-cancelled', status: 'CANCELLED' }],
     })
 
     await executeSyncTracking(deps, supplierOrderRow.id)
@@ -214,6 +224,37 @@ describe('executeSyncTracking', () => {
     )
     expect(alertMatch).toBeDefined()
     expect(alertMatch!.detail).toMatchObject({ severity: 'warning', orderGid })
+  })
+
+  it('CONTROLLER RULING: create path, gid null, a CLOSED node present alongside an OPEN one — suspected duplicate, zero create calls, audits + alerts', async () => {
+    const { orderGid, orderRowId } = await seedOrder()
+    const supplierOrderRow = await seedSupplierOrder({ orderRowId, trackingNumber: 'TRACK-DUP' })
+    const { deps, fulfillmentCreate } = makeDeps({
+      orderFulfillmentOrders: async () => [
+        { id: 'fo-closed', status: 'CLOSED' },
+        { id: 'fo-open', status: 'OPEN' },
+      ],
+    })
+
+    await executeSyncTracking(deps, supplierOrderRow.id)
+
+    expect(fulfillmentCreate).not.toHaveBeenCalled()
+
+    const row = await loadSupplierOrder(supplierOrderRow.id)
+    expect(row?.status).toBe('paid') // untouched — not a supplier-order status change
+    expect(row?.shopifyFulfillmentGid).toBeNull()
+
+    const rows = await auditRowsFor(orderRowId)
+    const match = rows.find((r) => r.action === 'fulfillment.sync_suspected_duplicate')
+    expect(match).toBeDefined()
+    expect(match!.detail).toMatchObject({ supplierOrderRowId: supplierOrderRow.id, orderGid })
+
+    const alerts = await alertRowsFor('sync_suspected_duplicate')
+    const alertMatch = alerts.find(
+      (r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === supplierOrderRow.id,
+    )
+    expect(alertMatch).toBeDefined()
+    expect(alertMatch!.detail).toMatchObject({ severity: 'warning' })
   })
 
   it('duplicate run: gid present, tracking unchanged since last sync — no-op, zero Shopify calls', async () => {

@@ -22,6 +22,14 @@ export interface ShopifyFulfillmentOps {
     notifyCustomer: boolean
   }): Promise<{ fulfillmentId: string }>
   fulfillmentTrackingInfoUpdate(gid: string, tracking: { number: string; company?: string }): Promise<void>
+  /**
+   * Bound form of `@doge-buddy/shopify-admin`'s `ordersUpdatedSince(client, sinceIso)` — used by
+   * `run-reconcile.ts` (Task 14)'s sweep 1 to find orders Shopify says are paid that this system
+   * has no record of ever placing.
+   */
+  ordersUpdatedSince(sinceIso: string): Promise<
+    { id: string; name: string; test: boolean; displayFinancialStatus: string; email?: string; updatedAt: string }[]
+  >
 }
 
 export interface SyncTrackingDeps {
@@ -63,6 +71,20 @@ async function auditSkip(
 }
 
 /**
+ * CONTROLLER RULING (Task 13 review, applied in Task 14): `shopify_fulfillment_gid` is null —
+ * meaning, as far as this row is concerned, `fulfillmentCreate` has never successfully been
+ * called for it — yet Shopify reports at least one of the order's fulfillment orders as `CLOSED`.
+ * A crash between a real `fulfillmentCreate` call succeeding (which closes that fulfillment
+ * order) and this executor persisting the returned gid is exactly the scenario that produces this
+ * signature on the next run/retry. Calling `fulfillmentCreate` again in that state risks a second,
+ * duplicate Shopify fulfillment for the same order, so this is treated as a hazard requiring a
+ * human, not routed through the normal "pick the first open node" logic below.
+ */
+function hasSuspiciousClosedNode(fulfillmentOrders: { id: string; status: string }[]): boolean {
+  return fulfillmentOrders.some((node) => node.status === 'CLOSED')
+}
+
+/**
  * `shopify_fulfillment_gid` is unset: this order has never had a Shopify fulfillment created for
  * it. Looks up the order's fulfillment orders and picks the first one still open for fulfillment
  * (`OPEN`/`IN_PROGRESS`); none found is a data/timing problem — not a supplier-order status
@@ -78,6 +100,17 @@ async function createFulfillment(
   supplierOrderRow: SupplierOrderRow,
 ): Promise<void> {
   const fulfillmentOrders = await deps.shopifyOps.orderFulfillmentOrders(orderRow.shopifyOrderGid)
+
+  if (hasSuspiciousClosedNode(fulfillmentOrders)) {
+    await auditSkip(deps.db, 'fulfillment.sync_suspected_duplicate', orderRow, supplierOrderRow.id, {
+      orderGid: orderRow.shopifyOrderGid,
+    })
+    await deps.alert('warning', 'sync_suspected_duplicate', {
+      supplierOrderRowId: supplierOrderRow.id,
+    })
+    return
+  }
+
   const target = fulfillmentOrders.find((node) => CREATABLE_STATUSES.has(node.status))
 
   if (!target) {

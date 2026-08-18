@@ -3,14 +3,17 @@ import {
   fulfillmentCreate,
   fulfillmentTrackingInfoUpdate,
   orderFulfillmentOrders,
+  ordersUpdatedSince,
   ShopifyAdminClient,
   ShopifyTokenManager,
 } from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdapter } from '@doge-buddy/supplier'
 import { createAlerter } from './alerts.ts'
 import { loadConfig } from './config.ts'
+import type { ReconcileDeps } from './fulfillment/run-reconcile.ts'
 import type { ShopifyFulfillmentOps } from './fulfillment/run-sync-tracking.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
+import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
@@ -100,14 +103,25 @@ const shopifyOps: ShopifyFulfillmentOps = shopifyClient
       orderFulfillmentOrders: (orderGid) => orderFulfillmentOrders(shopifyClient, orderGid),
       fulfillmentCreate: (args) => fulfillmentCreate(shopifyClient, args),
       fulfillmentTrackingInfoUpdate: (gid, tracking) => fulfillmentTrackingInfoUpdate(shopifyClient, gid, tracking),
+      ordersUpdatedSince: (sinceIso) => ordersUpdatedSince(shopifyClient, sinceIso),
     }
   : {
       orderFulfillmentOrders: shopifyNotConfigured,
       fulfillmentCreate: shopifyNotConfigured,
       fulfillmentTrackingInfoUpdate: shopifyNotConfigured,
+      ordersUpdatedSince: shopifyNotConfigured,
     }
 
 queue = await startQueue(config.databaseUrl, { adapter: supplierAdapter, settings, alert, shopify: shopifyOps })
+
+// `fulfillment.reconcile` (Task 14): the hourly four-sweep reconciliation job. Registered
+// unconditionally (unlike the `shopify.webhook-audit` cron below, which needs `adminBaseUrl` too)
+// — sweeps 2-4 need no Shopify config at all, and sweep 1's `ordersUpdatedSince` already degrades
+// to a loud per-run failure (via `shopifyOps`'s own `shopifyNotConfigured` stub) rather than a
+// silent no-op when Shopify creds aren't set. `registerCron` creates the queue (idempotent — it's
+// already created by `startQueue` above), registers this as its sole worker, and schedules it.
+const reconcileDeps: ReconcileDeps = { db, adapter: supplierAdapter, settings, alert, enqueue, shopifyOps, now: () => new Date() }
+await registerCron(queue.boss, 'fulfillment.reconcile', '0 * * * *', fulfillmentReconcileHandler(reconcileDeps))
 
 if (config.shopify && config.adminBaseUrl && shopifyClient) {
   const { adminBaseUrl } = config
