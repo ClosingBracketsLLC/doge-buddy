@@ -35,9 +35,9 @@ export function Header({
 }: HeaderProps) {
   const {shop, menu} = header;
   return (
-    <header className="sticky top-0 z-10 flex items-center gap-2 bg-surface-raised px-4 py-3 md:gap-4">
+    <header className="sticky top-0 z-10 flex items-center gap-2 border-b-4 border-ink bg-surface-raised px-4 py-2.5 md:gap-4">
       <NavLink prefetch="intent" to="/" end className="shrink-0 rounded-2xl">
-        <img src={wordmark} alt="Doge Buddy" className="h-8" />
+        <img src={wordmark} alt="Doge Buddy" className="h-12" />
       </NavLink>
       <HeaderMenu
         menu={menu}
@@ -97,8 +97,8 @@ export function HeaderMenu({
 }
 
 function navLinkClassName({isActive}: {isActive: boolean}) {
-  return `rounded-2xl px-3 py-2 text-ink transition-colors hover:text-cta ${
-    isActive ? 'text-cta font-semibold' : ''
+  return `rounded-2xl px-3 py-2 font-display text-lg text-ink transition-colors hover:text-cta ${
+    isActive ? 'text-cta' : ''
   }`;
 }
 
@@ -169,7 +169,13 @@ function CartBadge({count}: {count: number}) {
         } as CartViewPayload);
       }}
     >
-      Cart <span aria-label={`(items: ${count})`}>{count}</span>
+      Cart{' '}
+      <span
+        aria-label={`(items: ${count})`}
+        className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-cta px-1 text-xs font-bold text-white"
+      >
+        {count}
+      </span>
     </a>
   );
 }

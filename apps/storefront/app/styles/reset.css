@@ -1,3 +1,7 @@
+/* Skeleton element resets, demoted into the base layer so Tailwind utilities
+   (utilities layer) always win. Un-layered rules here silently override every
+   text-*/font-*/size utility in the app — see the anchor-color bug. */
+@layer base {
 body {
   font-family:
     system-ui,
@@ -52,8 +56,10 @@ p {
   line-height: 1.4;
 }
 
+/* No color here: an un-layered element rule outranks Tailwind's layered
+   utilities, so a hex here silently overrides every text-* link class. */
 a {
-  color: #000;
+  color: inherit;
   text-decoration: none;
 }
 
@@ -136,4 +142,5 @@ code {
   border-radius: 4px;
   font-family: monospace;
   padding: 0.25rem;
+}
 }

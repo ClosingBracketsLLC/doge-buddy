@@ -22,7 +22,7 @@ const POLICY_LINKS: Array<{to: string; title: string}> = [
 // content itself is now fully hardcoded per the brand brief.
 export function Footer(_props: FooterProps) {
   return (
-    <footer className="mt-auto bg-ink text-surface">
+    <footer className="mt-auto border-t-4 border-gold bg-ink text-surface">
       <div className="mx-auto flex max-w-5xl flex-col items-center gap-4 px-4 py-8">
         <nav
           className="flex flex-wrap justify-center gap-x-6 gap-y-2"

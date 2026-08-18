@@ -4,7 +4,7 @@ import {Suspense} from 'react';
 import type {RecommendedProductsQuery} from 'storefrontapi.generated';
 import {Hero} from '~/components/brand/Hero';
 import {ProductItem} from '~/components/ProductItem';
-import {TrustStrip} from '~/components/brand/TrustStrip';
+import {RibbonHeading} from '~/components/brand/RibbonHeading';
 
 export const meta: Route.MetaFunction = () => {
   return [
@@ -68,9 +68,6 @@ export default function Homepage() {
     <div className="home mx-auto max-w-5xl px-4 py-8 md:py-12">
       <Hero />
       <RecommendedProducts products={data.recommendedProducts} />
-      <div className="mt-12">
-        <TrustStrip />
-      </div>
     </div>
   );
 }
@@ -82,12 +79,9 @@ function RecommendedProducts({
 }) {
   return (
     <section className="mt-12" aria-labelledby="recommended-products">
-      <h2
-        id="recommended-products"
-        className="font-display font-bold text-2xl text-ink"
-      >
-        Featured products
-      </h2>
+      <div id="recommended-products">
+        <RibbonHeading>Fan favorites</RibbonHeading>
+      </div>
       <Suspense fallback={<div className="mt-4 text-info">Loading...</div>}>
         <Await resolve={products}>
           {(response) => (

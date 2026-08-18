@@ -1,24 +1,33 @@
-import mascot from '~/assets/mascot.svg';
 import {Link} from 'react-router';
+import heroArt from '~/assets/art/hero-mascot.webp';
 
 export function Hero() {
   return (
-    <section className="bg-surface-raised rounded-2xl px-6 py-12 md:flex items-center gap-8 shadow-sm">
-      <div className="max-w-xl">
-        <h1 className="font-display font-extrabold text-4xl md:text-5xl text-ink">
+    <section className="overflow-hidden rounded-2xl border-4 border-ink bg-surface-raised shadow-sm md:flex md:items-stretch">
+      <div className="flex flex-col justify-center px-6 py-10 md:w-1/2 md:px-10">
+        <h1 className="font-display text-5xl leading-tight text-ink md:text-6xl">
           Great gear for your best friend
         </h1>
         <p className="mt-4 text-lg text-info">
-          Toys, walks, beds, and grooming — picked for happy dogs, shipped fast from US warehouses.
+          Toys, walks, beds, and grooming — picked for happy dogs, shipped
+          fast from US warehouses.
         </p>
-        <Link to="/collections/toys-play" className="mt-6 inline-block bg-cta text-white font-bold rounded-2xl px-8 py-3 hover:opacity-90">
-          Shop toys
-        </Link>
-      </div>
-      <div className="mt-8 md:mt-0 shrink-0">
-        <div className="bg-accent/30 rounded-full p-8">
-          <img src={mascot} alt="" aria-hidden className="w-48 h-48 md:w-64 md:h-64" />
+        <div>
+          <Link
+            to="/collections/toys-play"
+            className="mt-6 inline-block rounded-2xl border-2 border-ink bg-cta px-8 py-3 font-display text-xl text-white shadow-[4px_4px_0_var(--color-ink)] transition-transform hover:-translate-y-0.5 motion-reduce:transition-none"
+          >
+            Shop toys
+          </Link>
         </div>
+      </div>
+      <div className="border-t-4 border-ink md:w-1/2 md:border-l-4 md:border-t-0">
+        <img
+          src={heroArt}
+          alt=""
+          aria-hidden
+          className="h-full w-full object-cover"
+        />
       </div>
     </section>
   );
