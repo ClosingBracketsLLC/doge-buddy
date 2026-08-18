@@ -3,6 +3,7 @@ import { MockSupplierAdapter } from '@doge-buddy/supplier'
 import { and, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
+import { upsertOrderFromPaidPayload } from '../src/fulfillment/order-upsert.ts'
 import { FULFILLMENT_RETRY_OPTS } from '../src/fulfillment/run-place-order.ts'
 import {
   executeReconcile,
@@ -174,6 +175,13 @@ describe('run-reconcile', () => {
       .where(and(eq(auditLog.entityType, 'alert'), eq(auditLog.action, `alert.${kind}`)))
   }
 
+  async function rowFailureAuditsFor(entityId: string) {
+    return db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, 'reconcile.row_failed'), eq(auditLog.entityId, entityId)))
+  }
+
   // ---------------------------------------------------------------------------
   // Sweep 1: orphaned orders
   // ---------------------------------------------------------------------------
@@ -196,9 +204,9 @@ describe('run-reconcile', () => {
         ],
       })
 
-      const orphaned = await sweepOrphanedOrders(deps)
+      const result = await sweepOrphanedOrders(deps)
 
-      expect(orphaned).toBe(1)
+      expect(result).toEqual({ count: 1, failures: 0 })
       expect(enqueue).toHaveBeenCalledWith(
         'fulfillment.place-order',
         { orderGid },
@@ -221,9 +229,9 @@ describe('run-reconcile', () => {
         ],
       })
 
-      const orphaned = await sweepOrphanedOrders(deps)
+      const result = await sweepOrphanedOrders(deps)
 
-      expect(orphaned).toBe(1)
+      expect(result).toEqual({ count: 1, failures: 0 })
 
       const [row] = await db.select().from(orders).where(eq(orders.shopifyOrderGid, orderGid))
       expect(row).toBeDefined()
@@ -254,9 +262,9 @@ describe('run-reconcile', () => {
         ],
       })
 
-      const orphaned = await sweepOrphanedOrders(deps)
+      const result = await sweepOrphanedOrders(deps)
 
-      expect(orphaned).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       expect(enqueue).not.toHaveBeenCalled()
     })
 
@@ -268,9 +276,9 @@ describe('run-reconcile', () => {
         ],
       })
 
-      const orphaned = await sweepOrphanedOrders(deps)
+      const result = await sweepOrphanedOrders(deps)
 
-      expect(orphaned).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       expect(enqueue).not.toHaveBeenCalled()
       const [row] = await db.select().from(orders).where(eq(orders.shopifyOrderGid, orderGid))
       expect(row).toBeUndefined()
@@ -284,10 +292,54 @@ describe('run-reconcile', () => {
         ],
       })
 
-      const orphaned = await sweepOrphanedOrders(deps)
+      const result = await sweepOrphanedOrders(deps)
 
-      expect(orphaned).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       expect(enqueue).not.toHaveBeenCalled()
+    })
+
+    it('FINDING 2: one item throwing during processing does not stop the rest of the batch; failure counted and audited', async () => {
+      const failingGid = orderGidFor()
+      const okGid = orderGidFor()
+
+      const enqueue = vi.fn(async (_name: string, data: object) => {
+        if ((data as { orderGid: string }).orderGid === failingGid) {
+          throw new Error('enqueue transport down')
+        }
+      })
+      const notUsed = async (): Promise<never> => {
+        throw new Error('not used by this test')
+      }
+      const shopifyOps: ShopifyFulfillmentOps = {
+        orderFulfillmentOrders: notUsed,
+        fulfillmentCreate: notUsed,
+        fulfillmentTrackingInfoUpdate: notUsed,
+        ordersUpdatedSince: async () => [
+          { id: failingGid, name: '#f1', test: false, displayFinancialStatus: 'PAID', updatedAt: now().toISOString() },
+          { id: okGid, name: '#f2', test: false, displayFinancialStatus: 'PAID', updatedAt: now().toISOString() },
+        ],
+      }
+      const mockLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      const deps: ReconcileDeps = {
+        db,
+        adapter: new MockSupplierAdapter(),
+        settings,
+        alert: createAlerter(db, mockLog),
+        enqueue,
+        shopifyOps,
+        now,
+      }
+
+      const result = await sweepOrphanedOrders(deps)
+
+      expect(result).toEqual({ count: 1, failures: 1 })
+
+      const [okRow] = await db.select().from(orders).where(eq(orders.shopifyOrderGid, okGid))
+      expect(okRow).toBeDefined() // sibling item still processed despite the failing one
+
+      const failureAudits = await rowFailureAuditsFor(failingGid)
+      expect(failureAudits.length).toBeGreaterThan(0)
+      expect(failureAudits[0]!.detail).toMatchObject({ sweep: 'orphaned_orders', message: 'enqueue transport down' })
     })
   })
 
@@ -365,9 +417,9 @@ describe('run-reconcile', () => {
       vi.spyOn(adapter, 'getTracking').mockResolvedValue(null)
       const { deps } = makeDeps({ adapter })
 
-      const driftFixed = await sweepStatusDrift(deps)
+      const result = await sweepStatusDrift(deps)
 
-      expect(driftFixed).toBe(1)
+      expect(result).toEqual({ count: 1, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('shipped')
     })
@@ -383,9 +435,9 @@ describe('run-reconcile', () => {
       vi.spyOn(adapter, 'getTracking').mockResolvedValue(null)
       const { deps } = makeDeps({ adapter })
 
-      const driftFixed = await sweepStatusDrift(deps)
+      const result = await sweepStatusDrift(deps)
 
-      expect(driftFixed).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('created')
     })
@@ -399,9 +451,9 @@ describe('run-reconcile', () => {
       vi.spyOn(adapter, 'getTracking').mockResolvedValue(null)
       const { deps } = makeDeps({ adapter })
 
-      const driftFixed = await sweepStatusDrift(deps)
+      const result = await sweepStatusDrift(deps)
 
-      expect(driftFixed).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('paid')
     })
@@ -420,9 +472,9 @@ describe('run-reconcile', () => {
       vi.spyOn(adapter, 'getTracking').mockResolvedValue({ trackingNumber: 'NEW123', carrier: 'DHL' })
       const { deps, enqueue } = makeDeps({ adapter })
 
-      const driftFixed = await sweepStatusDrift(deps)
+      const result = await sweepStatusDrift(deps)
 
-      expect(driftFixed).toBe(1)
+      expect(result).toEqual({ count: 1, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('paid') // untouched
       expect(updated?.trackingNumber).toBe('NEW123')
@@ -448,9 +500,9 @@ describe('run-reconcile', () => {
       vi.spyOn(adapter, 'getTracking').mockResolvedValue({ trackingNumber: 'SAME123' })
       const { deps, enqueue } = makeDeps({ adapter })
 
-      const driftFixed = await sweepStatusDrift(deps)
+      const result = await sweepStatusDrift(deps)
 
-      expect(driftFixed).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       expect(enqueue).not.toHaveBeenCalled()
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.trackingNumber).toBe('SAME123')
@@ -465,9 +517,9 @@ describe('run-reconcile', () => {
       const getTrackingSpy = vi.spyOn(adapter, 'getTracking')
       const { deps } = makeDeps({ adapter })
 
-      const driftFixed = await sweepStatusDrift(deps)
+      const result = await sweepStatusDrift(deps)
 
-      expect(driftFixed).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       expect(getOrderStatusSpy).not.toHaveBeenCalled()
       expect(getTrackingSpy).not.toHaveBeenCalled()
     })
@@ -480,9 +532,9 @@ describe('run-reconcile', () => {
       const getOrderStatusSpy = vi.spyOn(adapter, 'getOrderStatus')
       const { deps } = makeDeps({ adapter })
 
-      const driftFixed = await sweepStatusDrift(deps)
+      const result = await sweepStatusDrift(deps)
 
-      expect(driftFixed).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       expect(getOrderStatusSpy).not.toHaveBeenCalled()
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('paid')
@@ -496,10 +548,45 @@ describe('run-reconcile', () => {
       const getOrderStatusSpy = vi.spyOn(adapter, 'getOrderStatus')
       const { deps } = makeDeps({ adapter })
 
-      const driftFixed = await sweepStatusDrift(deps)
+      const result = await sweepStatusDrift(deps)
 
-      expect(driftFixed).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       expect(getOrderStatusSpy).not.toHaveBeenCalled()
+    })
+
+    it('FINDING 2: getOrderStatus throwing for the first row does not stop the second row from being processed; failure counted and audited', async () => {
+      const { orderRowId: firstOrderId } = await seedOrder()
+      const firstRow = await seedSupplierOrder({ orderRowId: firstOrderId, status: 'paid', updatedAt: minutesBefore(20) })
+      const { orderRowId: secondOrderId } = await seedOrder()
+      const secondRow = await seedSupplierOrder({
+        orderRowId: secondOrderId,
+        status: 'paid',
+        updatedAt: minutesBefore(20),
+      })
+
+      const adapter = new MockSupplierAdapter()
+      vi.spyOn(adapter, 'getOrderStatus').mockImplementation(async (supplierOrderId: string) => {
+        if (supplierOrderId === firstRow.supplierOrderId) {
+          throw new Error('CJ API unreachable')
+        }
+        return { value: 'shipped', raw: 'shipped' }
+      })
+      vi.spyOn(adapter, 'getTracking').mockResolvedValue(null)
+      const { deps } = makeDeps({ adapter })
+
+      const result = await sweepStatusDrift(deps)
+
+      expect(result).toEqual({ count: 1, failures: 1 })
+
+      const firstUpdated = await loadSupplierOrder(firstRow.id)
+      expect(firstUpdated?.status).toBe('paid') // untouched — its own call threw before any write
+
+      const secondUpdated = await loadSupplierOrder(secondRow.id)
+      expect(secondUpdated?.status).toBe('shipped') // sibling row still processed
+
+      const failureAudits = await rowFailureAuditsFor(firstRow.id)
+      expect(failureAudits.length).toBeGreaterThan(0)
+      expect(failureAudits[0]!.detail).toMatchObject({ sweep: 'status_drift', message: 'CJ API unreachable' })
     })
   })
 
@@ -513,9 +600,9 @@ describe('run-reconcile', () => {
       const row = await seedSupplierOrder({ orderRowId, status: 'confirmed' })
 
       const { deps } = makeDeps()
-      const overdue = await sweepOverdue(deps)
+      const result = await sweepOverdue(deps)
 
-      expect(overdue).toBe(1)
+      expect(result).toEqual({ count: 1, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('needs_attention')
       expect(updated?.lastError).toMatch(/^overdue:/)
@@ -531,9 +618,9 @@ describe('run-reconcile', () => {
       const row = await seedSupplierOrder({ orderRowId, status: 'confirmed' })
 
       const { deps } = makeDeps()
-      const overdue = await sweepOverdue(deps)
+      const result = await sweepOverdue(deps)
 
-      expect(overdue).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('confirmed')
     })
@@ -543,9 +630,9 @@ describe('run-reconcile', () => {
       const row = await seedSupplierOrder({ orderRowId, status: 'shipped' })
 
       const { deps } = makeDeps()
-      const overdue = await sweepOverdue(deps)
+      const result = await sweepOverdue(deps)
 
-      expect(overdue).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('shipped')
     })
@@ -555,9 +642,9 @@ describe('run-reconcile', () => {
       const row = await seedSupplierOrder({ orderRowId, status: 'confirmed' })
 
       const { deps } = makeDeps()
-      const overdue = await sweepOverdue(deps)
+      const result = await sweepOverdue(deps)
 
-      expect(overdue).toBe(0)
+      expect(result).toEqual({ count: 0, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('confirmed')
     })
@@ -568,20 +655,75 @@ describe('run-reconcile', () => {
       const row = await seedSupplierOrder({ orderRowId, status: 'confirmed' })
 
       const { deps } = makeDeps()
-      const overdue = await sweepOverdue(deps)
+      const result = await sweepOverdue(deps)
 
-      expect(overdue).toBe(1)
+      expect(result).toEqual({ count: 1, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('needs_attention')
+    })
+
+    it('FINDING 1: end-to-end from a REAL orders/paid upsert (not hand-seeded paid_at) -> the sweep now fires in the integrated path', async () => {
+      const orderGid = orderGidFor()
+      const processedAtIso = daysBefore(8).toISOString()
+      const upserted = await upsertOrderFromPaidPayload(db, {
+        admin_graphql_api_id: orderGid,
+        test: false,
+        total_price: '25.00',
+        processed_at: processedAtIso,
+      })
+      const row = await seedSupplierOrder({ orderRowId: upserted.orderRowId, status: 'confirmed' })
+
+      const { deps } = makeDeps()
+      const result = await sweepOverdue(deps)
+
+      expect(result).toEqual({ count: 1, failures: 0 })
+      const updated = await loadSupplierOrder(row.id)
+      expect(updated?.status).toBe('needs_attention')
+
+      const [orderRow] = await db.select().from(orders).where(eq(orders.id, upserted.orderRowId))
+      expect(orderRow?.paidAt?.toISOString()).toBe(processedAtIso)
+    })
+
+    it('FINDING 2: a downstream failure (alert throwing) for one row does not stop the rest of the batch; failure counted and audited', async () => {
+      const { orderRowId: firstOrderId } = await seedOrder({ paidAt: daysBefore(8) })
+      const firstRow = await seedSupplierOrder({ orderRowId: firstOrderId, status: 'confirmed' })
+      const { orderRowId: secondOrderId } = await seedOrder({ paidAt: daysBefore(8) })
+      const secondRow = await seedSupplierOrder({ orderRowId: secondOrderId, status: 'confirmed' })
+
+      const mockLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      const realAlert = createAlerter(db, mockLog)
+      const { deps } = makeDeps()
+      deps.alert = async (severity, kind, detail) => {
+        if (kind === 'order_overdue' && (detail as { supplierOrderRowId?: string }).supplierOrderRowId === firstRow.id) {
+          throw new Error('alert transport down')
+        }
+        return realAlert(severity, kind, detail)
+      }
+
+      const result = await sweepOverdue(deps)
+
+      expect(result).toEqual({ count: 1, failures: 1 })
+
+      // applyTransition already succeeded before the alert threw — the failure is caught after,
+      // not rolled back; that's the correct/expected shape (see the sweep's doc comment).
+      const firstUpdated = await loadSupplierOrder(firstRow.id)
+      expect(firstUpdated?.status).toBe('needs_attention')
+
+      const secondUpdated = await loadSupplierOrder(secondRow.id)
+      expect(secondUpdated?.status).toBe('needs_attention')
+
+      const failureAudits = await rowFailureAuditsFor(firstRow.id)
+      expect(failureAudits.length).toBeGreaterThan(0)
+      expect(failureAudits[0]!.detail).toMatchObject({ sweep: 'overdue', message: 'alert transport down' })
     })
   })
 
   // ---------------------------------------------------------------------------
-  // executeReconcile: combined shape
+  // executeReconcile: combined shape + cross-sweep failure isolation
   // ---------------------------------------------------------------------------
 
   describe('executeReconcile', () => {
-    it('runs all four sweeps and returns their combined counts', async () => {
+    it('runs all four sweeps and returns their combined counts, including failures', async () => {
       // One fixture per sweep, each guaranteed to fire exactly once.
       const orphanGid = orderGidFor()
       await seedWebhookEvent({ source: 'shopify', receivedAt: minutesBefore(20) })
@@ -609,7 +751,47 @@ describe('run-reconcile', () => {
 
       const counts = await executeReconcile(deps)
 
-      expect(counts).toEqual({ orphaned: 1, strandedWebhooks: 1, driftFixed: 1, overdue: 1 })
+      expect(counts).toEqual({ orphaned: 1, strandedWebhooks: 1, driftFixed: 1, overdue: 1, failures: 0 })
+    })
+
+    it('FINDING 2: a sweep-3 row failure does not abort the run — sweep 4 still executes and its own count/failure is still returned', async () => {
+      const { orderRowId: failingOrderId } = await seedOrder()
+      const failingRow = await seedSupplierOrder({ orderRowId: failingOrderId, status: 'paid', updatedAt: minutesBefore(20) })
+      const { orderRowId: okOrderId } = await seedOrder()
+      const okRow = await seedSupplierOrder({ orderRowId: okOrderId, status: 'paid', updatedAt: minutesBefore(20) })
+      const { orderRowId: overdueOrderId } = await seedOrder({ paidAt: daysBefore(8) })
+      const overdueRow = await seedSupplierOrder({ orderRowId: overdueOrderId, status: 'confirmed' })
+
+      const adapter = new MockSupplierAdapter()
+      vi.spyOn(adapter, 'getOrderStatus').mockImplementation(async (supplierOrderId: string) => {
+        if (supplierOrderId === failingRow.supplierOrderId) {
+          throw new Error('CJ API unreachable')
+        }
+        return { value: 'shipped', raw: 'shipped' }
+      })
+      vi.spyOn(adapter, 'getTracking').mockResolvedValue(null)
+
+      const { deps } = makeDeps({ adapter })
+
+      const counts = await executeReconcile(deps)
+
+      // Second sweep-3 row still processed despite the first one's failure.
+      const okUpdated = await loadSupplierOrder(okRow.id)
+      expect(okUpdated?.status).toBe('shipped')
+      const failingUpdated = await loadSupplierOrder(failingRow.id)
+      expect(failingUpdated?.status).toBe('paid') // untouched
+
+      // Sweep 4 still ran (proving executeReconcile completed all four sweeps despite sweep 3's error).
+      const overdueUpdated = await loadSupplierOrder(overdueRow.id)
+      expect(overdueUpdated?.status).toBe('needs_attention')
+
+      expect(counts.driftFixed).toBe(1)
+      expect(counts.overdue).toBe(1)
+      expect(counts.failures).toBe(1)
+
+      const failureAudits = await rowFailureAuditsFor(failingRow.id)
+      expect(failureAudits.length).toBeGreaterThan(0)
+      expect(failureAudits[0]!.detail).toMatchObject({ sweep: 'status_drift', message: 'CJ API unreachable' })
     })
   })
 })

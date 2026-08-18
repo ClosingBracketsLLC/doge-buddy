@@ -257,6 +257,49 @@ describe('upsertOrderFromPaidPayload', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]!.totalCents).toBe(9900)
   })
+
+  it('sets paid_at from the payload processed_at field', async () => {
+    const payload = paidPayload({ processed_at: '2026-05-01T10:00:00.000Z' })
+    const result = await upsertOrderFromPaidPayload(db, payload)
+
+    const [row] = await db.select().from(orders).where(eq(orders.id, result.orderRowId))
+    expect(row!.paidAt?.toISOString()).toBe('2026-05-01T10:00:00.000Z')
+  })
+
+  it('falls back to (approximately) now when processed_at is absent', async () => {
+    const payload = paidPayload()
+    delete payload.processed_at
+    const before = Date.now()
+    const result = await upsertOrderFromPaidPayload(db, payload)
+    const after = Date.now()
+
+    const [row] = await db.select().from(orders).where(eq(orders.id, result.orderRowId))
+    expect(row!.paidAt).not.toBeNull()
+    expect(row!.paidAt!.getTime()).toBeGreaterThanOrEqual(before - 1000)
+    expect(row!.paidAt!.getTime()).toBeLessThanOrEqual(after + 1000)
+  })
+
+  it('falls back to (approximately) now when processed_at is present but unparseable', async () => {
+    const payload = paidPayload({ processed_at: 'not-a-date' })
+    const before = Date.now()
+    const result = await upsertOrderFromPaidPayload(db, payload)
+    const after = Date.now()
+
+    const [row] = await db.select().from(orders).where(eq(orders.id, result.orderRowId))
+    expect(row!.paidAt).not.toBeNull()
+    expect(row!.paidAt!.getTime()).toBeGreaterThanOrEqual(before - 1000)
+    expect(row!.paidAt!.getTime()).toBeLessThanOrEqual(after + 1000)
+  })
+
+  it('re-derives paid_at on a replayed delivery (upsert path also sets paid_at, not just insert)', async () => {
+    const payload = paidPayload({ processed_at: '2026-05-01T10:00:00.000Z' })
+    const first = await upsertOrderFromPaidPayload(db, payload)
+    const second = await upsertOrderFromPaidPayload(db, { ...payload, total_price: '5.00' })
+    expect(second.orderRowId).toBe(first.orderRowId)
+
+    const [row] = await db.select().from(orders).where(eq(orders.id, first.orderRowId))
+    expect(row!.paidAt?.toISOString()).toBe('2026-05-01T10:00:00.000Z')
+  })
 })
 
 describe('mapCjStatus', () => {

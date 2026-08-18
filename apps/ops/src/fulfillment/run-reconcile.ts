@@ -28,6 +28,48 @@ export interface ReconcileCounts {
   strandedWebhooks: number
   driftFixed: number
   overdue: number
+  /**
+   * Total rows across sweeps 1, 3, and 4 whose per-row processing threw and was caught rather
+   * than allowed to abort the rest of that sweep (see `auditRowFailure` and each sweep's own
+   * try/catch). Sweep 2 doesn't contribute to this — see its own doc comment for why. Every
+   * counted failure also has a matching `reconcile.row_failed` `audit_log` row, so this number is
+   * a summary, not the only record of what failed.
+   */
+  failures: number
+}
+
+/**
+ * A sweep that isolates per-row failures (1, 3, 4) returns both how many rows it actually fixed
+ * and how many it caught a failure for, instead of a single count — see `auditRowFailure`.
+ */
+interface SweepResult {
+  count: number
+  failures: number
+}
+
+/**
+ * Records one row's caught failure the same way `webhookProcessHandler` records a poison job:
+ * `audit_log` gets the durable record (action `reconcile.row_failed`, `sweep` + the error message
+ * in `detail`) and the loop that caught it moves on to the next row instead of aborting the rest
+ * of the sweep. `StaleStatusError` (another writer moved the row between this sweep's SELECT and
+ * its own `applyTransition` call) is an expected, ordinary case here, not a bug — it's caught by
+ * the same generic catch as everything else, no special-casing needed.
+ */
+async function auditRowFailure(
+  db: Db,
+  sweep: 'orphaned_orders' | 'status_drift' | 'overdue',
+  entityType: string,
+  entityId: string,
+  err: unknown,
+): Promise<void> {
+  const message = err instanceof Error ? err.message : String(err)
+  await db.insert(auditLog).values({
+    actor: 'system',
+    action: 'reconcile.row_failed',
+    entityType,
+    entityId,
+    detail: { sweep, message },
+  })
 }
 
 // Each sweep function below is exported individually, in addition to the combined
@@ -73,62 +115,78 @@ const OVERDUE_EXCLUDED_STATUSES: SupplierOrderStatusDb[] = [
  * A row that already has a `supplier_orders` row (any status) is "already handled" and skipped —
  * this sweep only ever creates the *first* supplier_orders row for an order, same as place-order's
  * own `loadOrCreateSupplierOrder`.
+ *
+ * Each item's processing is isolated in its own try/catch — one order's DB or enqueue failure
+ * doesn't stop the rest of the batch `ordersUpdatedSince` returned from being reconciled. Caught
+ * failures are counted (`SweepResult.failures`) and audited (`reconcile.row_failed`), keyed on the
+ * Shopify order gid — the only identifier guaranteed available regardless of how far this item's
+ * processing got before it threw (a DB row may not exist yet).
  */
-export async function sweepOrphanedOrders(deps: ReconcileDeps): Promise<number> {
+export async function sweepOrphanedOrders(deps: ReconcileDeps): Promise<SweepResult> {
   const sinceIso = new Date(deps.now().getTime() - SWEEP1_LOOKBACK_MS).toISOString()
   const items = await deps.shopifyOps.ordersUpdatedSince(sinceIso)
 
-  let orphaned = 0
+  let count = 0
+  let failures = 0
 
   for (const item of items) {
     if (item.test || item.displayFinancialStatus !== 'PAID') continue
 
-    const [existingOrder] = await deps.db.select().from(orders).where(eq(orders.shopifyOrderGid, item.id))
+    try {
+      const [existingOrder] = await deps.db.select().from(orders).where(eq(orders.shopifyOrderGid, item.id))
 
-    if (existingOrder) {
-      const [existingSupplierOrder] = await deps.db
-        .select({ id: supplierOrders.id })
-        .from(supplierOrders)
-        .where(eq(supplierOrders.orderId, existingOrder.id))
-      if (existingSupplierOrder) continue // already handled — a supplier_orders row exists
+      if (existingOrder) {
+        const [existingSupplierOrder] = await deps.db
+          .select({ id: supplierOrders.id })
+          .from(supplierOrders)
+          .where(eq(supplierOrders.orderId, existingOrder.id))
+        if (existingSupplierOrder) continue // already handled — a supplier_orders row exists
 
+        await deps.enqueue(
+          PLACE_ORDER_QUEUE,
+          { orderGid: item.id },
+          { singletonKey: item.id, ...FULFILLMENT_RETRY_OPTS },
+        )
+        count += 1
+        continue
+      }
+
+      // No `orders` row at all. `onConflictDoNothing` covers the race against a webhook (or a
+      // concurrent reconcile run) creating the same row between our SELECT above and this INSERT
+      // — on conflict we skip this item for this run rather than fight over ownership; whoever
+      // won already owns enqueueing place-order for it.
+      const [inserted] = await deps.db
+        .insert(orders)
+        .values({
+          shopifyOrderGid: item.id,
+          shopifyOrderNumber: item.name,
+          email: item.email ?? null,
+          isTest: false,
+          paidAt: null,
+          shippingAddress: null,
+        })
+        .onConflictDoNothing({ target: orders.shopifyOrderGid })
+        .returning({ id: orders.id })
+      if (!inserted) continue
+
+      await deps.alert('warning', 'reconcile_thin_order', {
+        orderId: inserted.id,
+        orderGid: item.id,
+        shopifyOrderNumber: item.name,
+      })
       await deps.enqueue(
         PLACE_ORDER_QUEUE,
         { orderGid: item.id },
         { singletonKey: item.id, ...FULFILLMENT_RETRY_OPTS },
       )
-      orphaned += 1
-      continue
+      count += 1
+    } catch (err) {
+      failures += 1
+      await auditRowFailure(deps.db, 'orphaned_orders', 'order', item.id, err)
     }
-
-    // No `orders` row at all. `onConflictDoNothing` covers the race against a webhook (or a
-    // concurrent reconcile run) creating the same row between our SELECT above and this INSERT —
-    // on conflict we skip this item for this run rather than fight over ownership; whoever won
-    // already owns enqueueing place-order for it.
-    const [inserted] = await deps.db
-      .insert(orders)
-      .values({
-        shopifyOrderGid: item.id,
-        shopifyOrderNumber: item.name,
-        email: item.email ?? null,
-        isTest: false,
-        paidAt: null,
-        shippingAddress: null,
-      })
-      .onConflictDoNothing({ target: orders.shopifyOrderGid })
-      .returning({ id: orders.id })
-    if (!inserted) continue
-
-    await deps.alert('warning', 'reconcile_thin_order', {
-      orderId: inserted.id,
-      orderGid: item.id,
-      shopifyOrderNumber: item.name,
-    })
-    await deps.enqueue(PLACE_ORDER_QUEUE, { orderGid: item.id }, { singletonKey: item.id, ...FULFILLMENT_RETRY_OPTS })
-    orphaned += 1
   }
 
-  return orphaned
+  return { count, failures }
 }
 
 /**
@@ -142,6 +200,14 @@ export async function sweepOrphanedOrders(deps: ReconcileDeps): Promise<number> 
  * Capped at 100 rows per run so one bad backlog can't make a single reconcile run unboundedly
  * slow; if there's more than that waiting, an `info` alert says so (never a silent truncation) —
  * the next hourly run picks up wherever this one left off.
+ *
+ * Unlike sweeps 1, 3, and 4, this sweep's per-row body is not wrapped in its own try/catch: its
+ * only two operations are `enqueue` (already fire-and-forget from this sweep's perspective — the
+ * real work happens in the process job it triggers, not here) and an `audit_log` insert, neither
+ * of which reads any external state that could legitimately fail per-row the way an adapter call
+ * or an `applyTransition` can. A failure here (e.g. the DB connection itself is down) would fail
+ * every remaining row identically, so isolating them wouldn't change the outcome — the whole sweep
+ * failing and retrying next hour is the correct behavior for that case.
  */
 export async function sweepStrandedWebhooks(deps: ReconcileDeps): Promise<number> {
   const cutoff = new Date(deps.now().getTime() - SWEEP2_STALE_MS)
@@ -187,48 +253,61 @@ export async function sweepStrandedWebhooks(deps: ReconcileDeps): Promise<number
  *     equivalent of a CJ LOGISTICS webhook, not a new kind of send.
  * `driftFixed` counts rows where at least one of the two actually changed something (status
  * transition applied and/or tracking persisted) — not the number of individual writes.
+ *
+ * Each row is isolated in its own try/catch — one row's adapter call or DB write failing (a CJ API
+ * error, a `StaleStatusError` from a concurrent writer moving the row off `row.status` between
+ * this sweep's SELECT and its own `applyTransition` call, etc.) doesn't stop the rest of this
+ * sweep's batch from being polled. Caught failures are counted and audited
+ * (`reconcile.row_failed`).
  */
-export async function sweepStatusDrift(deps: ReconcileDeps): Promise<number> {
+export async function sweepStatusDrift(deps: ReconcileDeps): Promise<SweepResult> {
   const cutoff = new Date(deps.now().getTime() - SWEEP3_STALE_MS)
   const rows = await deps.db
     .select()
     .from(supplierOrders)
     .where(and(inArray(supplierOrders.status, DRIFT_STATUSES), lt(supplierOrders.updatedAt, cutoff)))
 
-  let driftFixed = 0
+  let count = 0
+  let failures = 0
 
   for (const row of rows) {
     if (!row.supplierOrderId) continue // never actually placed with the supplier — nothing to poll
-    let fixed = false
 
-    const orderStatus = await deps.adapter.getOrderStatus(row.supplierOrderId)
-    const mapped = mapCjStatus(orderStatus.value)
-    if (mapped && canTransition(row.status, mapped)) {
-      await applyTransition(deps.db, row.id, row.status, mapped)
-      fixed = true
+    try {
+      let fixed = false
+
+      const orderStatus = await deps.adapter.getOrderStatus(row.supplierOrderId)
+      const mapped = mapCjStatus(orderStatus.value)
+      if (mapped && canTransition(row.status, mapped)) {
+        await applyTransition(deps.db, row.id, row.status, mapped)
+        fixed = true
+      }
+
+      const tracking = await deps.adapter.getTracking(row.supplierOrderId)
+      if (tracking && tracking.trackingNumber !== row.trackingNumber) {
+        await deps.db
+          .update(supplierOrders)
+          .set({
+            trackingNumber: tracking.trackingNumber,
+            ...(tracking.carrier !== undefined ? { logisticName: tracking.carrier } : {}),
+          })
+          .where(eq(supplierOrders.id, row.id))
+        await deps.enqueue(
+          SYNC_TRACKING_QUEUE,
+          { supplierOrderRowId: row.id },
+          { singletonKey: row.id, ...FULFILLMENT_RETRY_OPTS },
+        )
+        fixed = true
+      }
+
+      if (fixed) count += 1
+    } catch (err) {
+      failures += 1
+      await auditRowFailure(deps.db, 'status_drift', 'supplier_order', row.id, err)
     }
-
-    const tracking = await deps.adapter.getTracking(row.supplierOrderId)
-    if (tracking && tracking.trackingNumber !== row.trackingNumber) {
-      await deps.db
-        .update(supplierOrders)
-        .set({
-          trackingNumber: tracking.trackingNumber,
-          ...(tracking.carrier !== undefined ? { logisticName: tracking.carrier } : {}),
-        })
-        .where(eq(supplierOrders.id, row.id))
-      await deps.enqueue(
-        SYNC_TRACKING_QUEUE,
-        { supplierOrderRowId: row.id },
-        { singletonKey: row.id, ...FULFILLMENT_RETRY_OPTS },
-      )
-      fixed = true
-    }
-
-    if (fixed) driftFixed += 1
   }
 
-  return driftFixed
+  return { count, failures }
 }
 
 /**
@@ -238,8 +317,12 @@ export async function sweepStatusDrift(deps: ReconcileDeps): Promise<number> {
  * before every `applyTransition` call — every candidate status in practice can legally reach
  * `needs_attention` today (see `transitions.ts`'s matrix), but this sweep never assumes that will
  * stay true, exactly like sweeps 1 and 3 never assume a transition is legal without checking.
+ *
+ * Each row is isolated in its own try/catch — one row's `applyTransition`/`alert` failure (e.g. a
+ * `StaleStatusError` from a concurrent writer) doesn't stop the rest of the overdue batch from
+ * being parked. Caught failures are counted and audited (`reconcile.row_failed`).
  */
-export async function sweepOverdue(deps: ReconcileDeps): Promise<number> {
+export async function sweepOverdue(deps: ReconcileDeps): Promise<SweepResult> {
   const promisedMaxDays = await deps.settings.get('fulfillment.promised_max_days')
   const cutoff = new Date(deps.now().getTime() - promisedMaxDays * 24 * 60 * 60 * 1000)
 
@@ -255,40 +338,55 @@ export async function sweepOverdue(deps: ReconcileDeps): Promise<number> {
       ),
     )
 
-  let overdue = 0
+  let count = 0
+  let failures = 0
 
   for (const { supplierOrder, order } of rows) {
     if (!canTransition(supplierOrder.status, 'needs_attention')) continue
 
-    const paidAtIso = order.paidAt!.toISOString()
-    await applyTransition(deps.db, supplierOrder.id, supplierOrder.status, 'needs_attention', {
-      lastError: `overdue: paid ${paidAtIso}, exceeds ${promisedMaxDays}-day promise`,
-    })
-    await deps.alert('warning', 'order_overdue', {
-      orderId: order.id,
-      orderGid: order.shopifyOrderGid,
-      supplierOrderRowId: supplierOrder.id,
-      paidAt: paidAtIso,
-      promisedMaxDays,
-    })
-    overdue += 1
+    try {
+      const paidAtIso = order.paidAt!.toISOString()
+      await applyTransition(deps.db, supplierOrder.id, supplierOrder.status, 'needs_attention', {
+        lastError: `overdue: paid ${paidAtIso}, exceeds ${promisedMaxDays}-day promise`,
+      })
+      await deps.alert('warning', 'order_overdue', {
+        orderId: order.id,
+        orderGid: order.shopifyOrderGid,
+        supplierOrderRowId: supplierOrder.id,
+        paidAt: paidAtIso,
+        promisedMaxDays,
+      })
+      count += 1
+    } catch (err) {
+      failures += 1
+      await auditRowFailure(deps.db, 'overdue', 'supplier_order', supplierOrder.id, err)
+    }
   }
 
-  return overdue
+  return { count, failures }
 }
 
 /**
  * Hourly reconciliation: the system-of-record sweep that treats every webhook as a hint and polls
- * the actual state of the world (Shopify + the supplier) as truth. Runs all four sweeps in order,
- * unconditionally — a failure in one sweep (e.g. `ordersUpdatedSince` throwing because Shopify
- * isn't configured) fails the whole job, which is fine: this is a cron job, not a one-shot, so the
- * next hourly run starts fresh rather than needing per-sweep resume logic.
+ * the actual state of the world (Shopify + the supplier) as truth. Runs all four sweeps in order.
+ * Per-row failures within sweeps 1, 3, and 4 are caught and counted by those sweeps themselves
+ * (see each one's own doc comment) rather than aborting `executeReconcile` — this function only
+ * ever fails outright on a whole-sweep-level problem it can't isolate per row: sweep 1's own
+ * `ordersUpdatedSince` call throwing (e.g. Shopify isn't configured) before it has any items to
+ * iterate, or either query in sweeps 2-4 itself failing. That's fine: this is a cron job, not a
+ * one-shot, so the next hourly run starts fresh rather than needing whole-job resume logic.
  */
 export async function executeReconcile(deps: ReconcileDeps): Promise<ReconcileCounts> {
-  const orphaned = await sweepOrphanedOrders(deps)
+  const orphanedResult = await sweepOrphanedOrders(deps)
   const strandedWebhooks = await sweepStrandedWebhooks(deps)
-  const driftFixed = await sweepStatusDrift(deps)
-  const overdue = await sweepOverdue(deps)
+  const driftResult = await sweepStatusDrift(deps)
+  const overdueResult = await sweepOverdue(deps)
 
-  return { orphaned, strandedWebhooks, driftFixed, overdue }
+  return {
+    orphaned: orphanedResult.count,
+    strandedWebhooks,
+    driftFixed: driftResult.count,
+    overdue: overdueResult.count,
+    failures: orphanedResult.failures + driftResult.failures + overdueResult.failures,
+  }
 }

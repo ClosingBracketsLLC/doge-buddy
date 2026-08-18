@@ -16,6 +16,8 @@ export interface ShopifyOrderPaidPayload {
   order_number?: number | string | null
   shipping_address?: unknown
   line_items?: { variant_id: number | string; quantity: number }[]
+  /** Shopify's own "when this order was processed/paid" timestamp (ISO 8601). See `parsePaidAt`. */
+  processed_at?: string | null
   [key: string]: unknown
 }
 
@@ -101,6 +103,21 @@ export function decimalStringToCents(value: string): number {
 }
 
 /**
+ * Parses Shopify's `processed_at` (ISO 8601) into a `Date`. Falls back to "now" — rather than
+ * `null` — when the field is absent or fails to parse: `orders.paid_at` drives reconcile's sweep
+ * 4 (overdue-order detection, `run-reconcile.ts`), and a null `paid_at` makes a row invisible to
+ * that sweep forever (it's excluded via `isNotNull`), which is worse than a slightly-late
+ * timestamp on the rare malformed/missing-field payload.
+ */
+function parsePaidAt(value: unknown): Date {
+  if (typeof value === 'string') {
+    const parsed = new Date(value)
+    if (!Number.isNaN(parsed.getTime())) return parsed
+  }
+  return new Date()
+}
+
+/**
  * Maps a Shopify `orders/paid` REST webhook payload into the `orders` table. Upserts on
  * `shopify_order_gid` (not on the webhook_events row that triggered the call), so a replayed
  * delivery under a *new* webhook event id — same order — updates the same order row instead of
@@ -112,6 +129,10 @@ export function decimalStringToCents(value: string): number {
  * stage (the place-order executor, the planner, the adapter) reads directly, with no re-mapping
  * needed and no raw REST field names leaking past this function. The raw REST payload (including
  * the original `shipping_address`) is still preserved verbatim in `raw_payload`.
+ *
+ * `paid_at` is set from `processed_at` (see `parsePaidAt`) on both the initial insert and every
+ * subsequent `onConflictDoUpdate` — a replayed/duplicate `orders/paid` delivery for the same order
+ * re-derives the same value from the same payload field, so this stays idempotent in effect.
  */
 export async function upsertOrderFromPaidPayload(db: Db, payload: ShopifyOrderPaidPayload): Promise<UpsertedOrder> {
   const orderGid = payload.admin_graphql_api_id
@@ -124,6 +145,7 @@ export async function upsertOrderFromPaidPayload(db: Db, payload: ShopifyOrderPa
     isTest,
     totalCents: decimalStringToCents(payload.total_price),
     shippingAddress: shopifyRestAddressToAddress(payload.shipping_address),
+    paidAt: parsePaidAt(payload.processed_at),
     rawPayload: payload,
   }
 
