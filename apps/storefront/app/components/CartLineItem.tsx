@@ -1,9 +1,10 @@
 import type {CartLineUpdateInput} from '@shopify/hydrogen/storefront-api-types';
 import type {CartLayout, LineItemChildrenMap} from '~/components/CartMain';
-import {CartForm, Image, type OptimisticCartLine} from '@shopify/hydrogen';
+import {CartForm, type OptimisticCartLine} from '@shopify/hydrogen';
 import {useVariantUrl} from '~/lib/variants';
 import {Link} from 'react-router';
 import {ProductPrice} from './ProductPrice';
+import {ProductCardImage} from '~/components/brand/ProductCardImage';
 import {useAside} from './Aside';
 import type {
   CartApiQueryFragment,
@@ -28,27 +29,20 @@ export function CartLineItem({
   childrenMap: LineItemChildrenMap;
 }) {
   const {id, merchandise} = line;
-  const {product, title, image, selectedOptions} = merchandise;
+  const {product, image, selectedOptions} = merchandise;
   const lineItemUrl = useVariantUrl(product.handle, selectedOptions);
   const {close} = useAside();
   const lineItemChildren = childrenMap[id];
   const childrenLabelId = `cart-line-children-${id}`;
 
   return (
-    <li key={id} className="cart-line">
-      <div className="cart-line-inner">
-        {image && (
-          <Image
-            alt={title}
-            aspectRatio="1/1"
-            data={image}
-            height={100}
-            loading="lazy"
-            width={100}
-          />
-        )}
+    <li key={id} className="cart-line rounded-2xl bg-surface-raised p-3">
+      <div className="cart-line-inner flex gap-3">
+        <div className="w-20 shrink-0">
+          <ProductCardImage image={image} title={product.title} />
+        </div>
 
-        <div>
+        <div className="min-w-0 flex-1">
           <Link
             prefetch="intent"
             to={lineItemUrl}
@@ -58,15 +52,13 @@ export function CartLineItem({
               }
             }}
           >
-            <p>
-              <strong>{product.title}</strong>
-            </p>
+            <p className="font-bold text-ink">{product.title}</p>
           </Link>
           <ProductPrice price={line?.cost?.totalAmount} />
           <ul>
             {selectedOptions.map((option) => (
               <li key={option.name}>
-                <small>
+                <small className="text-info">
                   {option.name}: {option.value}
                 </small>
               </li>
@@ -109,22 +101,23 @@ function CartLineQuantity({line}: {line: CartLine}) {
   const nextQuantity = Number((quantity + 1).toFixed(0));
 
   return (
-    <div className="cart-line-quantity">
-      <small>Quantity: {quantity} &nbsp;&nbsp;</small>
+    <div className="cart-line-quantity mt-2 flex items-center gap-2 text-ink">
+      <small>Quantity: {quantity}</small>
       <CartLineUpdateButton lines={[{id: lineId, quantity: prevQuantity}]}>
         <button
           aria-label="Decrease quantity"
+          className="rounded-2xl bg-surface px-2 py-1 disabled:opacity-50"
           disabled={quantity <= 1 || !!isOptimistic}
           name="decrease-quantity"
           value={prevQuantity}
         >
-          <span>&#8722; </span>
+          <span>&#8722;</span>
         </button>
       </CartLineUpdateButton>
-      &nbsp;
       <CartLineUpdateButton lines={[{id: lineId, quantity: nextQuantity}]}>
         <button
           aria-label="Increase quantity"
+          className="rounded-2xl bg-surface px-2 py-1 disabled:opacity-50"
           name="increase-quantity"
           value={nextQuantity}
           disabled={!!isOptimistic}
@@ -132,7 +125,6 @@ function CartLineQuantity({line}: {line: CartLine}) {
           <span>&#43;</span>
         </button>
       </CartLineUpdateButton>
-      &nbsp;
       <CartLineRemoveButton lineIds={[lineId]} disabled={!!isOptimistic} />
     </div>
   );
@@ -157,7 +149,11 @@ function CartLineRemoveButton({
       action={CartForm.ACTIONS.LinesRemove}
       inputs={{lineIds}}
     >
-      <button disabled={disabled} type="submit">
+      <button
+        className="text-info underline disabled:opacity-50"
+        disabled={disabled}
+        type="submit"
+      >
         Remove
       </button>
     </CartForm>

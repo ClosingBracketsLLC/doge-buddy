@@ -41,37 +41,46 @@ export default function SearchPage() {
   if (type === 'predictive') return null;
 
   return (
-    <div className="search">
-      <h1>Search</h1>
+    <div className="mx-auto max-w-5xl px-4 py-8 md:py-12">
+      <h1 className="font-display font-extrabold text-3xl text-ink">
+        Search
+      </h1>
       <SearchForm>
         {({inputRef}) => (
-          <>
+          <div className="mt-4 flex gap-2">
             <input
               defaultValue={term}
               name="q"
               placeholder="Search…"
               ref={inputRef}
               type="search"
+              className="flex-1 rounded-2xl bg-surface-raised px-4 py-2 text-ink"
             />
-            &nbsp;
-            <button type="submit">Search</button>
-          </>
+            <button
+              type="submit"
+              className="bg-cta text-white font-bold rounded-2xl px-5 py-2"
+            >
+              Search
+            </button>
+          </div>
         )}
       </SearchForm>
       {error && <p style={{color: 'red'}}>{error}</p>}
-      {!term || !result?.total ? (
-        <SearchResults.Empty />
-      ) : (
-        <SearchResults result={result} term={term}>
-          {({articles, pages, products, term}) => (
-            <div>
-              <SearchResults.Products products={products} term={term} />
-              <SearchResults.Pages pages={pages} term={term} />
-              <SearchResults.Articles articles={articles} term={term} />
-            </div>
-          )}
-        </SearchResults>
-      )}
+      <div className="mt-6">
+        {!term || !result?.total ? (
+          <SearchResults.Empty />
+        ) : (
+          <SearchResults result={result} term={term}>
+            {({articles, pages, products, term}) => (
+              <div>
+                <SearchResults.Products products={products} term={term} />
+                <SearchResults.Pages pages={pages} term={term} />
+                <SearchResults.Articles articles={articles} term={term} />
+              </div>
+            )}
+          </SearchResults>
+        )}
+      </div>
       <Analytics.SearchView data={{searchTerm: term, searchResults: result}} />
     </div>
   );

@@ -1,6 +1,8 @@
 import {Link} from 'react-router';
-import {Image, Money, Pagination} from '@shopify/hydrogen';
+import {Money, Pagination} from '@shopify/hydrogen';
 import {urlWithTrackingParams, type RegularSearchReturn} from '~/lib/search';
+import {EmptyState} from '~/components/brand/EmptyState';
+import {ProductCardImage} from '~/components/brand/ProductCardImage';
 
 type SearchItems = RegularSearchReturn['result']['items'];
 type PartialSearchResult<ItemType extends keyof SearchItems> = Pick<
@@ -102,8 +104,8 @@ function SearchResultsProducts({
   }
 
   return (
-    <div className="search-result">
-      <h2>Products</h2>
+    <div className="search-result mt-8">
+      <h2 className="font-display text-xl font-bold text-ink">Products</h2>
       <Pagination connection={products}>
         {({nodes, isLoading, NextLink, PreviousLink}) => {
           const ItemsMarkup = nodes.map((product) => {
@@ -117,32 +119,32 @@ function SearchResultsProducts({
             const image = product?.selectedOrFirstAvailableVariant?.image;
 
             return (
-              <div className="search-results-item" key={product.id}>
-                <Link prefetch="intent" to={productUrl}>
-                  {image && (
-                    <Image data={image} alt={product.title} width={50} />
-                  )}
-                  <div>
-                    <p>{product.title}</p>
-                    <small>{price && <Money data={price} />}</small>
-                  </div>
-                </Link>
-              </div>
+              <Link
+                className="bg-surface-raised rounded-2xl p-3 block"
+                key={product.id}
+                prefetch="intent"
+                to={productUrl}
+              >
+                <ProductCardImage image={image} title={product.title} />
+                <h3 className="mt-2 text-ink">{product.title}</h3>
+                <p className="mt-1 font-bold text-ink">
+                  {price && <Money data={price} />}
+                </p>
+              </Link>
             );
           });
 
           return (
             <div>
-              <div>
+              <div className="text-center">
                 <PreviousLink>
                   {isLoading ? 'Loading...' : <span>↑ Load previous</span>}
                 </PreviousLink>
               </div>
-              <div>
+              <div className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-4">
                 {ItemsMarkup}
-                <br />
               </div>
-              <div>
+              <div className="mt-4 text-center">
                 <NextLink>
                   {isLoading ? 'Loading...' : <span>Load more ↓</span>}
                 </NextLink>
@@ -151,11 +153,15 @@ function SearchResultsProducts({
           );
         }}
       </Pagination>
-      <br />
     </div>
   );
 }
 
 function SearchResultsEmpty() {
-  return <p>No results, try a different search.</p>;
+  return (
+    <EmptyState
+      title="No treats found"
+      message="Try a different search — or browse the collections."
+    />
+  );
 }

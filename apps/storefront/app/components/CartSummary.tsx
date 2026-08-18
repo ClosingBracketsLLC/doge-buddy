@@ -50,11 +50,14 @@ function CartCheckoutActions({checkoutUrl}: {checkoutUrl?: string}) {
   if (!checkoutUrl) return null;
 
   return (
-    <div>
-      <a href={checkoutUrl} target="_self">
-        <p>Continue to Checkout &rarr;</p>
+    <div className="mt-3">
+      <a
+        href={checkoutUrl}
+        target="_self"
+        className="bg-cta text-white font-bold rounded-2xl w-full py-3 block text-center"
+      >
+        Continue to Checkout &rarr;
       </a>
-      <br />
     </div>
   );
 }
