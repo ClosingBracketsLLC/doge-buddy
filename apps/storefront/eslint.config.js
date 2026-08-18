@@ -237,6 +237,14 @@ export default [
         ...globals.jest,
       },
     },
+    settings: {
+      // Tests run on vitest (jest-compatible API), not jest itself, so
+      // eslint-plugin-jest can't auto-detect a jest package to version
+      // against. Pin a version explicitly to avoid a hard crash.
+      jest: {
+        version: 29,
+      },
+    },
   },
   {
     files: ['**/*.server.*'],
