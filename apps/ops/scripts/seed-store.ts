@@ -37,6 +37,14 @@ try {
   console.log(
     `seed-store: skipped (already existed) — definitions=${result.skipped.definitions} collections=${result.skipped.collections} products=${result.skipped.products}`,
   )
+
+  if (result.failures.length > 0) {
+    console.error(`seed-store: ${result.failures.length} failure(s) — rerun to retry (idempotent):`)
+    for (const failure of result.failures) {
+      console.error(`  - ${failure}`)
+    }
+    process.exit(1)
+  }
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err)
   console.error('seed-store: FAILED —', message)

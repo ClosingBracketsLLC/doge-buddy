@@ -10,7 +10,15 @@ import {
   type ShopifyAdminClient,
 } from '@doge-buddy/shopify-admin'
 import { planSeed } from './plan.ts'
-import { DELIVERY_MAX_DAYS, DELIVERY_MIN_DAYS, SAMPLE_PRODUCTS, SHIPS_FROM, type SampleProduct } from './sample-data.ts'
+import {
+  COLLECTIONS,
+  DELIVERY_MAX_DAYS,
+  DELIVERY_MIN_DAYS,
+  METAFIELD_DEFINITIONS,
+  SAMPLE_PRODUCTS,
+  SHIPS_FROM,
+  type SampleProduct,
+} from './sample-data.ts'
 
 export interface SeedCounts {
   definitions: number
@@ -21,6 +29,7 @@ export interface SeedCounts {
 export interface SeedResult {
   created: SeedCounts
   skipped: SeedCounts
+  failures: string[]
 }
 
 function productSetInput(product: SampleProduct): Record<string, unknown> {
@@ -45,6 +54,10 @@ function productSetInput(product: SampleProduct): Record<string, unknown> {
   }
 }
 
+function formatError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
 /**
  * Idempotently seeds a test Shopify store with the dogebuddy metafield definitions, sample
  * collections, and sample products so the Hydrogen storefront has real data to render against.
@@ -53,11 +66,28 @@ function productSetInput(product: SampleProduct): Record<string, unknown> {
  * create/skip via `log`. Every created product is published to every publication returned by
  * `listPublications` (publication naming varies by store; broad publish is deliberate for
  * samples and guarantees the Hydrogen channel gets them).
+ *
+ * Every create/publish call is individually contained: a failure is logged, recorded in
+ * `failures`, and the run continues with the next item/publication rather than aborting. This
+ * matters most for publish: `productSet` and `publishablePublish` are separate calls, so a
+ * product that was created but only partially published would otherwise have no self-heal path
+ * on rerun (`findProductByHandle` finds it, `planSeed` skips it, its remaining publications are
+ * never retried). Attempting every publication regardless of earlier failures, and surfacing
+ * `failures` in the returned summary, keeps that state visible and retryable by hand.
  */
 export async function runSeed(client: ShopifyAdminClient, log: (line: string) => void = () => {}): Promise<SeedResult> {
-  const existingDefinitions = await listMetafieldDefinitions(client, 'dogebuddy')
-  const existingCollections = await listCollections(client)
+  const seedDefinitionKeys = new Set(METAFIELD_DEFINITIONS.map((d) => d.key))
+  const seedCollectionHandles = new Set(COLLECTIONS.map((c) => c.handle))
+
+  const allDefinitions = await listMetafieldDefinitions(client, 'dogebuddy')
+  const allCollections = await listCollections(client)
   const publications = await listPublications(client)
+
+  // Scoped to the seed's own definitions/collections — listCollections in particular returns
+  // every collection in the store, and a store can have unrelated pre-existing collections
+  // (e.g. "featured-products") that must not be counted or logged as seed skips.
+  const existingDefinitions = allDefinitions.filter((d) => seedDefinitionKeys.has(d.key))
+  const existingCollections = allCollections.filter((c) => seedCollectionHandles.has(c.handle))
 
   // 10 sequential lookups — one product each, no batch-by-handle query exists — fine per brief.
   const existingProductHandles: string[] = []
@@ -78,42 +108,71 @@ export async function runSeed(client: ShopifyAdminClient, log: (line: string) =>
     collections: existingCollections.length,
     products: existingProductHandles.length,
   }
+  const failures: string[] = []
 
   for (const key of existingDefinitions.map((d) => d.key)) {
     log(`skipped definition (already exists): dogebuddy.${key}`)
   }
   for (const def of plan.definitions) {
-    await metafieldDefinitionCreate(client, {
-      name: def.name,
-      namespace: def.namespace,
-      key: def.key,
-      type: def.type,
-      ownerType: def.ownerType,
-    })
-    created.definitions += 1
-    log(`created definition: ${def.namespace}.${def.key}`)
+    try {
+      await metafieldDefinitionCreate(client, {
+        name: def.name,
+        namespace: def.namespace,
+        key: def.key,
+        type: def.type,
+        ownerType: def.ownerType,
+      })
+      created.definitions += 1
+      log(`created definition: ${def.namespace}.${def.key}`)
+    } catch (err) {
+      const message = `definition ${def.namespace}.${def.key}: ${formatError(err)}`
+      failures.push(message)
+      log(`FAILED definition: ${message}`)
+    }
   }
 
   for (const handle of existingCollections.map((c) => c.handle)) {
     log(`skipped collection (already exists): ${handle}`)
   }
   for (const collection of plan.collections) {
-    await collectionCreate(client, collection)
-    created.collections += 1
-    log(`created collection: ${collection.handle}`)
+    try {
+      await collectionCreate(client, collection)
+      created.collections += 1
+      log(`created collection: ${collection.handle}`)
+    } catch (err) {
+      const message = `collection ${collection.handle}: ${formatError(err)}`
+      failures.push(message)
+      log(`FAILED collection: ${message}`)
+    }
   }
 
   for (const handle of existingProductHandles) {
     log(`skipped product (already exists): ${handle}`)
   }
   for (const product of plan.products) {
-    const { productId } = await productSet(client, productSetInput(product))
-    created.products += 1
-    log(`created product: ${product.handle} -> ${productId}`)
+    let productId: string
+    try {
+      const result = await productSet(client, productSetInput(product))
+      productId = result.productId
+      created.products += 1
+      log(`created product: ${product.handle} -> ${productId}`)
+    } catch (err) {
+      const message = `product ${product.handle}: create failed: ${formatError(err)}`
+      failures.push(message)
+      log(`FAILED product: ${message}`)
+      continue
+    }
+
     for (const pub of publications) {
-      await publishablePublish(client, productId, pub.id)
+      try {
+        await publishablePublish(client, productId, pub.id)
+      } catch (err) {
+        const message = `product ${product.handle}: publish to "${pub.name}" failed: ${formatError(err)}`
+        failures.push(message)
+        log(`FAILED publish: ${message}`)
+      }
     }
   }
 
-  return { created, skipped }
+  return { created, skipped, failures }
 }
