@@ -135,7 +135,7 @@ await registerCron(queue.boss, 'cj.wallet-monitor', '0 */4 * * *', cjWalletMonit
 if (config.shopify && config.adminBaseUrl && shopifyClient) {
   const { adminBaseUrl } = config
   await registerCron(queue.boss, 'shopify.webhook-audit', '0 6 * * *', async () => {
-    await shopifyWebhookAudit({ client: shopifyClient, adminBaseUrl })
+    await shopifyWebhookAudit({ client: shopifyClient, adminBaseUrl, db })
   })
 } else if (config.shopify) {
   // Shopify creds are configured but ADMIN_BASE_URL isn't, so the daily webhook-audit cron
