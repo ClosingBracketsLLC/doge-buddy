@@ -24,6 +24,10 @@ export const meta: Route.MetaFunction = ({data}) => {
   return [
     {title: `${product.title} — Doge Buddy`},
     {
+      name: 'description',
+      content: product.seo?.description ?? product.description,
+    },
+    {
       rel: 'canonical',
       href: `/products/${product.handle}`,
     },

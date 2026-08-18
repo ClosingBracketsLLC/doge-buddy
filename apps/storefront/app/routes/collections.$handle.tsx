@@ -1,10 +1,9 @@
-import {redirect, useLoaderData, Link} from 'react-router';
+import {redirect, useLoaderData} from 'react-router';
 import type {Route} from './+types/collections.$handle';
-import {getPaginationVariables, Analytics, Money} from '@shopify/hydrogen';
+import {getPaginationVariables, Analytics} from '@shopify/hydrogen';
 import {PaginatedResourceSection} from '~/components/PaginatedResourceSection';
 import {redirectIfHandleIsLocalized} from '~/lib/redirect';
-import {ProductCardImage} from '~/components/brand/ProductCardImage';
-import {useVariantUrl} from '~/lib/variants';
+import {ProductItem} from '~/components/ProductItem';
 import type {ProductItemFragment} from 'storefrontapi.generated';
 
 export const meta: Route.MetaFunction = ({data}) => {
@@ -80,7 +79,7 @@ export default function Collection() {
         resourcesClassName="mt-6 grid grid-cols-2 gap-4 md:grid-cols-4"
       >
         {({node: product}) => (
-          <CollectionProductCard key={product.id} product={product} />
+          <ProductItem key={product.id} product={product} />
         )}
       </PaginatedResourceSection>
       <Analytics.CollectionView
@@ -92,23 +91,6 @@ export default function Collection() {
         }}
       />
     </div>
-  );
-}
-
-function CollectionProductCard({product}: {product: ProductItemFragment}) {
-  const variantUrl = useVariantUrl(product.handle);
-  return (
-    <Link
-      to={variantUrl}
-      prefetch="intent"
-      className="bg-surface-raised rounded-2xl p-3 block"
-    >
-      <ProductCardImage image={product.featuredImage} title={product.title} />
-      <h3 className="mt-2 text-ink">{product.title}</h3>
-      <p className="mt-1 font-bold text-ink">
-        <Money data={product.priceRange.minVariantPrice} />
-      </p>
-    </Link>
   );
 }
 

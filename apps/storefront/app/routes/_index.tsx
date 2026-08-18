@@ -1,18 +1,20 @@
-import {Await, useLoaderData, Link} from 'react-router';
+import {Await, useLoaderData} from 'react-router';
 import type {Route} from './+types/_index';
 import {Suspense} from 'react';
-import {Money} from '@shopify/hydrogen';
-import type {
-  RecommendedProductFragment,
-  RecommendedProductsQuery,
-} from 'storefrontapi.generated';
+import type {RecommendedProductsQuery} from 'storefrontapi.generated';
 import {Hero} from '~/components/brand/Hero';
-import {ProductCardImage} from '~/components/brand/ProductCardImage';
+import {ProductItem} from '~/components/ProductItem';
 import {TrustStrip} from '~/components/brand/TrustStrip';
-import {useVariantUrl} from '~/lib/variants';
 
 export const meta: Route.MetaFunction = () => {
-  return [{title: 'Doge Buddy — Great gear for your best friend'}];
+  return [
+    {title: 'Doge Buddy — Great gear for your best friend'},
+    {
+      name: 'description',
+      content:
+        'Toys, walks, beds, and grooming gear for happy dogs, shipped fast from US warehouses with 3–7 day delivery.',
+    },
+  ];
 };
 
 export async function loader(args: Route.LoaderArgs) {
@@ -92,7 +94,7 @@ function RecommendedProducts({
             <div className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-4">
               {response
                 ? response.products.nodes.map((product) => (
-                    <RecommendedProductCard key={product.id} product={product} />
+                    <ProductItem key={product.id} product={product} />
                   ))
                 : null}
             </div>
@@ -100,27 +102,6 @@ function RecommendedProducts({
         </Await>
       </Suspense>
     </section>
-  );
-}
-
-function RecommendedProductCard({
-  product,
-}: {
-  product: RecommendedProductFragment;
-}) {
-  const variantUrl = useVariantUrl(product.handle);
-  return (
-    <Link
-      to={variantUrl}
-      prefetch="intent"
-      className="bg-surface-raised rounded-2xl p-3 block"
-    >
-      <ProductCardImage image={product.featuredImage} title={product.title} />
-      <h3 className="mt-2 text-ink">{product.title}</h3>
-      <p className="mt-1 font-bold text-ink">
-        <Money data={product.priceRange.minVariantPrice} />
-      </p>
-    </Link>
   );
 }
 
