@@ -129,8 +129,23 @@ export async function executePayOrder(deps: PlaceOrderDeps, supplierOrderRowId: 
     if (fromStatus === 'confirmed') {
       await applyTransition(deps.db, supplierOrderRowId, 'confirmed', 'awaiting_funds')
     }
-    await deps.settings.set('fulfillment.paused_for_funds', true)
+
+    // Order matters here for crash-safety: alert BEFORE setting the pause flag, not after.
+    //   - Crash after the transition above but before the alert/flag: the row is `awaiting_funds`,
+    //     the flag is still false, no alert fired yet. A retry (or a resumed job) re-enters this
+    //     same branch with `fromStatus === 'awaiting_funds'` (a no-op transition) and fires the
+    //     alert then. Recoverable.
+    //   - Crash after the alert but before the flag: the operator was already notified; a retry
+    //     just fires a second (harmless, idempotent-in-effect) alert and then sets the flag.
+    //     Recoverable.
+    //   - The one ordering that is NOT safe is setting the flag first: a crash in the window
+    //     between setting `fulfillment.paused_for_funds = true` and firing the alert would leave
+    //     the system silently paused forever — step 2's settings gate above short-circuits BEFORE
+    //     `payOrder` is ever called again on any future attempt, so this branch (and its alert)
+    //     would never run again to fire the alert retroactively. Alert-first means the worst crash
+    //     outcome is a duplicate alert, never a silent one.
     await deps.alert('critical', 'wallet_empty', { supplierOrderRowId })
+    await deps.settings.set('fulfillment.paused_for_funds', true)
     return
   }
 

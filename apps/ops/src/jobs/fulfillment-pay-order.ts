@@ -41,9 +41,23 @@ export function fulfillmentPayOrderHandler(deps: PlaceOrderDeps) {
           try {
             await deadLetterPayOrder(deps, job.data.supplierOrderRowId, err)
           } catch (dlqErr) {
-            // Best-effort: never let a failure in the dead-letter transition itself swallow the
-            // original error below — pg-boss still needs to see this job fail either way.
-            console.error('[fulfillment.pay-order] dead-letter transition failed', dlqErr)
+            // The dead-letter transition itself failed (e.g. a stale-status race, or
+            // `parkNeedsAttention` throwing for some other reason). Route this through the alert
+            // seam — not `console.error` — since `alert()` both pino-logs AND writes `audit_log`,
+            // which is what operators actually watch; a bare console line on a worker process is
+            // effectively invisible. Nested try/catch: if even the alert itself throws, there is
+            // nothing else available at this point, so swallow only that failure — the ORIGINAL
+            // `err` below must still propagate regardless, since pg-boss needs to see this job
+            // fail either way, and losing that signal would be worse than losing the meta-alert.
+            const dlqMessage = dlqErr instanceof Error ? dlqErr.message : String(dlqErr)
+            try {
+              await deps.alert('critical', 'dead_letter_transition_failed', {
+                supplierOrderRowId: job.data.supplierOrderRowId,
+                error: dlqMessage,
+              })
+            } catch {
+              // Truly nothing left to do — fall through and rethrow the original error below.
+            }
           }
         }
         throw err

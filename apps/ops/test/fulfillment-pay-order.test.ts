@@ -3,11 +3,29 @@ import { MockSupplierAdapter } from '@doge-buddy/supplier'
 import { and, eq } from 'drizzle-orm'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
-import { executePayOrder } from '../src/fulfillment/run-pay-order.ts'
+import { deadLetterPayOrder, executePayOrder } from '../src/fulfillment/run-pay-order.ts'
 import type { PlaceOrderDeps } from '../src/fulfillment/run-place-order.ts'
 import type { SupplierOrderStatusDb } from '../src/fulfillment/transitions.ts'
 import { fulfillmentPayOrderHandler } from '../src/jobs/fulfillment-pay-order.ts'
 import { createSettings } from '../src/settings.ts'
+
+// `deadLetterPayOrder` (run-pay-order.ts) calls `parkNeedsAttention` (run-place-order.ts) to do
+// the actual needs_attention transition + alert. One test below needs that call to fail (to prove
+// the ORIGINAL payOrder error still propagates, and a `dead_letter_transition_failed` alert fires,
+// per the coordinator review's Finding 1) — that requires forcing a real race/DB failure inside
+// `applyTransition`'s guarded UPDATE, which isn't reliably reproducible without true concurrency.
+// Instead, mock only `parkNeedsAttention` off the real module, defaulting to delegate straight
+// through to the real implementation (`importOriginal`) so every OTHER test in this file — which
+// never touches this mock directly — exercises the real function unchanged; only the one test that
+// calls `.mockImplementationOnce(...)` on it sees different behavior, for exactly one call.
+const { parkNeedsAttentionMock } = vi.hoisted(() => ({
+  parkNeedsAttentionMock: vi.fn(),
+}))
+vi.mock('../src/fulfillment/run-place-order.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/fulfillment/run-place-order.ts')>()
+  parkNeedsAttentionMock.mockImplementation(actual.parkNeedsAttention)
+  return { ...actual, parkNeedsAttention: parkNeedsAttentionMock }
+})
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -188,7 +206,7 @@ describe('executePayOrder', () => {
     expect(row?.paidAt).toBeInstanceOf(Date)
   })
 
-  it('insufficient balance from confirmed: transitions to awaiting_funds, sets paused_for_funds, fires critical wallet_empty alert, does not throw', async () => {
+  it('insufficient balance from confirmed: transitions to awaiting_funds, alerts BEFORE setting paused_for_funds (crash-safety ordering), does not throw', async () => {
     const adapter = new MockSupplierAdapter({ failPayInsufficientBalance: true })
     const placed = await placeMockOrder(adapter)
     const { orderRowId } = await seedOrder()
@@ -199,6 +217,8 @@ describe('executePayOrder', () => {
       supplierOrderId: placed.supplierOrderId,
     })
     const { deps } = makeDeps(adapter)
+    const alertSpy = vi.spyOn(deps, 'alert')
+    const settingsSetSpy = vi.spyOn(deps.settings, 'set')
 
     await executePayOrder(deps, supplierOrderRow.id) // must not throw
 
@@ -207,13 +227,20 @@ describe('executePayOrder', () => {
 
     expect(await deps.settings.get('fulfillment.paused_for_funds')).toBe(true)
 
+    // Finding 2 (coordinator review): alert-before-flag, not flag-before-alert. A crash between
+    // the two must leave the system merely un-paused-but-notified — never paused with the alert
+    // permanently unreachable (the settings gate short-circuits before payOrder on every retry).
+    expect(alertSpy).toHaveBeenCalledWith('critical', 'wallet_empty', { supplierOrderRowId: supplierOrderRow.id })
+    expect(settingsSetSpy).toHaveBeenCalledWith('fulfillment.paused_for_funds', true)
+    expect(alertSpy.mock.invocationCallOrder[0]).toBeLessThan(settingsSetSpy.mock.invocationCallOrder[0]!)
+
     const alerts = await alertRowsFor('wallet_empty')
     const match = alerts.find((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === supplierOrderRow.id)
     expect(match).toBeDefined()
     expect(match!.detail).toMatchObject({ severity: 'critical', supplierOrderRowId: supplierOrderRow.id })
   })
 
-  it('insufficient balance from awaiting_funds (already-paused resume): no-op transition (stays awaiting_funds), still sets paused flag + alerts, does not throw', async () => {
+  it('insufficient balance from awaiting_funds (already-paused resume): no-op transition (stays awaiting_funds), still alerts before setting paused flag, does not throw', async () => {
     const adapter = new MockSupplierAdapter({ failPayInsufficientBalance: true })
     const placed = await placeMockOrder(adapter)
     const { orderRowId } = await seedOrder()
@@ -224,12 +251,15 @@ describe('executePayOrder', () => {
       supplierOrderId: placed.supplierOrderId,
     })
     const { deps } = makeDeps(adapter)
+    const alertSpy = vi.spyOn(deps, 'alert')
+    const settingsSetSpy = vi.spyOn(deps.settings, 'set')
 
     await executePayOrder(deps, supplierOrderRow.id) // must not throw an IllegalTransitionError
 
     const row = await loadSupplierOrder(supplierOrderRow.id)
     expect(row?.status).toBe('awaiting_funds')
     expect(await deps.settings.get('fulfillment.paused_for_funds')).toBe(true)
+    expect(alertSpy.mock.invocationCallOrder[0]).toBeLessThan(settingsSetSpy.mock.invocationCallOrder[0]!)
 
     const alerts = await alertRowsFor('wallet_empty')
     expect(alerts.some((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === supplierOrderRow.id)).toBe(
@@ -302,7 +332,10 @@ describe('executePayOrder', () => {
 describe('fulfillmentPayOrderHandler (retry-exhaustion dead-letter)', () => {
   const { db, pool } = createDb(url)
   afterAll(() => pool.end())
-  beforeEach(() => resetSettings(db))
+  beforeEach(() => {
+    parkNeedsAttentionMock.mockClear() // clears call history only — the delegate-through default set at module load stays intact
+    return resetSettings(db)
+  })
 
   function makeDeps(adapter: MockSupplierAdapter): { deps: PlaceOrderDeps; enqueue: ReturnType<typeof vi.fn> } {
     const enqueue = vi.fn(async () => {})
@@ -338,8 +371,9 @@ describe('fulfillmentPayOrderHandler (retry-exhaustion dead-letter)', () => {
 
   async function seedSupplierOrder(opts: {
     orderRowId: string
-    shipmentOrderId: string
-    supplierOrderId: string
+    shipmentOrderId?: string
+    supplierOrderId?: string
+    status?: SupplierOrderStatusDb
   }): Promise<typeof supplierOrders.$inferSelect> {
     const [row] = await db
       .insert(supplierOrders)
@@ -347,9 +381,9 @@ describe('fulfillmentPayOrderHandler (retry-exhaustion dead-letter)', () => {
         orderId: opts.orderRowId,
         supplier: 'mock',
         idempotencyKey: `test-${nextId()}`,
-        status: 'confirmed',
-        shipmentOrderId: opts.shipmentOrderId,
-        supplierOrderId: opts.supplierOrderId,
+        status: opts.status ?? 'confirmed',
+        shipmentOrderId: opts.shipmentOrderId ?? null,
+        supplierOrderId: opts.supplierOrderId ?? null,
       })
       .returning()
     return row!
@@ -454,5 +488,69 @@ describe('fulfillmentPayOrderHandler (retry-exhaustion dead-letter)', () => {
 
     const row = await loadSupplierOrder(supplierOrderRow.id)
     expect(row?.status).toBe('paid')
+  })
+
+  it('final attempt whose dead-letter transition ITSELF fails: alerts dead_letter_transition_failed, still rethrows the ORIGINAL payOrder error (not the dead-letter one)', async () => {
+    const adapter = failingAdapter()
+    const placed = await placeMockOrder(adapter)
+    const { orderRowId } = await seedOrder()
+    const supplierOrderRow = await seedSupplierOrder({
+      orderRowId,
+      shipmentOrderId: placed.shipmentOrderId!,
+      supplierOrderId: placed.supplierOrderId,
+    })
+    const { deps } = makeDeps(adapter)
+
+    // Force the dead-letter transition itself to fail, for exactly this one call.
+    parkNeedsAttentionMock.mockImplementationOnce(async () => {
+      throw new Error('simulated parkNeedsAttention failure')
+    })
+
+    await expect(
+      fulfillmentPayOrderHandler(deps)([
+        {
+          id: 'job-final-dlq-fails',
+          name: 'fulfillment.pay-order',
+          data: { supplierOrderRowId: supplierOrderRow.id },
+          retryCount: 5,
+          retryLimit: 5,
+        },
+      ]),
+    ).rejects.toThrow(/address_rejected/) // the ORIGINAL payOrder failure, not the dead-letter one
+
+    // The dead-letter transition never completed, so the row never reached needs_attention.
+    const row = await loadSupplierOrder(supplierOrderRow.id)
+    expect(row?.status).toBe('confirmed')
+
+    const alerts = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.entityType, 'alert'), eq(auditLog.action, 'alert.dead_letter_transition_failed')))
+    const match = alerts.find((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === supplierOrderRow.id)
+    expect(match).toBeDefined()
+    expect(match!.detail).toMatchObject({ severity: 'critical', supplierOrderRowId: supplierOrderRow.id })
+    expect((match!.detail as { error?: string }).error).toContain('simulated parkNeedsAttention failure')
+  })
+
+  it('deadLetterPayOrder no-op guard: row already needs_attention -> does nothing (no transition attempt, no alert)', async () => {
+    const { orderRowId } = await seedOrder()
+    const supplierOrderRow = await seedSupplierOrder({ orderRowId, status: 'needs_attention' })
+    const { deps } = makeDeps(new MockSupplierAdapter())
+
+    await deadLetterPayOrder(deps, supplierOrderRow.id, new Error('irrelevant — row is not payable'))
+
+    expect(parkNeedsAttentionMock).not.toHaveBeenCalled()
+
+    const row = await loadSupplierOrder(supplierOrderRow.id)
+    expect(row?.status).toBe('needs_attention') // untouched
+    expect(row?.lastError).toBeNull()
+
+    const alerts = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.entityType, 'alert'), eq(auditLog.action, 'alert.fulfillment_needs_attention')))
+    expect(alerts.some((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === supplierOrderRow.id)).toBe(
+      false,
+    )
   })
 })
