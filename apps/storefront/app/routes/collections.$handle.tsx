@@ -8,7 +8,7 @@ import {useVariantUrl} from '~/lib/variants';
 import type {ProductItemFragment} from 'storefrontapi.generated';
 
 export const meta: Route.MetaFunction = ({data}) => {
-  return [{title: `Hydrogen | ${data?.collection.title ?? ''} Collection`}];
+  return [{title: `${data?.collection.title ?? ''} — Doge Buddy`}];
 };
 
 export async function loader(args: Route.LoaderArgs) {

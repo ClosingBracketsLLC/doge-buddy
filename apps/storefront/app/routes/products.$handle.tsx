@@ -13,14 +13,35 @@ import {ProductImage} from '~/components/ProductImage';
 import {ProductForm} from '~/components/ProductForm';
 import {redirectIfHandleIsLocalized} from '~/lib/redirect';
 import {DeliveryBadge} from '~/components/brand/DeliveryBadge';
+import {productJsonLd} from '~/lib/seo';
 
 export const meta: Route.MetaFunction = ({data}) => {
+  if (!data?.product) return [];
+
+  const {product, origin} = data;
+  const variant = product.selectedOrFirstAvailableVariant;
+
   return [
-    {title: `Hydrogen | ${data?.product.title ?? ''}`},
+    {title: `${product.title} — Doge Buddy`},
     {
       rel: 'canonical',
-      href: `/products/${data?.product.handle}`,
+      href: `/products/${product.handle}`,
     },
+    ...(variant
+      ? [
+          {
+            'script:ld+json': productJsonLd({
+              name: product.title,
+              description: product.description,
+              url: `${origin}/products/${product.handle}`,
+              imageUrl: variant.image?.url,
+              price: variant.price.amount,
+              currencyCode: variant.price.currencyCode,
+              available: variant.availableForSale,
+            }),
+          },
+        ]
+      : []),
   ];
 };
 
@@ -31,7 +52,11 @@ export async function loader(args: Route.LoaderArgs) {
   // Await the critical data required to render initial state of the page
   const criticalData = await loadCriticalData(args);
 
-  return {...deferredData, ...criticalData};
+  return {
+    ...deferredData,
+    ...criticalData,
+    origin: new URL(args.request.url).origin,
+  };
 }
 
 /**

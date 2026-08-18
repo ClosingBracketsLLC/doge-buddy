@@ -6,7 +6,7 @@ import {ProductItem} from '~/components/ProductItem';
 import type {CollectionItemFragment} from 'storefrontapi.generated';
 
 export const meta: Route.MetaFunction = () => {
-  return [{title: `Hydrogen | Products`}];
+  return [{title: `Products — Doge Buddy`}];
 };
 
 export async function loader(args: Route.LoaderArgs) {

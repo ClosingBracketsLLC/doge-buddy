@@ -13,12 +13,47 @@ import {
 import type {Route} from './+types/root';
 import poppins800 from '~/assets/fonts/poppins-latin-800-normal.woff2';
 import {FOOTER_QUERY, HEADER_QUERY} from '~/lib/fragments';
+import {organizationJsonLd, webSiteJsonLd} from '~/lib/seo';
 import resetStyles from '~/styles/reset.css?url';
 import appStyles from '~/styles/app.css?url';
 import tailwindCss from './styles/tailwind.css?url';
 import {PageLayout} from './components/PageLayout';
 
 export type RootLoader = typeof loader;
+
+/**
+ * React Router only renders the deepest matched route's `meta` export (it
+ * does not auto-merge ancestor meta into `<Meta />`), so route-level JSON-LD
+ * emitted from a root `meta` export would silently disappear on every route
+ * that defines its own `meta` (home, PDP, ...). Organization/WebSite JSON-LD
+ * belongs on every page, so it's rendered directly in `Layout` below instead.
+ *
+ * The escaping mirrors what @shopify/hydrogen's own SEO utilities apply to
+ * ld+json output: escape `&`, `<`, `>` (so a value can't prematurely close
+ * the `<script>` tag) and the U+2028/U+2029 line/paragraph separators.
+ * The separator characters are generated via fromCharCode rather than typed
+ * literally, since they're invisible and easy to corrupt in source.
+ */
+const LINE_SEPARATOR = String.fromCharCode(0x2028);
+const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
+const JSON_LD_ESCAPES: Record<string, string> = {
+  '&': '\\u0026',
+  '<': '\\u003c',
+  '>': '\\u003e',
+  [LINE_SEPARATOR]: '\\u2028',
+  [PARAGRAPH_SEPARATOR]: '\\u2029',
+};
+const JSON_LD_UNSAFE_CHARS = new RegExp(
+  `[&<>${LINE_SEPARATOR}${PARAGRAPH_SEPARATOR}]`,
+  'g',
+);
+
+function jsonLdScriptHtml(value: object): string {
+  return JSON.stringify(value).replace(
+    JSON_LD_UNSAFE_CHARS,
+    (char) => JSON_LD_ESCAPES[char]!,
+  );
+}
 
 /**
  * This is important to avoid re-fetching root queries on sub-navigations
@@ -86,6 +121,7 @@ export async function loader(args: Route.LoaderArgs) {
   return {
     ...deferredData,
     ...criticalData,
+    origin: new URL(args.request.url).origin,
     publicStoreDomain: env.PUBLIC_STORE_DOMAIN,
     shop: getShopAnalytics({
       storefront,
@@ -152,6 +188,7 @@ function loadDeferredData({context}: Route.LoaderArgs) {
 
 export function Layout({children}: {children?: React.ReactNode}) {
   const nonce = useNonce();
+  const data = useRouteLoaderData<RootLoader>('root');
 
   return (
     <html lang="en" className="bg-surface text-ink font-sans">
@@ -162,6 +199,32 @@ export function Layout({children}: {children?: React.ReactNode}) {
         <link rel="stylesheet" href={resetStyles}></link>
         <link rel="stylesheet" href={appStyles}></link>
         <Meta />
+        {data?.origin ? (
+          <>
+            <script
+              nonce={nonce}
+              type="application/ld+json"
+              dangerouslySetInnerHTML={{
+                __html: jsonLdScriptHtml(
+                  organizationJsonLd({
+                    name: 'Doge Buddy',
+                    url: data.origin,
+                    logoUrl: `${data.origin}/favicon_256px.png`,
+                  }),
+                ),
+              }}
+            />
+            <script
+              nonce={nonce}
+              type="application/ld+json"
+              dangerouslySetInnerHTML={{
+                __html: jsonLdScriptHtml(
+                  webSiteJsonLd({name: 'Doge Buddy', url: data.origin}),
+                ),
+              }}
+            />
+          </>
+        ) : null}
         <Links />
       </head>
       <body className="bg-surface text-ink font-sans">
