@@ -1,16 +1,18 @@
 import {Await, useLoaderData, Link} from 'react-router';
 import type {Route} from './+types/_index';
 import {Suspense} from 'react';
-import {Image} from '@shopify/hydrogen';
+import {Money} from '@shopify/hydrogen';
 import type {
-  FeaturedCollectionFragment,
+  RecommendedProductFragment,
   RecommendedProductsQuery,
 } from 'storefrontapi.generated';
-import {ProductItem} from '~/components/ProductItem';
-import {MockShopNotice} from '~/components/MockShopNotice';
+import {Hero} from '~/components/brand/Hero';
+import {ProductCardImage} from '~/components/brand/ProductCardImage';
+import {TrustStrip} from '~/components/brand/TrustStrip';
+import {useVariantUrl} from '~/lib/variants';
 
 export const meta: Route.MetaFunction = () => {
-  return [{title: 'Hydrogen | Home'}];
+  return [{title: 'Doge Buddy — Great gear for your best friend'}];
 };
 
 export async function loader(args: Route.LoaderArgs) {
@@ -61,37 +63,13 @@ function loadDeferredData({context}: Route.LoaderArgs) {
 export default function Homepage() {
   const data = useLoaderData<typeof loader>();
   return (
-    <div className="home">
-      {data.isShopLinked ? null : <MockShopNotice />}
-      <FeaturedCollection collection={data.featuredCollection} />
+    <div className="home mx-auto max-w-5xl px-4 py-8 md:py-12">
+      <Hero />
       <RecommendedProducts products={data.recommendedProducts} />
+      <div className="mt-12">
+        <TrustStrip />
+      </div>
     </div>
-  );
-}
-
-function FeaturedCollection({
-  collection,
-}: {
-  collection: FeaturedCollectionFragment;
-}) {
-  if (!collection) return null;
-  const image = collection?.image;
-  return (
-    <Link
-      className="featured-collection"
-      to={`/collections/${collection.handle}`}
-    >
-      {image && (
-        <div className="featured-collection-image">
-          <Image
-            data={image}
-            sizes="100vw"
-            alt={image.altText || collection.title}
-          />
-        </div>
-      )}
-      <h1>{collection.title}</h1>
-    </Link>
   );
 }
 
@@ -101,26 +79,48 @@ function RecommendedProducts({
   products: Promise<RecommendedProductsQuery | null>;
 }) {
   return (
-    <section
-      className="recommended-products"
-      aria-labelledby="recommended-products"
-    >
-      <h2 id="recommended-products">Recommended Products</h2>
-      <Suspense fallback={<div>Loading...</div>}>
+    <section className="mt-12" aria-labelledby="recommended-products">
+      <h2
+        id="recommended-products"
+        className="font-display font-bold text-2xl text-ink"
+      >
+        Featured products
+      </h2>
+      <Suspense fallback={<div className="mt-4 text-info">Loading...</div>}>
         <Await resolve={products}>
           {(response) => (
-            <div className="recommended-products-grid">
+            <div className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-4">
               {response
                 ? response.products.nodes.map((product) => (
-                    <ProductItem key={product.id} product={product} />
+                    <RecommendedProductCard key={product.id} product={product} />
                   ))
                 : null}
             </div>
           )}
         </Await>
       </Suspense>
-      <br />
     </section>
+  );
+}
+
+function RecommendedProductCard({
+  product,
+}: {
+  product: RecommendedProductFragment;
+}) {
+  const variantUrl = useVariantUrl(product.handle);
+  return (
+    <Link
+      to={variantUrl}
+      prefetch="intent"
+      className="bg-surface-raised rounded-2xl p-3 block"
+    >
+      <ProductCardImage image={product.featuredImage} title={product.title} />
+      <h3 className="mt-2 text-ink">{product.title}</h3>
+      <p className="mt-1 font-bold text-ink">
+        <Money data={product.priceRange.minVariantPrice} />
+      </p>
+    </Link>
   );
 }
 
