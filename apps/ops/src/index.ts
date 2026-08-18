@@ -13,6 +13,7 @@ import { loadConfig } from './config.ts'
 import type { ReconcileDeps } from './fulfillment/run-reconcile.ts'
 import type { ShopifyFulfillmentOps } from './fulfillment/run-sync-tracking.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
+import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { registerCron, startQueue, type Queue } from './queue.ts'
@@ -122,6 +123,14 @@ queue = await startQueue(config.databaseUrl, { adapter: supplierAdapter, setting
 // already created by `startQueue` above), registers this as its sole worker, and schedules it.
 const reconcileDeps: ReconcileDeps = { db, adapter: supplierAdapter, settings, alert, enqueue, shopifyOps, now: () => new Date() }
 await registerCron(queue.boss, 'fulfillment.reconcile', '0 * * * *', fulfillmentReconcileHandler(reconcileDeps))
+
+// `cj.wallet-monitor` (Task 15): 4-hourly wallet balance check — alerts when the supplier
+// balance runs low and auto-resumes any `supplier_orders` rows parked `awaiting_funds` once the
+// wallet recovers enough to cover them. Registered unconditionally, same as `fulfillment.reconcile`
+// just above — it needs no Shopify config at all, only the supplier adapter/settings/alert/enqueue
+// deps `queue` already provides by this point.
+const walletMonitorDeps: WalletMonitorDeps = { db, adapter: supplierAdapter, settings, alert, enqueue }
+await registerCron(queue.boss, 'cj.wallet-monitor', '0 */4 * * *', cjWalletMonitorHandler(walletMonitorDeps))
 
 if (config.shopify && config.adminBaseUrl && shopifyClient) {
   const { adminBaseUrl } = config

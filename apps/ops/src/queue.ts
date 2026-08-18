@@ -149,12 +149,12 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
   // `createQueueRetrying` is idempotent, so index.ts's own call is a safe no-op on top of this one.
   await createQueueRetrying(boss, RECONCILE_QUEUE)
 
+  // No `boss.work()` call here — same reasoning as RECONCILE_QUEUE just above: `registerCron`
+  // (called by index.ts, Task 15) bundles create + work + schedule in one call, and calling
+  // `boss.work` a second time for the same queue name would just register a redundant second
+  // poller. `createQueueRetrying` is idempotent, so index.ts's own call is a safe no-op on top of
+  // this one.
   await createQueueRetrying(boss, WALLET_MONITOR_QUEUE)
-  await boss.work(WALLET_MONITOR_QUEUE, async () => {
-    // executeWalletMonitor lands in Task 15 (cj-wallet-monitor.ts). Cron registration (every 4h)
-    // also lands in Task 15 — this task only creates the queue and its worker slot.
-    throw new Error('cj.wallet-monitor lands in Task 15')
-  })
 
   return {
     boss,
