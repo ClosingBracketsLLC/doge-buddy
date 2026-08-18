@@ -4,7 +4,13 @@ import { loadConfig } from '../src/config.ts'
 describe('loadConfig', () => {
   it('parses a valid environment with defaults', () => {
     const c = loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' })
-    expect(c).toEqual({ databaseUrl: 'postgres://u:p@h:5432/d', port: 3001, host: '0.0.0.0', supplier: 'mock' })
+    expect(c).toEqual({
+      databaseUrl: 'postgres://u:p@h:5432/d',
+      port: 3001,
+      host: '0.0.0.0',
+      supplier: 'mock',
+      fulfillmentSupplier: 'mock',
+    })
   })
   it('honors PORT override', () => {
     expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', PORT: '8080' }).port).toBe(8080)
@@ -16,6 +22,7 @@ describe('loadConfig', () => {
   it('defaults supplier to mock with no shopify/cj blocks', () => {
     const c = loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' })
     expect(c.supplier).toBe('mock')
+    expect(c.fulfillmentSupplier).toBe('mock')
     expect(c.shopify).toBeUndefined()
     expect(c.cj).toBeUndefined()
   })
@@ -79,6 +86,35 @@ describe('loadConfig', () => {
       loadConfig({
         DATABASE_URL: 'postgres://u:p@h:5432/d',
         SUPPLIER: 'bogus',
+      }),
+    ).toThrow()
+  })
+
+  it('accepts FULFILLMENT_SUPPLIER=cj when the full CJ pair is set', () => {
+    const c = loadConfig({
+      DATABASE_URL: 'postgres://u:p@h:5432/d',
+      FULFILLMENT_SUPPLIER: 'cj',
+      CJ_API_KEY: 'k',
+      CJ_OPEN_ID: 'o',
+    })
+    expect(c.fulfillmentSupplier).toBe('cj')
+    expect(c.cj).toEqual({ apiKey: 'k', openId: 'o' })
+  })
+
+  it('throws mentioning CJ_API_KEY when FULFILLMENT_SUPPLIER=cj without the CJ pair', () => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: 'postgres://u:p@h:5432/d',
+        FULFILLMENT_SUPPLIER: 'cj',
+      }),
+    ).toThrow(/CJ_API_KEY/)
+  })
+
+  it('throws when FULFILLMENT_SUPPLIER is not mock or cj', () => {
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: 'postgres://u:p@h:5432/d',
+        FULFILLMENT_SUPPLIER: 'bogus',
       }),
     ).toThrow()
   })

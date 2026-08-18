@@ -1,16 +1,46 @@
 import { createDb } from '@doge-buddy/db'
 import { ShopifyAdminClient, ShopifyTokenManager } from '@doge-buddy/shopify-admin'
-import { CJSupplierAdapter, CjHttpClient } from '@doge-buddy/supplier'
+import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdapter } from '@doge-buddy/supplier'
+import { createAlerter } from './alerts.ts'
 import { loadConfig } from './config.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
-import { registerCron, startQueue } from './queue.ts'
+import { registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
+import { createSettings } from './settings.ts'
 import { DrizzleCjTokenStore } from './stores/cj-token-store.ts'
 
 const config = loadConfig(process.env)
 const { db, pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
-const queue = await startQueue(config.databaseUrl)
+const settings = createSettings(db)
+
+const cjAdapter = config.cj
+  ? new CJSupplierAdapter({
+      client: new CjHttpClient({ apiKey: config.cj.apiKey, tokenStore: new DrizzleCjTokenStore(db) }),
+      openId: config.cj.openId,
+    })
+  : undefined
+
+// FULFILLMENT_SUPPLIER picks which SupplierAdapter backs the fulfillment queues. loadConfig's
+// zod schema already guarantees `config.cj` is set whenever fulfillmentSupplier is 'cj' — this
+// check is a second, defense-in-depth guard in case that invariant is ever broken by a future
+// change to config.ts, rather than a path expected to actually trigger today.
+let supplierAdapter: SupplierAdapter
+if (config.fulfillmentSupplier === 'cj') {
+  if (!cjAdapter) {
+    throw new Error('FULFILLMENT_SUPPLIER=cj but no CJ adapter was constructed (config.cj is missing)')
+  }
+  supplierAdapter = cjAdapter
+} else {
+  supplierAdapter = new MockSupplierAdapter()
+}
+
+// `queue` is assigned only after `app` (below) exists — `startQueue` needs `app.log` (via the
+// alerter) as one of its own dependencies, so building the server has to come first. The
+// webhook route's `enqueue` closes over this `let` binding rather than an already-assigned
+// value; that's safe because webhook routes only ever run at request time, which is after
+// `app.listen()`, which is itself after `queue` is assigned below.
+let queue: Queue
 
 // pg-boss's 3-arg `send` overload requires a real SendOptions object (not `undefined`), so
 // this only forwards `opts` when the caller actually passed one.
@@ -21,13 +51,6 @@ const enqueue: WebhookDeps['enqueue'] = async (name, data, opts) => {
     await queue.boss.send(name, data)
   }
 }
-
-const cjAdapter = config.cj
-  ? new CJSupplierAdapter({
-      client: new CjHttpClient({ apiKey: config.cj.apiKey, tokenStore: new DrizzleCjTokenStore(db) }),
-      openId: config.cj.openId,
-    })
-  : undefined
 
 const webhookDeps: WebhookDeps = {
   db,
@@ -42,7 +65,11 @@ const webhookDeps: WebhookDeps = {
     : {}),
 }
 
-const app = buildServer({ pool, isQueueReady: queue.ready, webhooks: webhookDeps })
+const app = buildServer({ pool, isQueueReady: () => queue.ready(), webhooks: webhookDeps })
+
+const alert = createAlerter(db, app.log)
+
+queue = await startQueue(config.databaseUrl, { adapter: supplierAdapter, settings, alert })
 
 if (config.shopify && config.adminBaseUrl) {
   const { shopify, adminBaseUrl } = config

@@ -1,7 +1,9 @@
 import { auditLog, createDb, orders, webhookEvents } from '@doge-buddy/db'
+import { MockSupplierAdapter } from '@doge-buddy/supplier'
 import { and, eq } from 'drizzle-orm'
 import type PgBoss from 'pg-boss'
 import { afterAll, describe, expect, it, vi } from 'vitest'
+import { createAlerter } from '../src/alerts.ts'
 import {
   decimalStringToCents,
   shopifyRestAddressToAddress,
@@ -11,6 +13,7 @@ import {
 import { webhookProcessHandler, type WebhookProcessDeps } from '../src/jobs/webhook-process.ts'
 import type { SendOpts } from '../src/fulfillment/types.ts'
 import { startQueue } from '../src/queue.ts'
+import { createSettings } from '../src/settings.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -396,7 +399,12 @@ describe('webhookProcessHandler — per-job isolation under the real pg-boss reg
   it(
     'a poison job sent to the real webhook.shopify.process queue does not block a sibling job (queue.ts registers batchSize 1, pg-boss default)',
     async () => {
-      queue = await startQueue(url)
+      const mockLog = { info: () => {}, warn: () => {}, error: () => {} }
+      queue = await startQueue(url, {
+        adapter: new MockSupplierAdapter(),
+        settings: createSettings(db),
+        alert: createAlerter(db, mockLog),
+      })
 
       const poisonPayload = paidPayload({ total_price: 'not-a-number' })
       const [poisonEvent] = await db

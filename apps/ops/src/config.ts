@@ -6,6 +6,7 @@ const EnvSchema = z
     PORT: z.coerce.number().int().positive().default(3001),
     HOST: z.string().default('0.0.0.0'),
     SUPPLIER: z.enum(['mock', 'cj']).default('mock'),
+    FULFILLMENT_SUPPLIER: z.enum(['mock', 'cj']).default('mock'),
     ADMIN_BASE_URL: z
       .string()
       .refine(
@@ -65,6 +66,14 @@ const EnvSchema = z
         message: 'SUPPLIER=cj requires CJ_API_KEY and CJ_OPEN_ID to be set',
       })
     }
+
+    if (data.FULFILLMENT_SUPPLIER === 'cj' && cjSetCount < 2) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['FULFILLMENT_SUPPLIER'],
+        message: 'FULFILLMENT_SUPPLIER=cj requires CJ_API_KEY and CJ_OPEN_ID to be set',
+      })
+    }
   })
 
 export interface Config {
@@ -72,6 +81,7 @@ export interface Config {
   port: number
   host: string
   supplier: 'mock' | 'cj'
+  fulfillmentSupplier: 'mock' | 'cj'
   adminBaseUrl?: string
   shopify?: { shopDomain: string; clientId: string; clientSecret: string; webhookSecret: string }
   cj?: { apiKey: string; openId: string }
@@ -90,6 +100,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     port: data.PORT,
     host: data.HOST,
     supplier: data.SUPPLIER,
+    fulfillmentSupplier: data.FULFILLMENT_SUPPLIER,
   }
 
   if (data.ADMIN_BASE_URL !== undefined) {

@@ -1,8 +1,42 @@
 import { createDb } from '@doge-buddy/db'
+import type { SupplierAdapter } from '@doge-buddy/supplier'
 import PgBoss from 'pg-boss'
+import type { createAlerter } from './alerts.ts'
+import type { PlaceOrderDeps } from './fulfillment/run-place-order.ts'
 import type { SendOpts } from './fulfillment/types.ts'
 import { demoPingHandler } from './jobs/demo-ping.ts'
+import { fulfillmentPayOrderHandler } from './jobs/fulfillment-pay-order.ts'
+import { fulfillmentPlaceOrderHandler } from './jobs/fulfillment-place-order.ts'
 import { webhookProcessHandler } from './jobs/webhook-process.ts'
+import type { createSettings } from './settings.ts'
+
+/**
+ * Shopify fulfillment operations needed by `run-sync-tracking.ts` (Task 13) and
+ * `run-reconcile.ts` (Task 14). Named here — even though nothing in this file calls it yet,
+ * since both of those queues get placeholder handlers for now — so `FulfillmentQueueDeps` can
+ * carry the (optional) shape its future callers will need without those tasks having to touch
+ * this interface again.
+ */
+export interface StubbableShopifyOps {
+  orderFulfillmentOrders(orderGid: string): Promise<{ id: string; status: string }[]>
+  fulfillmentCreate(args: {
+    fulfillmentOrderId: string
+    trackingNumber: string
+    trackingCompany: string
+    notifyCustomer: boolean
+  }): Promise<{ fulfillmentId: string }>
+  fulfillmentTrackingInfoUpdate(
+    gid: string,
+    tracking: { trackingNumber: string; trackingCompany: string },
+  ): Promise<void>
+}
+
+export interface FulfillmentQueueDeps {
+  adapter: SupplierAdapter
+  settings: ReturnType<typeof createSettings>
+  alert: ReturnType<typeof createAlerter>
+  shopify?: StubbableShopifyOps
+}
 
 export interface Queue {
   boss: PgBoss
@@ -10,7 +44,39 @@ export interface Queue {
   stop: () => Promise<void>
 }
 
-export async function startQueue(connectionString: string): Promise<Queue> {
+const PLACE_ORDER_QUEUE = 'fulfillment.place-order'
+const PAY_ORDER_QUEUE = 'fulfillment.pay-order'
+const SYNC_TRACKING_QUEUE = 'fulfillment.sync-tracking'
+const RECONCILE_QUEUE = 'fulfillment.reconcile'
+const WALLET_MONITOR_QUEUE = 'cj.wallet-monitor'
+
+/**
+ * `boss.createQueue` for a brand-new queue name runs DDL (creates the queue's partition table +
+ * indexes) after an `INSERT ... ON CONFLICT DO NOTHING`. If two processes race to create the
+ * *same never-before-seen* queue at the same time — multiple ops instances cold-booting against
+ * a fresh database, or (as observed) parallel test files each calling `startQueue` — Postgres can
+ * raise a deadlock (40P01) or serialization failure (40001) on that DDL. Once the queue exists,
+ * every future call is a fast no-op, so this only ever matters on first boot; retrying a few
+ * times with a short backoff is safe and sufficient.
+ */
+async function createQueueRetrying(boss: PgBoss, name: string, options?: PgBoss.Queue): Promise<void> {
+  const RETRYABLE_CODES = new Set(['40P01', '40001'])
+  const MAX_ATTEMPTS = 5
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await boss.createQueue(name, options)
+      return
+    } catch (err) {
+      const code = (err as { code?: string }).code
+      if (attempt >= MAX_ATTEMPTS || !code || !RETRYABLE_CODES.has(code)) {
+        throw err
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 * attempt))
+    }
+  }
+}
+
+export async function startQueue(connectionString: string, deps: FulfillmentQueueDeps): Promise<Queue> {
   const boss = new PgBoss(connectionString)
   const { db, pool } = createDb(connectionString)
   let running = false
@@ -29,14 +95,59 @@ export async function startQueue(connectionString: string): Promise<Queue> {
     }
   }
 
-  await boss.createQueue('demo.ping')
+  const placeOrderDeps: PlaceOrderDeps = {
+    db,
+    adapter: deps.adapter,
+    settings: deps.settings,
+    alert: deps.alert,
+    enqueue,
+  }
+
+  await createQueueRetrying(boss, 'demo.ping')
   await boss.work('demo.ping', demoPingHandler(db))
 
-  await boss.createQueue('webhook.shopify.process')
+  await createQueueRetrying(boss, 'webhook.shopify.process')
   await boss.work('webhook.shopify.process', webhookProcessHandler({ db, enqueue }, 'shopify'))
 
-  await boss.createQueue('webhook.cj.process')
+  await createQueueRetrying(boss, 'webhook.cj.process')
   await boss.work('webhook.cj.process', webhookProcessHandler({ db, enqueue }, 'cj'))
+
+  // The three fulfillment queues below use `policy: 'singleton'` because every producer that
+  // enqueues into them sets a `singletonKey` (order gid / supplier_orders row id) expecting
+  // pg-boss to keep at most one ACTIVE job per key at a time — enforced by a unique index scoped
+  // to `policy = 'singleton'` (pg-boss's default 'standard' policy applies no such constraint at
+  // all). `createQueue` is idempotent (first call wins the policy for a given queue name for
+  // good), so getting this right here matters. Note this dedupes concurrent *execution*, not the
+  // `send()` itself: a second send with the same key while the first is active still succeeds
+  // and queues normally — it just won't be picked up until the active one leaves that state.
+  await createQueueRetrying(boss, PLACE_ORDER_QUEUE, { name: PLACE_ORDER_QUEUE, policy: 'singleton' })
+  await boss.work(PLACE_ORDER_QUEUE, fulfillmentPlaceOrderHandler(placeOrderDeps))
+
+  await createQueueRetrying(boss, PAY_ORDER_QUEUE, { name: PAY_ORDER_QUEUE, policy: 'singleton' })
+  await boss.work(PAY_ORDER_QUEUE, fulfillmentPayOrderHandler(placeOrderDeps))
+
+  await createQueueRetrying(boss, SYNC_TRACKING_QUEUE, { name: SYNC_TRACKING_QUEUE, policy: 'singleton' })
+  await boss.work(SYNC_TRACKING_QUEUE, async () => {
+    // executeSyncTracking lands in Task 13 (run-sync-tracking.ts). Queue exists now so Task 12's
+    // CJ LOGISTICS webhook routing has a real send() target; no cron involved here.
+    throw new Error('fulfillment.sync-tracking lands in Task 13')
+  })
+
+  // No singletonKey producer for these two (both are cron-driven sweeps, not per-entity jobs),
+  // so the default 'standard' policy is correct — left unspecified deliberately.
+  await createQueueRetrying(boss, RECONCILE_QUEUE)
+  await boss.work(RECONCILE_QUEUE, async () => {
+    // executeReconcile lands in Task 14 (run-reconcile.ts). Cron registration (hourly) also
+    // lands in Task 14 — this task only creates the queue and its worker slot.
+    throw new Error('fulfillment.reconcile lands in Task 14')
+  })
+
+  await createQueueRetrying(boss, WALLET_MONITOR_QUEUE)
+  await boss.work(WALLET_MONITOR_QUEUE, async () => {
+    // executeWalletMonitor lands in Task 15 (cj-wallet-monitor.ts). Cron registration (every 4h)
+    // also lands in Task 15 — this task only creates the queue and its worker slot.
+    throw new Error('cj.wallet-monitor lands in Task 15')
+  })
 
   return {
     boss,
@@ -59,7 +170,7 @@ export async function registerCron<ReqData extends object = object>(
   cron: string,
   handler: PgBoss.WorkHandler<ReqData>,
 ): Promise<void> {
-  await boss.createQueue(name)
+  await createQueueRetrying(boss, name)
   await boss.work(name, handler)
   await boss.schedule(name, cron)
 }
