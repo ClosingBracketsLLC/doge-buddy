@@ -67,7 +67,7 @@ describe('queue: fulfillment wiring', () => {
   )
 
   it(
-    'singletonKey dedupe: two sends with the same key while the first is active yield only one execution',
+    'singletonKey dedupe: while the first job is active, pg-boss refuses to promote a second job with the same key to active',
     async () => {
       let releaseFirst!: () => void
       const gate = new Promise<void>((resolve) => {
@@ -95,22 +95,39 @@ describe('queue: fulfillment wiring', () => {
         // execution*, not the send itself: a second send with the same key while the first is
         // active still returns a real job id and gets queued — it's just held back from becoming
         // active (and therefore from running) until the first job leaves the active state.
-        // Verified directly against a real pg-boss instance before writing this assertion.
         await waitUntil(() => executePlaceOrderSpy.mock.calls.length > 0)
 
         const secondId = await q.boss.send('fulfillment.place-order', { orderGid }, opts)
         expect(secondId).not.toBeNull()
 
-        // While the first job is still active (gated on `gate`), the second must not also start
-        // — that's the actual dedupe guarantee: never two concurrent executions for the same key.
-        await new Promise((resolve) => setTimeout(resolve, 1500))
+        // NOTE on what this test does NOT prove by itself: `queue.ts` registers exactly one
+        // `boss.work()` worker per queue, and that worker's fetch loop (pg-boss's `Worker.start`)
+        // is a plain `while` loop that `await`s the handler before fetching again — so while job
+        // 1's handler is gated here, that single worker structurally cannot attempt a second
+        // fetch at all, regardless of queue policy. Asserting `executePlaceOrderSpy` was "called
+        // once" at this point would therefore pass even against a `policy: 'standard'` queue with
+        // zero real dedupe — a false positive an earlier version of this test shipped with (see
+        // Task 10 fix report). To actually exercise the DB-level guarantee, call `boss.fetch()`
+        // directly here — independent of the registered worker's loop — and assert it refuses to
+        // return job 2. Verified this discriminates correctly with a throwaway script before
+        // writing this: against an identical scenario on a `policy: 'standard'` queue, the same
+        // direct fetch call *does* return job 2 (no dedupe); against `policy: 'singleton'` (what
+        // this queue actually uses), it returns nothing for job 2, because the UPDATE that would
+        // promote it collides with the unique index backing this policy (job_i2 in pg-boss's
+        // schema: unique on (name, singleton_key) WHERE state='active' AND policy='singleton').
+        const fetched = await q.boss.fetch('fulfillment.place-order', { batchSize: 10 })
+        expect(fetched.some((job) => job.id === secondId)).toBe(false)
+
+        // Reinforces (does not by itself prove — see note above) that no second execution
+        // started while the first was active.
         expect(executePlaceOrderSpy).toHaveBeenCalledTimes(1)
       } finally {
         releaseFirst()
       }
 
-      // Releasing the first lets the second (previously held-back) job take its turn — it was
-      // queued, not dropped.
+      // Releasing the first lets the second (still 'created' — our direct fetch above never
+      // consumed it) take its turn via the queue's own registered worker on its next poll,
+      // proving it was queued, not dropped.
       await waitUntil(() => executePlaceOrderSpy.mock.calls.length > 1)
       expect(executePlaceOrderSpy).toHaveBeenCalledTimes(2)
     },

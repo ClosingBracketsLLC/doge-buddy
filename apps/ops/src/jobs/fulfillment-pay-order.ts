@@ -13,6 +13,6 @@ import type { PlaceOrderDeps } from '../fulfillment/run-place-order.ts'
  */
 export function fulfillmentPayOrderHandler(_deps: PlaceOrderDeps) {
   return async (_jobs: PgBoss.Job<{ supplierOrderRowId: string }>[]): Promise<void> => {
-    throw new Error('executePayOrder lands in the next task')
+    throw new Error('executePayOrder lands in Task 11')
   }
 }
