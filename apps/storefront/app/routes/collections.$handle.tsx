@@ -1,9 +1,10 @@
-import {redirect, useLoaderData} from 'react-router';
+import {redirect, useLoaderData, Link} from 'react-router';
 import type {Route} from './+types/collections.$handle';
-import {getPaginationVariables, Analytics} from '@shopify/hydrogen';
+import {getPaginationVariables, Analytics, Money} from '@shopify/hydrogen';
 import {PaginatedResourceSection} from '~/components/PaginatedResourceSection';
 import {redirectIfHandleIsLocalized} from '~/lib/redirect';
-import {ProductItem} from '~/components/ProductItem';
+import {ProductCardImage} from '~/components/brand/ProductCardImage';
+import {useVariantUrl} from '~/lib/variants';
 import type {ProductItemFragment} from 'storefrontapi.generated';
 
 export const meta: Route.MetaFunction = ({data}) => {
@@ -69,19 +70,17 @@ export default function Collection() {
   const {collection} = useLoaderData<typeof loader>();
 
   return (
-    <div className="collection">
-      <h1>{collection.title}</h1>
-      <p className="collection-description">{collection.description}</p>
+    <div className="mx-auto max-w-5xl px-4 py-8 md:py-12">
+      <h1 className="font-display font-extrabold text-3xl text-ink">
+        {collection.title}
+      </h1>
+      <p className="mt-2 text-info">{collection.description}</p>
       <PaginatedResourceSection<ProductItemFragment>
         connection={collection.products}
-        resourcesClassName="products-grid"
+        resourcesClassName="mt-6 grid grid-cols-2 gap-4 md:grid-cols-4"
       >
-        {({node: product, index}) => (
-          <ProductItem
-            key={product.id}
-            product={product}
-            loading={index < 8 ? 'eager' : undefined}
-          />
+        {({node: product}) => (
+          <CollectionProductCard key={product.id} product={product} />
         )}
       </PaginatedResourceSection>
       <Analytics.CollectionView
@@ -93,6 +92,23 @@ export default function Collection() {
         }}
       />
     </div>
+  );
+}
+
+function CollectionProductCard({product}: {product: ProductItemFragment}) {
+  const variantUrl = useVariantUrl(product.handle);
+  return (
+    <Link
+      to={variantUrl}
+      prefetch="intent"
+      className="bg-surface-raised rounded-2xl p-3 block"
+    >
+      <ProductCardImage image={product.featuredImage} title={product.title} />
+      <h3 className="mt-2 text-ink">{product.title}</h3>
+      <p className="mt-1 font-bold text-ink">
+        <Money data={product.priceRange.minVariantPrice} />
+      </p>
+    </Link>
   );
 }
 
