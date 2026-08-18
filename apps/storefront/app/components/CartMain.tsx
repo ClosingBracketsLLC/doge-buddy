@@ -1,5 +1,4 @@
 import {useOptimisticCart} from '@shopify/hydrogen';
-import {useEffect, useRef} from 'react';
 import type {CartApiQueryFragment} from 'storefrontapi.generated';
 import {useAside} from '~/components/Aside';
 import {CartLineItem, type CartLine} from '~/components/CartLineItem';
@@ -87,7 +86,7 @@ export function CartMain({layout, cart: originalCart}: CartMainProps) {
   );
 }
 
-function CartEmpty({
+export function CartEmpty({
   hidden = false,
   layout,
 }: {
@@ -95,34 +94,14 @@ function CartEmpty({
   layout?: CartMainProps['layout'];
 }) {
   const {close} = useAside();
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // EmptyState doesn't expose an onClick prop, so we delegate imperatively:
-  // clicking its CTA link (the only <a> it renders) closes the cart aside,
-  // matching the stock "continue shopping" behavior that used to live on
-  // that link. Using addEventListener (rather than a JSX onClick) keeps this
-  // div a plain, non-interactive container as far as a11y tooling is
-  // concerned — the link itself remains the only real interactive element.
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container || layout !== 'aside') return;
-
-    const handleClick = (event: MouseEvent) => {
-      if ((event.target as HTMLElement).closest('a')) {
-        close();
-      }
-    };
-
-    container.addEventListener('click', handleClick);
-    return () => container.removeEventListener('click', handleClick);
-  }, [close, layout]);
 
   return (
-    <div hidden={hidden} ref={containerRef}>
+    <div hidden={hidden}>
       <EmptyState
         title="Your cart is empty"
         message="Your buddy deserves something new."
         cta={{to: '/collections/toys-play', label: 'Start shopping'}}
+        onCtaClick={layout === 'aside' ? close : undefined}
       />
     </div>
   );

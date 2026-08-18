@@ -5,10 +5,12 @@ export function EmptyState({
   title,
   message,
   cta,
+  onCtaClick,
 }: {
   title: string;
   message: string;
   cta?: {to: string; label: string};
+  onCtaClick?: () => void;
 }) {
   return (
     <div className="flex flex-col items-center text-center gap-3 py-12">
@@ -18,6 +20,7 @@ export function EmptyState({
       {cta && (
         <Link
           to={cta.to}
+          onClick={onCtaClick}
           className="bg-cta text-white rounded-2xl px-5 py-2 font-bold"
         >
           {cta.label}
