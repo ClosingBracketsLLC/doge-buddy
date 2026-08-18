@@ -30,4 +30,6 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm --filter @doge-buddy/db migrate
       - run: pnpm test
+      - run: pnpm --filter @doge-buddy/storefront build
+      - run: pnpm --filter @doge-buddy/storefront lint
       - run: pnpm db:check

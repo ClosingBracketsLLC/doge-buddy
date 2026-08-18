@@ -21,7 +21,7 @@ Ship the customer-facing store: the Hydrogen skeleton scaffolded into the worksp
 ## 1. Scaffold & architecture
 
 - New workspace app `apps/storefront`, package name `@doge-buddy/storefront`.
-- Scaffold: `npm create @shopify/hydrogen@latest -- --language ts --styling tailwind --markets none` (Hydrogen 2026.4.x line, React Router 7, Tailwind v4). Delete the generated lockfile; adopt into the pnpm workspace; add `pnpm --filter` scripts and CI jobs (typecheck, lint, unit tests, build) alongside existing ones. Record the scaffold's pinned Storefront API version in this doc during implementation.
+- Scaffold: `npm create @shopify/hydrogen@latest -- --language ts --styling tailwind --markets none` (Hydrogen 2026.4.x line, React Router 7, Tailwind v4). Delete the generated lockfile; adopt into the pnpm workspace; add `pnpm --filter` scripts and CI jobs (typecheck, lint, unit tests, build) alongside existing ones. Pinned Storefront API version: **2026-04** (from `@shopify/hydrogen-react@2026.4.3`'s `SFAPI_VERSION` constant, matched by `@shopify/hydrogen@2026.4.5`'s Customer Account API default — both ship inside `@shopify/hydrogen@2026.4.5`, the dependency pinned by the scaffold).
 - **Standalone deployable.** No imports from workspace packages: Oxygen runs workerd (not Node), and the storefront shares nothing at runtime with ops. Seed tooling lives in ops.
 - **Data source is env-only.** Unlinked scaffold talks to mock.shop out of the box. Test store = `PUBLIC_STORE_DOMAIN`, `PUBLIC_STOREFRONT_API_TOKEN`, `SESSION_SECRET` (plus whatever else the Hydrogen channel issues), documented in `apps/storefront/.env.example`. No code change to switch.
 - Local dev: `shopify hydrogen dev` (MiniOxygen — local runtime matches production).
