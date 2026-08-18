@@ -58,10 +58,13 @@ describe('executeWalletMonitor', () => {
     }
   })
 
-  function makeDeps(balanceCents: number): { deps: WalletMonitorDeps; enqueue: ReturnType<typeof vi.fn> } {
+  function makeDeps(
+    balanceCents: number,
+    opts: { enqueue?: ReturnType<typeof vi.fn> } = {},
+  ): { deps: WalletMonitorDeps; enqueue: ReturnType<typeof vi.fn> } {
     const adapter = new MockSupplierAdapter()
     vi.spyOn(adapter, 'getBalance').mockResolvedValue({ availableCents: balanceCents, frozenCents: 0 })
-    const enqueue = vi.fn(async () => {})
+    const enqueue = opts.enqueue ?? vi.fn(async () => {})
     const mockLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const deps: WalletMonitorDeps = {
       db,
@@ -189,12 +192,122 @@ describe('executeWalletMonitor', () => {
 
     const newAlerts = await alertsSince('wallet_recovered', recoveredBefore)
     expect(newAlerts).toHaveLength(1)
-    expect(newAlerts[0]!.detail).toMatchObject({ severity: 'info', resumedCount: 2, availableCents: 10_000 })
+    expect(newAlerts[0]!.detail).toMatchObject({
+      severity: 'info',
+      resumedCount: 2,
+      failedCount: 0,
+      availableCents: 10_000,
+    })
 
     // Rows themselves are untouched by wallet-monitor — pay-order (the job just enqueued) is what
     // actually transitions them, not this executor.
     expect((await loadSupplierOrder(rowAId))?.status).toBe('awaiting_funds')
     expect((await loadSupplierOrder(rowBId))?.status).toBe('awaiting_funds')
+  })
+
+  it('boundary: balance exactly equals the sum of awaiting_funds rows — covered, resumes', async () => {
+    await settings.set('fulfillment.paused_for_funds', true)
+    const orderA = await seedOrder()
+    const rowAId = await seedAwaitingFunds(orderA, 7_500)
+
+    const { deps, enqueue } = makeDeps(7_500) // exactly equal, not one cent short
+    const recoveredBefore = await alertIds('wallet_recovered')
+
+    await executeWalletMonitor(deps)
+
+    expect(await settings.get('fulfillment.paused_for_funds')).toBe(false)
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(enqueue).toHaveBeenCalledWith(
+      'fulfillment.pay-order',
+      { supplierOrderRowId: rowAId },
+      { singletonKey: rowAId, ...FULFILLMENT_RETRY_OPTS },
+    )
+
+    const newAlerts = await alertsSince('wallet_recovered', recoveredBefore)
+    expect(newAlerts).toHaveLength(1)
+    expect(newAlerts[0]!.detail).toMatchObject({ resumedCount: 1, failedCount: 0 })
+  })
+
+  it('partial resume failure: one row\'s enqueue throws — sibling rows still enqueued, failure audited, flag STILL cleared (partial success), wallet_recovered reports failedCount', async () => {
+    await settings.set('fulfillment.paused_for_funds', true)
+    const orderA = await seedOrder()
+    const orderB = await seedOrder()
+    const orderC = await seedOrder()
+    const rowAId = await seedAwaitingFunds(orderA, 1_000)
+    const rowBId = await seedAwaitingFunds(orderB, 1_000) // this one's enqueue will throw
+    const rowCId = await seedAwaitingFunds(orderC, 1_000)
+
+    const enqueue = vi.fn(async (_name: string, data: object) => {
+      if ((data as { supplierOrderRowId: string }).supplierOrderRowId === rowBId) {
+        throw new Error('enqueue transport down')
+      }
+    })
+    const { deps } = makeDeps(10_000, { enqueue }) // >= 1000+1000+1000
+    const recoveredBefore = await alertIds('wallet_recovered')
+
+    await executeWalletMonitor(deps)
+
+    // At least one row succeeded (A and C), so the pause clears — B is the only one left without a
+    // pending pay-order job; the "leave it paused" path is reserved for a FULLY failed batch (see
+    // the total-failure test below), not a partial one.
+    expect(await settings.get('fulfillment.paused_for_funds')).toBe(false)
+
+    expect(enqueue).toHaveBeenCalledTimes(3) // all three attempted — one row's throw doesn't stop its siblings
+    expect(enqueue).toHaveBeenCalledWith(
+      'fulfillment.pay-order',
+      { supplierOrderRowId: rowAId },
+      { singletonKey: rowAId, ...FULFILLMENT_RETRY_OPTS },
+    )
+    expect(enqueue).toHaveBeenCalledWith(
+      'fulfillment.pay-order',
+      { supplierOrderRowId: rowCId },
+      { singletonKey: rowCId, ...FULFILLMENT_RETRY_OPTS },
+    )
+
+    const newAlerts = await alertsSince('wallet_recovered', recoveredBefore)
+    expect(newAlerts).toHaveLength(1)
+    expect(newAlerts[0]!.detail).toMatchObject({
+      severity: 'info',
+      resumedCount: 2,
+      failedCount: 1,
+      availableCents: 10_000,
+    })
+
+    const failureAudits = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, 'wallet_monitor.row_failed'), eq(auditLog.entityId, rowBId)))
+    expect(failureAudits.length).toBeGreaterThan(0)
+    expect(failureAudits[failureAudits.length - 1]!.detail).toMatchObject({ message: 'enqueue transport down' })
+  })
+
+  it('total resume failure: every row\'s enqueue throws — flag stays true (no partial success), wallet_resume_failed alert, no wallet_recovered', async () => {
+    await settings.set('fulfillment.paused_for_funds', true)
+    const orderA = await seedOrder()
+    const orderB = await seedOrder()
+    await seedAwaitingFunds(orderA, 1_000)
+    await seedAwaitingFunds(orderB, 1_000)
+
+    const enqueue = vi.fn(async () => {
+      throw new Error('enqueue transport down')
+    })
+    const { deps } = makeDeps(10_000, { enqueue })
+    const recoveredBefore = await alertIds('wallet_recovered')
+    const resumeFailedBefore = await alertIds('wallet_resume_failed')
+
+    await executeWalletMonitor(deps)
+
+    // Every enqueue failed — nothing actually got queued, so the pause stays in place rather than
+    // being cleared over a batch that would otherwise sit dead until sweep 4's ~7-day overdue
+    // sweep. The next wallet-monitor tick re-evaluates the same (still awaiting_funds) rows fresh.
+    expect(await settings.get('fulfillment.paused_for_funds')).toBe(true)
+    expect(enqueue).toHaveBeenCalledTimes(2)
+
+    const failedAlerts = await alertsSince('wallet_resume_failed', resumeFailedBefore)
+    expect(failedAlerts).toHaveLength(1)
+    expect(failedAlerts[0]!.detail).toMatchObject({ severity: 'warning', failures: 2 })
+
+    expect(await alertsSince('wallet_recovered', recoveredBefore)).toHaveLength(0)
   })
 
   it('paused + balance short of the sum: stays paused, zero enqueues, no wallet_recovered alert', async () => {
@@ -252,7 +365,7 @@ describe('executeWalletMonitor', () => {
 
     const newAlerts = await alertsSince('wallet_recovered', recoveredBefore)
     expect(newAlerts).toHaveLength(1)
-    expect(newAlerts[0]!.detail).toMatchObject({ severity: 'info', resumedCount: 0 })
+    expect(newAlerts[0]!.detail).toMatchObject({ severity: 'info', resumedCount: 0, failedCount: 0 })
   })
 
   it('not paused: awaiting_funds rows (if any exist from a stale state) are never queried/touched', async () => {
