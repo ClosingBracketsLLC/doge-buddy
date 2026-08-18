@@ -12,6 +12,7 @@ import {ProductPrice} from '~/components/ProductPrice';
 import {ProductImage} from '~/components/ProductImage';
 import {ProductForm} from '~/components/ProductForm';
 import {redirectIfHandleIsLocalized} from '~/lib/redirect';
+import {DeliveryBadge} from '~/components/brand/DeliveryBadge';
 
 export const meta: Route.MetaFunction = ({data}) => {
   return [
@@ -101,10 +102,15 @@ export default function Product() {
     <div className="product">
       <ProductImage image={selectedVariant?.image} />
       <div className="product-main">
-        <h1>{title}</h1>
+        <h1 className="font-display font-extrabold">{title}</h1>
         <ProductPrice
           price={selectedVariant?.price}
           compareAtPrice={selectedVariant?.compareAtPrice}
+        />
+        <DeliveryBadge
+          shipsFrom={product.shipsFrom?.value}
+          minDays={product.deliveryMinDays?.value}
+          maxDays={product.deliveryMaxDays?.value}
         />
         <br />
         <ProductForm
@@ -212,6 +218,15 @@ const PRODUCT_FRAGMENT = `#graphql
     seo {
       description
       title
+    }
+    shipsFrom: metafield(namespace: "dogebuddy", key: "ships_from") {
+      value
+    }
+    deliveryMinDays: metafield(namespace: "dogebuddy", key: "delivery_min_days") {
+      value
+    }
+    deliveryMaxDays: metafield(namespace: "dogebuddy", key: "delivery_max_days") {
+      value
     }
   }
   ${PRODUCT_VARIANT_FRAGMENT}
