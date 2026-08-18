@@ -28,7 +28,7 @@ export default function Policy() {
       >
         ← Back to Policies
       </Link>
-      <h1 className="mt-4 font-display font-bold text-3xl text-ink">
+      <h1 className="mt-4 font-display text-4xl text-ink">
         {policy.title}
       </h1>
       <div className="mt-6 flex flex-col gap-4 text-ink">

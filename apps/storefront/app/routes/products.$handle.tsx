@@ -128,32 +128,34 @@ export default function Product() {
   const {title, descriptionHtml} = product;
 
   return (
-    <div className="product">
+    <div className="mx-auto grid max-w-5xl gap-8 px-4 py-8 md:grid-cols-2">
       <ProductImage image={selectedVariant?.image} />
-      <div className="product-main">
-        <h1 className="font-display font-extrabold">{title}</h1>
-        <ProductPrice
-          price={selectedVariant?.price}
-          compareAtPrice={selectedVariant?.compareAtPrice}
+      <div>
+        <h1 className="font-display text-4xl text-ink">{title}</h1>
+        <div className="mt-3 inline-block rounded border-2 border-ink bg-badge px-3 py-1 font-display text-xl text-ink">
+          <ProductPrice
+            price={selectedVariant?.price}
+            compareAtPrice={selectedVariant?.compareAtPrice}
+          />
+        </div>
+        <div className="mt-4">
+          <DeliveryBadge
+            shipsFrom={product.shipsFrom?.value}
+            minDays={product.deliveryMinDays?.value}
+            maxDays={product.deliveryMaxDays?.value}
+          />
+        </div>
+        <div className="mt-6">
+          <ProductForm
+            productOptions={productOptions}
+            selectedVariant={selectedVariant}
+          />
+        </div>
+        <h2 className="mt-10 font-display text-2xl text-ink">Description</h2>
+        <div
+          className="mt-2 leading-relaxed text-ink"
+          dangerouslySetInnerHTML={{__html: descriptionHtml}}
         />
-        <DeliveryBadge
-          shipsFrom={product.shipsFrom?.value}
-          minDays={product.deliveryMinDays?.value}
-          maxDays={product.deliveryMaxDays?.value}
-        />
-        <br />
-        <ProductForm
-          productOptions={productOptions}
-          selectedVariant={selectedVariant}
-        />
-        <br />
-        <br />
-        <p>
-          <strong>Description</strong>
-        </p>
-        <br />
-        <div dangerouslySetInnerHTML={{__html: descriptionHtml}} />
-        <br />
       </div>
       <Analytics.ProductView
         data={{

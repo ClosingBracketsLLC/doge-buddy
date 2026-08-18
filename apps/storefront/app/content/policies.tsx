@@ -33,7 +33,7 @@ function ShippingBody() {
 function ReturnsBody() {
   return (
     <>
-      <h2 className="font-display font-bold">30-day returns</h2>
+      <h2 className="mt-6 font-display text-xl text-ink">30-day returns</h2>
       <p>
         If you or your dog aren&apos;t happy with an item, contact us within 30
         days of delivery for a prepaid return label — refunds go to the original
@@ -43,7 +43,7 @@ function ReturnsBody() {
         Items should be unused where possible, but if your dog took a test chew,
         talk to us anyway.
       </p>
-      <h2 className="font-display font-bold">Damaged or wrong items</h2>
+      <h2 className="mt-6 font-display text-xl text-ink">Damaged or wrong items</h2>
       <p>
         Full refund or replacement, photos appreciated, no return needed for
         damaged goods.
@@ -60,7 +60,7 @@ function PrivacyBody() {
         address, and email. Payment is processed by Shopify; we never see your
         card number.
       </p>
-      <h2 className="font-display font-bold">Who we share data with</h2>
+      <h2 className="mt-6 font-display text-xl text-ink">Who we share data with</h2>
       <p>
         To run the store we share data with service providers acting on our
         behalf:

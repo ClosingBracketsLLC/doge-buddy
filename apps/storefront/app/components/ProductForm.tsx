@@ -102,7 +102,7 @@ export function ProductForm({
         );
       })}
       <AddToCartButton
-        className="bg-cta text-white rounded-2xl font-bold px-6 py-3 disabled:opacity-50"
+        className="rounded-2xl border-2 border-ink bg-cta px-8 py-3 font-display text-lg text-white shadow-[4px_4px_0_var(--color-ink)] transition-transform hover:-translate-y-0.5 disabled:opacity-50 disabled:shadow-none motion-reduce:transition-none"
         disabled={!selectedVariant || !selectedVariant.availableForSale}
         onClick={() => {
           open('cart');

@@ -54,7 +54,7 @@ function CartCheckoutActions({checkoutUrl}: {checkoutUrl?: string}) {
       <a
         href={checkoutUrl}
         target="_self"
-        className="bg-cta text-white font-bold rounded-2xl w-full py-3 block text-center"
+        className="bg-cta text-white rounded-2xl w-full py-3 block text-center border-2 border-ink font-display text-lg shadow-[3px_3px_0_var(--color-ink)]"
       >
         Continue to Checkout &rarr;
       </a>

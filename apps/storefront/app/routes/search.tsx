@@ -54,18 +54,18 @@ export default function SearchPage() {
               placeholder="Search…"
               ref={inputRef}
               type="search"
-              className="flex-1 rounded-2xl bg-surface-raised px-4 py-2 text-ink"
+              className="flex-1 rounded-2xl border-2 border-ink bg-surface-raised px-4 py-2 text-ink"
             />
             <button
               type="submit"
-              className="bg-cta text-white font-bold rounded-2xl px-5 py-2"
+              className="rounded-2xl border-2 border-ink bg-cta px-5 py-2 font-display text-white"
             >
               Search
             </button>
           </div>
         )}
       </SearchForm>
-      {error && <p style={{color: 'red'}}>{error}</p>}
+      {error && <p className="text-cta">{error}</p>}
       <div className="mt-6">
         {!term || !result?.total ? (
           <SearchResults.Empty />

@@ -41,8 +41,11 @@ test('home renders hero and products', async ({page}) => {
   await expect(
     page.getByRole('heading', {level: 1, name: /great gear for your best friend/i}),
   ).toBeVisible();
+  // Trust strip lives in the footer only (deduped in the redesign).
   await expect(
-    main(page).getByText('Ships from US warehouses · 3–7 day delivery'),
+    page
+      .getByRole('contentinfo')
+      .getByText('Ships from US warehouses · 3–7 day delivery'),
   ).toBeVisible();
   await expect(main(page).locator('a[href^="/products/"]').first()).toBeVisible();
 });

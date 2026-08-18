@@ -21,7 +21,7 @@ export function EmptyState({
         <Link
           to={cta.to}
           onClick={onCtaClick}
-          className="bg-cta text-white rounded-2xl px-5 py-2 font-bold"
+          className="rounded-2xl border-2 border-ink bg-cta px-5 py-2 font-display text-white shadow-[3px_3px_0_var(--color-ink)]"
         >
           {cta.label}
         </Link>
