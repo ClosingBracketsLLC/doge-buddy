@@ -1,6 +1,6 @@
 import { createDb, orders, supplierOrders } from '@doge-buddy/db'
 import { eq } from 'drizzle-orm'
-import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import {
   applyTransition,
   canTransition,
@@ -56,12 +56,12 @@ describe('applyTransition', () => {
   const { db, pool } = createDb(url)
   afterAll(() => pool.end())
 
-  beforeEach(async () => {
-    // Children before parent — supplier_orders.order_id FKs to orders.id.
-    await db.delete(supplierOrders)
-    await db.delete(orders)
-  })
-
+  // Each test below scopes its own assertions to the specific row id it just created, so this
+  // suite never needed a clean table to be correct — a table-wide `db.delete(orders)` here
+  // previously ran before every test and raced with any OTHER test file inserting into the
+  // shared `orders` table concurrently (vitest runs test files in parallel by default), wiping
+  // rows out from under them mid-test. Removed rather than scoped: nothing in this file reads
+  // it back.
   async function seedOrder(): Promise<string> {
     const [order] = await db
       .insert(orders)

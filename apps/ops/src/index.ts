@@ -12,8 +12,14 @@ const config = loadConfig(process.env)
 const { db, pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
 const queue = await startQueue(config.databaseUrl)
 
-const enqueue: WebhookDeps['enqueue'] = async (name, data) => {
-  await queue.boss.send(name, data)
+// pg-boss's 3-arg `send` overload requires a real SendOptions object (not `undefined`), so
+// this only forwards `opts` when the caller actually passed one.
+const enqueue: WebhookDeps['enqueue'] = async (name, data, opts) => {
+  if (opts) {
+    await queue.boss.send(name, data, opts)
+  } else {
+    await queue.boss.send(name, data)
+  }
 }
 
 const cjAdapter = config.cj

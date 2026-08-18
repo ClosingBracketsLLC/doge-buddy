@@ -2,15 +2,18 @@ import { createHash } from 'node:crypto'
 import { type createDb, webhookEvents } from '@doge-buddy/db'
 import { verifyShopifyWebhookHmac } from '@doge-buddy/shopify-admin'
 import type { FastifyPluginAsync } from 'fastify'
+import type { SendOpts } from '../fulfillment/types.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 
 export interface WebhookDeps {
   db: Db
-  enqueue: (
-    name: 'webhook.shopify.process' | 'webhook.cj.process',
-    data: { webhookEventId: string },
-  ) => Promise<void>
+  /**
+   * Widened (beyond the two webhook-process queue names) so this same function can also be
+   * handed to `webhookProcessHandler` deps, which enqueues into `fulfillment.place-order` with
+   * `SendOpts` (singletonKey, retries) — see `jobs/webhook-process.ts`.
+   */
+  enqueue: (name: string, data: object, opts?: SendOpts) => Promise<void>
   shopifyWebhookSecret?: string
   cjVerify?: (rawBody: Buffer, headers: Record<string, string | string[] | undefined>) => boolean
   cjParse?: (rawBody: Buffer) => { externalEventId: string; type: string }
