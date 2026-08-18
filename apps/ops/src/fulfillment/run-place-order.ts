@@ -159,6 +159,32 @@ function aggregateNeeded(
 }
 
 /**
+ * Transitions the row to `needs_attention` (from `pending` or `created`), persists
+ * `lastError = '<reason>: <detail>'`, and alerts. Shared by the planner's own `needs_attention`
+ * decision, the post-create spend-cap re-check, and the missing-shipping-address guard — all
+ * three park the order identically, so this is the one place that shape is defined.
+ */
+async function parkNeedsAttention(
+  deps: PlaceOrderDeps,
+  orderRow: OrderRow,
+  supplierOrderRow: SupplierOrderRow,
+  from: 'pending' | 'created',
+  reason: string,
+  detail: string,
+): Promise<void> {
+  await applyTransition(deps.db, supplierOrderRow.id, from, 'needs_attention', {
+    lastError: `${reason}: ${detail}`,
+  })
+  await deps.alert('warning', 'fulfillment_needs_attention', {
+    orderId: orderRow.id,
+    orderGid: orderRow.shopifyOrderGid,
+    supplierOrderRowId: supplierOrderRow.id,
+    reason,
+    detail,
+  })
+}
+
+/**
  * Re-checks the actual placed total against the *current* spend cap, then either parks the order
  * (`created -> needs_attention`, no confirm) or confirms it and enqueues payment.
  *
@@ -175,16 +201,7 @@ async function confirmOrPark(deps: PlaceOrderDeps, orderRow: OrderRow, supplierO
 
   if (totalAmountCents > spendCapCents) {
     const detail = `actual total ${totalAmountCents}c exceeds spend cap ${spendCapCents}c`
-    await applyTransition(deps.db, supplierOrderRow.id, 'created', 'needs_attention', {
-      lastError: `cap_exceeded_post_create: ${detail}`,
-    })
-    await deps.alert('warning', 'fulfillment_needs_attention', {
-      orderId: orderRow.id,
-      orderGid: orderRow.shopifyOrderGid,
-      supplierOrderRowId: supplierOrderRow.id,
-      reason: 'cap_exceeded_post_create',
-      detail,
-    })
+    await parkNeedsAttention(deps, orderRow, supplierOrderRow, 'created', 'cap_exceeded_post_create', detail)
     return
   }
 
@@ -226,16 +243,7 @@ async function dispatchDecision(
       return
 
     case 'needs_attention':
-      await applyTransition(deps.db, supplierOrderRow.id, 'pending', 'needs_attention', {
-        lastError: `${decision.reason}: ${decision.detail}`,
-      })
-      await deps.alert('warning', 'fulfillment_needs_attention', {
-        orderId: orderRow.id,
-        orderGid: orderRow.shopifyOrderGid,
-        supplierOrderRowId: supplierOrderRow.id,
-        reason: decision.reason,
-        detail: decision.detail,
-      })
+      await parkNeedsAttention(deps, orderRow, supplierOrderRow, 'pending', decision.reason, decision.detail)
       return
 
     case 'proceed': {
@@ -325,8 +333,26 @@ export async function executePlaceOrder(deps: PlaceOrderDeps, orderGid: string):
     }
   }
 
+  // orders.shipping_address is stored ALREADY-NORMALIZED into the Address shape by
+  // upsertOrderFromPaidPayload (via shopifyRestAddressToAddress) — this is a plain read, not a
+  // reshape. A null value means the order arrived with no usable shipping address (missing,
+  // malformed REST payload, or a required field absent) and must be parked for a human rather
+  // than let a raw TypeError crash the job (or a garbage address reach quoteShipping/placeOrder)
+  // when its fields are read below. Checked before any gather-inputs I/O: zero adapter calls.
+  const shippingAddress = orderRow.shippingAddress as Address | null
+  if (!shippingAddress) {
+    await parkNeedsAttention(
+      deps,
+      orderRow,
+      supplierOrderRow,
+      'pending',
+      'missing_address',
+      'order has no usable shipping address',
+    )
+    return
+  }
+
   const lineItems = extractLineItems(orderRow)
-  const shippingAddress = orderRow.shippingAddress as Address
 
   const mappings = await loadMappings(deps.db, deps.adapter.key, lineItems)
   const neededBySupplierVariant = aggregateNeeded(lineItems, mappings)

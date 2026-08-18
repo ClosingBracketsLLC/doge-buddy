@@ -11,6 +11,7 @@ import { type Address, MockSupplierAdapter } from '@doge-buddy/supplier'
 import { and, eq } from 'drizzle-orm'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
+import { type ShopifyOrderPaidPayload, upsertOrderFromPaidPayload } from '../src/fulfillment/order-upsert.ts'
 import { executePlaceOrder, type PlaceOrderDeps } from '../src/fulfillment/run-place-order.ts'
 import { createSettings } from '../src/settings.ts'
 
@@ -73,7 +74,9 @@ describe('executePlaceOrder', () => {
     isTest?: boolean
     totalCents: number
     lineItems: { variantId: string; quantity: number }[]
-    shippingAddress?: Address
+    // Explicit `null` stores a null shipping_address (e.g. for the missing-address guard test);
+    // omitting the field entirely defaults to a normal, fully-populated address.
+    shippingAddress?: Address | null
   }): Promise<{ orderGid: string; orderRowId: string }> {
     const orderGid = orderGidFor()
     const [row] = await db
@@ -82,7 +85,7 @@ describe('executePlaceOrder', () => {
         shopifyOrderGid: orderGid,
         isTest: opts.isTest ?? false,
         totalCents: opts.totalCents,
-        shippingAddress: opts.shippingAddress ?? ADDRESS,
+        shippingAddress: opts.shippingAddress === undefined ? ADDRESS : opts.shippingAddress,
         rawPayload: {
           admin_graphql_api_id: orderGid,
           line_items: opts.lineItems.map((li) => ({ variant_id: li.variantId, quantity: li.quantity })),
@@ -435,5 +438,91 @@ describe('executePlaceOrder', () => {
     const row = await loadSupplierOrder(orderRowId)
     expect(row?.status).toBe('confirmed')
     expect(enqueue).toHaveBeenCalledTimes(1)
+  })
+
+  it('null shipping_address: needs_attention (missing_address), alerts, zero adapter calls — no raw TypeError', async () => {
+    const { orderGid, orderRowId } = await seedOrder({ totalCents: 10_000, lineItems: [], shippingAddress: null })
+    const adapter = new MockSupplierAdapter()
+    const spies = spyAdapter(adapter)
+    const { deps, enqueue } = makeDeps(adapter)
+
+    await executePlaceOrder(deps, orderGid)
+
+    for (const method of ALL_ADAPTER_METHODS) {
+      expect(spies[method]).not.toHaveBeenCalled()
+    }
+    expect(enqueue).not.toHaveBeenCalled()
+
+    const row = await loadSupplierOrder(orderRowId)
+    expect(row?.status).toBe('needs_attention')
+    expect(row?.lastError).toBe('missing_address: order has no usable shipping address')
+
+    const alertRows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.entityType, 'alert'), eq(auditLog.action, 'alert.fulfillment_needs_attention')))
+    const match = alertRows.find((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === row!.id)
+    expect(match).toBeDefined()
+    expect(match!.detail).toMatchObject({ severity: 'warning', reason: 'missing_address', orderId: orderRowId })
+  })
+
+  it('realistic REST shipping_address is normalized at upsert and reaches the adapter correctly shaped (upsertOrderFromPaidPayload -> executePlaceOrder end-to-end, no pre-seeded Address)', async () => {
+    const variantId = nextId()
+    await seedMapping({ variantGid: variantGidFor(variantId), supplierVariantId: 'mock-v1', supplierCostCents: 620 })
+
+    const orderGid = orderGidFor()
+    const restPayload: ShopifyOrderPaidPayload = {
+      admin_graphql_api_id: orderGid,
+      test: false,
+      total_price: '100.00',
+      email: 'buyer@example.com',
+      order_number: 4242,
+      shipping_address: {
+        first_name: 'Ada',
+        last_name: 'Lovelace',
+        address1: '123 Analytical Engine Way',
+        address2: 'Suite 2',
+        city: 'Springfield',
+        province: 'Illinois',
+        province_code: 'IL',
+        country: 'United States',
+        country_code: 'US',
+        zip: '62701',
+        phone: '555-1234',
+      },
+      line_items: [{ variant_id: variantId, quantity: 1 }],
+    }
+    await upsertOrderFromPaidPayload(db, restPayload)
+
+    const adapter = new MockSupplierAdapter()
+    const placeOrderSpy = vi.spyOn(adapter, 'placeOrder')
+    const quoteShippingSpy = vi.spyOn(adapter, 'quoteShipping')
+    const { deps } = makeDeps(adapter)
+
+    await executePlaceOrder(deps, orderGid)
+
+    expect(placeOrderSpy).toHaveBeenCalledTimes(1)
+    expect(placeOrderSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shippingAddress: {
+          name: 'Ada Lovelace',
+          line1: '123 Analytical Engine Way',
+          line2: 'Suite 2',
+          city: 'Springfield',
+          state: 'IL',
+          zip: '62701',
+          country: 'US',
+          phone: '555-1234',
+        },
+      }),
+    )
+
+    expect(quoteShippingSpy).toHaveBeenCalledTimes(1)
+    expect(quoteShippingSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ fromCountry: 'US', toCountry: 'US', toZip: '62701' }),
+    )
+
+    const row = await loadSupplierOrder((await db.select().from(orders).where(eq(orders.shopifyOrderGid, orderGid)))[0]!.id)
+    expect(row?.status).toBe('confirmed')
   })
 })

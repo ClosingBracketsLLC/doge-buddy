@@ -4,6 +4,7 @@ import type PgBoss from 'pg-boss'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import {
   decimalStringToCents,
+  shopifyRestAddressToAddress,
   type ShopifyOrderPaidPayload,
   upsertOrderFromPaidPayload,
 } from '../src/fulfillment/order-upsert.ts'
@@ -60,6 +61,103 @@ describe('decimalStringToCents', () => {
   })
 })
 
+describe('shopifyRestAddressToAddress', () => {
+  it('maps a full REST shipping_address (name, province_code, country_code, address2, phone) into the Address shape', () => {
+    expect(
+      shopifyRestAddressToAddress({
+        first_name: 'Ada',
+        last_name: 'Lovelace',
+        name: 'Ada Lovelace',
+        address1: '123 Analytical Engine Way',
+        address2: 'Suite 2',
+        city: 'Springfield',
+        province: 'Illinois',
+        province_code: 'IL',
+        country: 'United States',
+        country_code: 'US',
+        zip: '62701',
+        phone: '555-1234',
+      }),
+    ).toEqual({
+      name: 'Ada Lovelace',
+      line1: '123 Analytical Engine Way',
+      line2: 'Suite 2',
+      city: 'Springfield',
+      state: 'IL',
+      zip: '62701',
+      country: 'US',
+      phone: '555-1234',
+    })
+  })
+
+  it('falls back to first_name + last_name when name is absent', () => {
+    expect(
+      shopifyRestAddressToAddress({
+        first_name: 'Ada',
+        last_name: 'Lovelace',
+        address1: '123 Analytical Engine Way',
+        city: 'Springfield',
+        province_code: 'IL',
+        country_code: 'US',
+        zip: '62701',
+      }),
+    ).toMatchObject({ name: 'Ada Lovelace' })
+  })
+
+  it('falls back to province when province_code is absent', () => {
+    expect(
+      shopifyRestAddressToAddress({
+        name: 'Ada Lovelace',
+        address1: '123 Analytical Engine Way',
+        city: 'Springfield',
+        province: 'Illinois',
+        country_code: 'US',
+        zip: '62701',
+      }),
+    ).toMatchObject({ state: 'Illinois' })
+  })
+
+  it.each([
+    ['name (and no first/last name)', { first_name: null, last_name: null }],
+    ['address1', { address1: null }],
+    ['city', { city: null }],
+    ['state (no province or province_code)', { province: null, province_code: null }],
+    ['zip', { zip: null }],
+    ['country_code', { country_code: null }],
+  ])('returns null when %s is missing', (_label, overrides) => {
+    const full = {
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      address1: '123 Analytical Engine Way',
+      city: 'Springfield',
+      province_code: 'IL',
+      country_code: 'US',
+      zip: '62701',
+    }
+    expect(shopifyRestAddressToAddress({ ...full, ...overrides })).toBeNull()
+  })
+
+  it('returns null for null, undefined, and non-object input', () => {
+    expect(shopifyRestAddressToAddress(null)).toBeNull()
+    expect(shopifyRestAddressToAddress(undefined)).toBeNull()
+    expect(shopifyRestAddressToAddress('not an object')).toBeNull()
+  })
+
+  it('uppercases country_code and omits line2/phone when absent', () => {
+    const address = shopifyRestAddressToAddress({
+      name: 'Ada Lovelace',
+      address1: '123 Analytical Engine Way',
+      city: 'Springfield',
+      province_code: 'il',
+      country_code: 'us',
+      zip: '62701',
+    })
+    expect(address?.country).toBe('US')
+    expect(address).not.toHaveProperty('line2')
+    expect(address).not.toHaveProperty('phone')
+  })
+})
+
 describe('upsertOrderFromPaidPayload', () => {
   const { db, pool } = createDb(url)
   afterAll(() => pool.end())
@@ -77,6 +175,45 @@ describe('upsertOrderFromPaidPayload', () => {
     expect(row!.email).toBe(payload.email)
     expect(row!.shopifyOrderNumber).toBe('1001')
     expect(row!.rawPayload).toEqual(payload)
+  })
+
+  it('stores shipping_address ALREADY-NORMALIZED into the Address shape, not the raw REST shape', async () => {
+    const payload = paidPayload({
+      shipping_address: {
+        first_name: 'Ada',
+        last_name: 'Lovelace',
+        address1: '123 Analytical Engine Way',
+        address2: 'Suite 2',
+        city: 'Springfield',
+        province_code: 'IL',
+        country_code: 'US',
+        zip: '62701',
+        phone: '555-1234',
+      },
+    })
+    const result = await upsertOrderFromPaidPayload(db, payload)
+
+    const [row] = await db.select().from(orders).where(eq(orders.id, result.orderRowId))
+    expect(row!.shippingAddress).toEqual({
+      name: 'Ada Lovelace',
+      line1: '123 Analytical Engine Way',
+      line2: 'Suite 2',
+      city: 'Springfield',
+      state: 'IL',
+      zip: '62701',
+      country: 'US',
+      phone: '555-1234',
+    })
+    // The raw REST shape is still preserved verbatim in raw_payload.
+    expect((row!.rawPayload as ShopifyOrderPaidPayload).shipping_address).toEqual(payload.shipping_address)
+  })
+
+  it('stores a null shipping_address when the REST payload is missing required Address fields (the default fixture only has address1/city)', async () => {
+    const payload = paidPayload() // default fixture's shipping_address lacks name/state/zip/country
+    const result = await upsertOrderFromPaidPayload(db, payload)
+
+    const [row] = await db.select().from(orders).where(eq(orders.id, result.orderRowId))
+    expect(row!.shippingAddress).toBeNull()
   })
 
   it('creates an order row with is_test=true', async () => {
