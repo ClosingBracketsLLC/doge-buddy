@@ -1,4 +1,5 @@
 import { auditLog, createDb } from '@doge-buddy/db'
+import { and, eq } from 'drizzle-orm'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
 
@@ -8,7 +9,7 @@ describe('alerts', () => {
   const { db, pool } = createDb(url)
 
   beforeEach(async () => {
-    await db.delete(auditLog)
+    await db.delete(auditLog).where(eq(auditLog.entityType, 'alert'))
   })
   afterAll(() => pool.end())
 
@@ -18,7 +19,10 @@ describe('alerts', () => {
 
     await alert('warning', 'wallet_low', { balanceCents: 1000 })
 
-    const rows = await db.select().from(auditLog)
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.entityType, 'alert'), eq(auditLog.action, 'alert.wallet_low')))
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
       actor: 'system',
