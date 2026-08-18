@@ -1,6 +1,6 @@
 /* Skeleton element resets, demoted into the base layer so Tailwind utilities
-   (utilities layer) always win. Un-layered rules here silently override every
-   text-*/font-*/size utility in the app — see the anchor-color bug. */
+   (utilities layer) always win. Un-layered rules here silently override the
+   text-, font-, and size utilities in the app — see the anchor-color bug. */
 @layer base {
 body {
   font-family:
