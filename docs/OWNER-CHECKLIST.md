@@ -26,7 +26,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
   *Check:* once `.env` is filled in, run `pnpm --filter @doge-buddy/ops verify-live` — the CJ section should print `CJ OK`.
 
 - [ ] 🟡 **CJ key → re-record `order/list` fixtures, then run the full-pipeline sandbox contract check (Phase 3 Tier 2).** Once the CJ key above is in place: (1) re-record `packages/supplier/test/fixtures/cj/order-list-*.json` against real CJ responses (the current fixtures are best-effort/unverified — see their own FIXTURE-ASSUMPTION comments); (2) run `CJ_CONTRACT=1 pnpm --filter @doge-buddy/supplier test` — this drives the real CJ sandbox through the full place → confirm → pay → track pipeline (skipped by default; the mock adapter covers the whole suite otherwise).
-  *Blocks:* 🔴 nothing in Phase 3's own build — the entire pipeline is proven against the mock adapter and static fixtures. Blocks confidence that real CJ API responses actually match those fixtures before the first live sandbox order. ~20–30 min.
+  *Blocks:* 🔴 the **first live CJ sandbox order** — Phase 3's pipeline is fully proven against the mock adapter and static fixtures, but those fixtures are unverified assumptions until this runs against real CJ responses. Build and mock-driven tests proceed without it. ~20–30 min.
   *Check:* the contract test's own assertions pass against live CJ sandbox data instead of being skipped.
 
 - [ ] 🟡 **Ask Shopify support about the launch-store type** (do this early — the answer shapes Phase 7). Suggested message:
