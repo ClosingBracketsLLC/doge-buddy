@@ -6,6 +6,7 @@ import {
   CJSupplierAdapter,
   CjHttpClient,
   InMemoryCjTokenStore,
+  mapCjDisputeStatus,
   mapCjOrderStatus,
 } from '@doge-buddy/supplier'
 import type { Address } from '@doge-buddy/supplier'
@@ -394,5 +395,26 @@ describe('mapCjOrderStatus', () => {
     ['SOMETHING_ELSE', 'unknown'],
   ])('maps %s -> %s', (raw, expected) => {
     expect(mapCjOrderStatus(raw)).toBe(expected)
+  })
+})
+
+describe('mapCjDisputeStatus', () => {
+  it.each([
+    ['pending', 'pending'],
+    ['PENDING', 'pending'],
+    ['processing', 'pending'],
+    ['PROCESSING', 'pending'],
+    ['refunded', 'refunded'],
+    ['REFUNDED', 'refunded'],
+    ['reissued', 'reissued'],
+    ['REISSUED', 'reissued'],
+    ['rejected', 'rejected'],
+    ['REJECTED', 'rejected'],
+    ['closed', 'rejected'],
+    ['CLOSED', 'rejected'],
+    ['SOMETHING_ELSE', 'unknown'],
+    ['', 'unknown'],
+  ])('maps %s -> %s', (raw, expected) => {
+    expect(mapCjDisputeStatus(raw)).toBe(expected)
   })
 })

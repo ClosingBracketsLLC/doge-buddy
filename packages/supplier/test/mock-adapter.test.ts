@@ -44,4 +44,81 @@ describe('MockSupplierAdapter specifics', () => {
       items: [{ supplierVariantId: 'nope', quantity: 1 }],
     })).rejects.toThrow(/unknown variant/i)
   })
+
+  describe('unknown-id strictness', () => {
+    it('throws on unknown product in getProduct', async () => {
+      const adapter = new MockSupplierAdapter()
+      await expect(adapter.getProduct('nope')).rejects.toThrow(/unknown product/i)
+    })
+    it('throws on unknown variant in quoteShipping', async () => {
+      const adapter = new MockSupplierAdapter()
+      await expect(adapter.quoteShipping({
+        fromCountry: 'US', toCountry: 'US', items: [{ supplierVariantId: 'nope', quantity: 1 }],
+      })).rejects.toThrow(/unknown variant/i)
+    })
+    it('throws on unknown id in confirmOrder', async () => {
+      const adapter = new MockSupplierAdapter()
+      await expect(adapter.confirmOrder('nope')).rejects.toThrow(/unknown order/i)
+    })
+    it('throws on unknown id in payOrder (checked by both supplierOrderId and shipmentOrderId)', async () => {
+      const adapter = new MockSupplierAdapter()
+      await expect(adapter.payOrder('nope')).rejects.toThrow(/unknown order/i)
+    })
+    it('throws on unknown id in getOrderStatus', async () => {
+      const adapter = new MockSupplierAdapter()
+      await expect(adapter.getOrderStatus('nope')).rejects.toThrow(/unknown order/i)
+    })
+    it('throws on unknown id in getTracking', async () => {
+      const adapter = new MockSupplierAdapter()
+      await expect(adapter.getTracking('nope')).rejects.toThrow(/unknown order/i)
+    })
+    it('throws on unknown id in getDisputeOptions', async () => {
+      const adapter = new MockSupplierAdapter()
+      await expect(adapter.getDisputeOptions('nope')).rejects.toThrow(/unknown order/i)
+    })
+  })
+
+  describe('failPlaceOrderTimes (429-storm simulation)', () => {
+    it('throws N times then succeeds, creating exactly one order', async () => {
+      const adapter = new MockSupplierAdapter({ failPlaceOrderTimes: 2 })
+      const req = {
+        idempotencyKey: 'retry-key', logisticName: 'Standard', fromCountry: 'US',
+        shippingAddress: { name: 'T', line1: 'x', city: 'y', state: 'GA', zip: '1', country: 'US' },
+        items: [{ supplierVariantId: 'mock-v1', quantity: 1 }],
+      }
+      await expect(adapter.placeOrder(req)).rejects.toThrow(/429|rate limit|retryable/i)
+      await expect(adapter.placeOrder(req)).rejects.toThrow(/429|rate limit|retryable/i)
+      const result = await adapter.placeOrder(req)
+
+      expect(result.supplierOrderId).toBe('mock-order-1')
+      expect(adapter.placedOrders).toHaveLength(1)
+
+      // A further call with the SAME idempotencyKey (e.g. a spurious extra retry after the real
+      // success) must still return the cached result, never fail or create a second order — the
+      // failure counter is already exhausted, and the idempotency check runs first regardless.
+      const again = await adapter.placeOrder(req)
+      expect(again).toEqual(result)
+      expect(adapter.placedOrders).toHaveLength(1)
+    })
+
+    it('omitted (default): never fails', async () => {
+      const adapter = new MockSupplierAdapter()
+      const result = await adapter.placeOrder({
+        idempotencyKey: 'no-fail-key', logisticName: 'Standard', fromCountry: 'US',
+        shippingAddress: { name: 'T', line1: 'x', city: 'y', state: 'GA', zip: '1', country: 'US' },
+        items: [{ supplierVariantId: 'mock-v1', quantity: 1 }],
+      })
+      expect(result.supplierOrderId).toBe('mock-order-1')
+    })
+
+    it('0: never fails (explicit)', async () => {
+      const adapter = new MockSupplierAdapter({ failPlaceOrderTimes: 0 })
+      const result = await adapter.placeOrder({
+        idempotencyKey: 'zero-fail-key', logisticName: 'Standard', fromCountry: 'US',
+        shippingAddress: { name: 'T', line1: 'x', city: 'y', state: 'GA', zip: '1', country: 'US' },
+        items: [{ supplierVariantId: 'mock-v1', quantity: 1 }],
+      })
+      expect(result.supplierOrderId).toBe('mock-order-1')
+    })
+  })
 })

@@ -22,6 +22,17 @@ export interface MockAdapterOptions {
   balanceCents?: number
   usStock?: Record<string, number>
   priceMultiplier?: number
+  /**
+   * 429-storm simulation: `placeOrder` throws a retryable error on each of the first N calls,
+   * then succeeds normally (creating exactly one order) on call N+1 — mirrors a supplier rate
+   * limit that clears after a few automatic retries. The counter is instance-wide (not scoped to
+   * idempotencyKey), matching production: a retried job always resends the SAME idempotencyKey
+   * for the SAME order, so by the time the counter reaches zero, no earlier call for that key has
+   * ever succeeded — `placeOrder`'s existing idempotency check (above) still guarantees a second
+   * call after that first success just returns the cached result, never a second order. Omitted
+   * or `0` (default): `placeOrder` never fails this way.
+   */
+  failPlaceOrderTimes?: number
 }
 
 interface MockVariant {
@@ -82,10 +93,12 @@ export class MockSupplierAdapter implements SupplierAdapter {
   private readonly disputesById = new Set<string>()
   private orderCounter = 0
   private disputeCounter = 0
+  private placeOrderFailuresRemaining: number
 
   constructor(opts: MockAdapterOptions = {}) {
     this.opts = opts
     this.priceMultiplier = opts.priceMultiplier ?? 1
+    this.placeOrderFailuresRemaining = opts.failPlaceOrderTimes ?? 0
   }
 
   private priced(baseCents: number): number {
@@ -159,6 +172,11 @@ export class MockSupplierAdapter implements SupplierAdapter {
   async placeOrder(req: PlaceOrderRequest): Promise<PlaceOrderResult> {
     const existing = this.ordersByIdempotencyKey.get(req.idempotencyKey)
     if (existing) return existing
+
+    if (this.placeOrderFailuresRemaining > 0) {
+      this.placeOrderFailuresRemaining -= 1
+      throw new Error('mock: simulated 429 rate limit (retryable)')
+    }
 
     let productAmountCents = 0
     for (const item of req.items) {
