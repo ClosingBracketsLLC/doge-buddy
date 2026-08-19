@@ -424,14 +424,15 @@ describe('run-reconcile', () => {
       expect(updated?.status).toBe('shipped')
     })
 
-    it('illegal (backwards) transition is ignored: row untouched, not counted', async () => {
+    it('illegal (self/backwards) transition is ignored: row untouched, not counted', async () => {
       const { orderRowId } = await seedOrder()
-      const row = await seedSupplierOrder({ orderRowId, status: 'created', updatedAt: minutesBefore(20) })
+      const row = await seedSupplierOrder({ orderRowId, status: 'shipped', updatedAt: minutesBefore(20) })
 
       const adapter = new MockSupplierAdapter()
-      // 'cancelled' is actionable (mapCjStatus doesn't drop it) but created -> cancelled is not
-      // in the legal-transition matrix.
-      vi.spyOn(adapter, 'getOrderStatus').mockResolvedValue({ value: 'cancelled', raw: 'cancelled' })
+      // 'shipped' is actionable (mapCjStatus doesn't drop it) but a row already 'shipped' has no
+      // legal self-transition — `resolveCjTransition` finds no direct move AND (unlike the
+      // 'cancelled' case below) no fallback applies either, since mapped isn't 'cancelled'.
+      vi.spyOn(adapter, 'getOrderStatus').mockResolvedValue({ value: 'shipped', raw: 'shipped' })
       vi.spyOn(adapter, 'getTracking').mockResolvedValue(null)
       const { deps } = makeDeps({ adapter })
 
@@ -439,7 +440,33 @@ describe('run-reconcile', () => {
 
       expect(result).toEqual({ count: 0, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
-      expect(updated?.status).toBe('created')
+      expect(updated?.status).toBe('shipped')
+    })
+
+    it('CJ CANCELLED on an active row (paid, no direct path to cancelled) falls back to needs_attention: persists supplier_cancelled lastError, alerts, counts as drift fixed', async () => {
+      const { orderRowId } = await seedOrder()
+      const row = await seedSupplierOrder({ orderRowId, status: 'paid', updatedAt: minutesBefore(20) })
+
+      const adapter = new MockSupplierAdapter()
+      vi.spyOn(adapter, 'getOrderStatus').mockResolvedValue({ value: 'cancelled', raw: 'cancelled' })
+      vi.spyOn(adapter, 'getTracking').mockResolvedValue(null)
+      const { deps } = makeDeps({ adapter })
+
+      const result = await sweepStatusDrift(deps)
+
+      expect(result).toEqual({ count: 1, failures: 0 })
+      const updated = await loadSupplierOrder(row.id)
+      expect(updated?.status).toBe('needs_attention')
+      expect(updated?.lastError).toBe('supplier_cancelled: CJ reports order cancelled (was paid)')
+
+      // Matched by this test's own row id, not by total count — `alertRowsFor` is an unscoped
+      // query against this shared, persistent test DB, so a prior (uncleaned) run's alert rows
+      // for the same kind may still be sitting there (audit_log itself is never cleaned up by
+      // this file's afterEach, unlike webhookEvents/supplierOrders).
+      const alertRows = await alertRowsFor('supplier_cancelled')
+      const match = alertRows.find((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === row.id)
+      expect(match).toBeDefined()
+      expect(match!.detail).toEqual({ severity: 'warning', supplierOrderRowId: row.id, priorStatus: 'paid' })
     })
 
     it('non-actionable CJ status (mapCjStatus -> null) is ignored: row untouched, not counted', async () => {

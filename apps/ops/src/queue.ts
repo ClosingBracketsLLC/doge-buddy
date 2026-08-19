@@ -113,10 +113,10 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
   await boss.work('demo.ping', demoPingHandler(db))
 
   await createQueueRetrying(boss, 'webhook.shopify.process')
-  await boss.work('webhook.shopify.process', webhookProcessHandler({ db, enqueue }, 'shopify'))
+  await boss.work('webhook.shopify.process', webhookProcessHandler({ db, enqueue, alert: deps.alert }, 'shopify'))
 
   await createQueueRetrying(boss, 'webhook.cj.process')
-  await boss.work('webhook.cj.process', webhookProcessHandler({ db, enqueue }, 'cj'))
+  await boss.work('webhook.cj.process', webhookProcessHandler({ db, enqueue, alert: deps.alert }, 'cj'))
 
   // The three fulfillment queues below use `policy: 'singleton'` because every producer that
   // enqueues into them sets a `singletonKey` (order gid / supplier_orders row id) expecting

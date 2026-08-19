@@ -1,5 +1,5 @@
 import type { SupplierOrderStatusValue } from '@doge-buddy/supplier'
-import type { SupplierOrderStatusDb } from './transitions.ts'
+import { canTransition, type SupplierOrderStatusDb } from './transitions.ts'
 
 /**
  * Collapses CJ's own order-status vocabulary (`SupplierOrderStatusValue` — already normalized
@@ -35,4 +35,52 @@ export function mapCjStatus(value: SupplierOrderStatusValue): SupplierOrderStatu
       throw new Error(`unhandled SupplierOrderStatusValue: ${exhaustive}`)
     }
   }
+}
+
+/** What `resolveCjTransition` decided to do with a mapped CJ status, or `null` for "ignore". */
+export interface CjTransitionDecision {
+  to: SupplierOrderStatusDb
+  /** Set only for the cancelled-fallback case below — the direct-transition case leaves the
+   *  row's existing `lastError` (if any) alone. */
+  lastError?: string
+  /** True when this decision took the fallback branch (CJ cancelled, direct transition illegal,
+   *  parked `needs_attention` instead) — the caller uses this to decide whether to also fire the
+   *  `supplier_cancelled` alert, since the ordinary direct-transition case doesn't alert. */
+  isCancelledFallback: boolean
+}
+
+/**
+ * Shared by both `mapCjStatus` consumers (the CJ ORDER webhook router and reconcile's sweep 3
+ * status-drift poll) — same decision, same reasons, one place to keep them in sync.
+ *
+ * Ordinary case: `mapped` is a legal direct move from `current` per `transitions.ts`'s matrix —
+ * apply it as-is.
+ *
+ * CJ-cancelled fallback: CJ reports `cancelled`, but the row's current status can't reach
+ * `cancelled` directly — only `needs_attention` can transition there (see `LEGAL_TRANSITIONS`).
+ * Without this fallback, an active row (e.g. `paid`) CJ cancelled on their end would just sit
+ * `webhook.ignored` / undetected by sweep 3, staying in its stale active status until sweep 4's
+ * overdue check eventually notices — no earlier than `fulfillment.promised_max_days` days later,
+ * and even then mislabeled `overdue` rather than reflecting the real reason. Instead, when
+ * `needs_attention` IS a legal move from `current`, park there immediately with a `lastError`
+ * that says what actually happened, so an operator sees it right away.
+ *
+ * Returns `null` when neither move is legal (e.g. a terminal row like `delivered`, which has no
+ * legal outgoing transitions at all) — caller treats that exactly like today: ignore, no write.
+ */
+export function resolveCjTransition(
+  current: SupplierOrderStatusDb,
+  mapped: SupplierOrderStatusDb,
+): CjTransitionDecision | null {
+  if (canTransition(current, mapped)) {
+    return { to: mapped, isCancelledFallback: false }
+  }
+  if (mapped === 'cancelled' && canTransition(current, 'needs_attention')) {
+    return {
+      to: 'needs_attention',
+      lastError: `supplier_cancelled: CJ reports order cancelled (was ${current})`,
+      isCancelledFallback: true,
+    }
+  }
+  return null
 }

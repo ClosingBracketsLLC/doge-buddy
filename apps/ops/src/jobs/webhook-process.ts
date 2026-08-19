@@ -2,9 +2,10 @@ import { type createDb, auditLog, supplierOrders, webhookEvents } from '@doge-bu
 import { mapCjOrderStatus } from '@doge-buddy/supplier'
 import { and, eq } from 'drizzle-orm'
 import type PgBoss from 'pg-boss'
-import { mapCjStatus } from '../fulfillment/cj-status-map.ts'
+import type { createAlerter } from '../alerts.ts'
+import { mapCjStatus, resolveCjTransition } from '../fulfillment/cj-status-map.ts'
 import { type ShopifyOrderPaidPayload, upsertOrderFromPaidPayload } from '../fulfillment/order-upsert.ts'
-import { applyTransition, canTransition } from '../fulfillment/transitions.ts'
+import { applyTransition } from '../fulfillment/transitions.ts'
 import type { SendOpts } from '../fulfillment/types.ts'
 
 export type { SendOpts }
@@ -15,6 +16,7 @@ type SupplierOrderRow = typeof supplierOrders.$inferSelect
 export interface WebhookProcessDeps {
   db: Db
   enqueue: (name: string, data: object, opts?: SendOpts) => Promise<void>
+  alert: ReturnType<typeof createAlerter>
 }
 
 /**
@@ -67,17 +69,20 @@ async function findCjSupplierOrder(db: Db, supplierOrderId: string): Promise<Sup
 
 /**
  * CJ ORDER webhook: a status hint, never the source of truth. Looks up the `supplier_orders` row
- * by CJ's `orderId`; unknown id, a non-actionable status (`mapCjStatus` -> null), or an illegal/
- * backwards transition (`canTransition` -> false) all resolve to `webhook.ignored` with no throw
- * and no write. Only a legal forward move actually calls `applyTransition`.
+ * by CJ's `orderId`; unknown id, a non-actionable status (`mapCjStatus` -> null), or a transition
+ * `resolveCjTransition` can't resolve at all (neither directly nor via its cancelled fallback —
+ * see that function's own doc comment) all resolve to `webhook.ignored` with no throw and no
+ * write. A CJ-cancelled fallback (active row parked `needs_attention` because CJ cancelled but a
+ * direct `-> cancelled` transition isn't legal from this row's status) also fires the
+ * `supplier_cancelled` alert so an operator sees it immediately, not just via the audit log.
  */
-async function routeCjOrder(db: Db, payload: unknown): Promise<RouteResult> {
+async function routeCjOrder(deps: WebhookProcessDeps, payload: unknown): Promise<RouteResult> {
   const body = payload as CjOrderWebhookPayload
   if (!body.orderId) {
     return ignored('missing_order_id')
   }
 
-  const row = await findCjSupplierOrder(db, body.orderId)
+  const row = await findCjSupplierOrder(deps.db, body.orderId)
   if (!row) {
     return ignored('unknown_supplier_order', { supplierOrderId: body.orderId })
   }
@@ -87,12 +92,22 @@ async function routeCjOrder(db: Db, payload: unknown): Promise<RouteResult> {
     return ignored('status_not_actionable', { supplierOrderRowId: row.id, rawStatus: body.orderStatus ?? null })
   }
 
-  if (!canTransition(row.status, mapped)) {
+  const decision = resolveCjTransition(row.status, mapped)
+  if (!decision) {
     return ignored('illegal_transition', { supplierOrderRowId: row.id, from: row.status, to: mapped })
   }
 
-  await applyTransition(db, row.id, row.status, mapped)
-  return { action: 'webhook.processed', detail: { supplierOrderRowId: row.id, from: row.status, to: mapped } }
+  await applyTransition(
+    deps.db,
+    row.id,
+    row.status,
+    decision.to,
+    decision.lastError ? { lastError: decision.lastError } : undefined,
+  )
+  if (decision.isCancelledFallback) {
+    await deps.alert('warning', 'supplier_cancelled', { supplierOrderRowId: row.id, priorStatus: row.status })
+  }
+  return { action: 'webhook.processed', detail: { supplierOrderRowId: row.id, from: row.status, to: decision.to } }
 }
 
 /**
@@ -152,7 +167,7 @@ async function processOne(deps: WebhookProcessDeps, source: 'shopify' | 'cj', we
     await deps.enqueue('fulfillment.place-order', { orderGid }, { singletonKey: orderGid, ...FULFILLMENT_RETRY_OPTS })
     action = 'webhook.processed'
   } else if (source === 'cj' && event.topic === 'order') {
-    const result = await routeCjOrder(deps.db, event.payload)
+    const result = await routeCjOrder(deps, event.payload)
     action = result.action
     routeDetail = result.detail
   } else if (source === 'cj' && event.topic === 'logistics') {

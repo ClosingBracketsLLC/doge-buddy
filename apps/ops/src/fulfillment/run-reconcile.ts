@@ -3,7 +3,7 @@ import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { and, eq, inArray, isNotNull, isNull, lt, notInArray } from 'drizzle-orm'
 import type { createAlerter } from '../alerts.ts'
 import type { createSettings } from '../settings.ts'
-import { mapCjStatus } from './cj-status-map.ts'
+import { mapCjStatus, resolveCjTransition } from './cj-status-map.ts'
 import { FULFILLMENT_RETRY_OPTS } from './run-place-order.ts'
 import type { ShopifyFulfillmentOps } from './run-sync-tracking.ts'
 import { applyTransition, canTransition, type SupplierOrderStatusDb } from './transitions.ts'
@@ -243,10 +243,12 @@ export async function sweepStrandedWebhooks(deps: ReconcileDeps): Promise<number
  * Sweep 3 — status/tracking drift: rows sitting in an active (non-terminal) status for more than
  * 10 minutes are polled directly against the supplier, rather than waiting on a webhook that may
  * never arrive (or already did and got missed). Two independent checks per row:
- *   - `getOrderStatus` -> `mapCjStatus` -> only applied via `applyTransition` when it's both
- *     actionable (non-null) and a legal forward move from the row's current status — an
- *     unmappable/backwards/no-op result is silently ignored, exactly like the CJ ORDER webhook
- *     router (`webhook-process.ts`'s `routeCjOrder`) treats the same inputs.
+ *   - `getOrderStatus` -> `mapCjStatus` -> `resolveCjTransition` decides what (if anything) to
+ *     apply via `applyTransition` — a direct legal move, the CJ-cancelled fallback to
+ *     `needs_attention` (with its own `supplier_cancelled` alert — see that function's own doc
+ *     comment), or nothing at all for an unmappable/backwards/no-op result. Exactly the same
+ *     decision the CJ ORDER webhook router (`webhook-process.ts`'s `routeCjOrder`) makes for the
+ *     same inputs — `resolveCjTransition` is the shared, single source of truth for both.
  *   - `getTracking` -> a new/changed tracking number is persisted and `fulfillment.sync-tracking`
  *     is enqueued with the identical shape `webhook-process.ts`'s `routeCjLogistics` uses
  *     (singletonKey = row id, standard fulfillment retry opts) — this is the poll-driven
@@ -278,8 +280,18 @@ export async function sweepStatusDrift(deps: ReconcileDeps): Promise<SweepResult
 
       const orderStatus = await deps.adapter.getOrderStatus(row.supplierOrderId)
       const mapped = mapCjStatus(orderStatus.value)
-      if (mapped && canTransition(row.status, mapped)) {
-        await applyTransition(deps.db, row.id, row.status, mapped)
+      const decision = mapped ? resolveCjTransition(row.status, mapped) : null
+      if (decision) {
+        await applyTransition(
+          deps.db,
+          row.id,
+          row.status,
+          decision.to,
+          decision.lastError ? { lastError: decision.lastError } : undefined,
+        )
+        if (decision.isCancelledFallback) {
+          await deps.alert('warning', 'supplier_cancelled', { supplierOrderRowId: row.id, priorStatus: row.status })
+        }
         fixed = true
       }
 

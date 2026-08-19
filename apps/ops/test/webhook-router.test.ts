@@ -319,6 +319,8 @@ describe('mapCjStatus', () => {
 
 describe('webhookProcessHandler', () => {
   const { db, pool } = createDb(url)
+  const mockLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+  const alert = createAlerter(db, mockLog)
   afterAll(() => pool.end())
 
   async function insertEvent(source: 'shopify' | 'cj', topic: string | null, payload: unknown): Promise<string> {
@@ -356,7 +358,7 @@ describe('webhookProcessHandler', () => {
     const payload = paidPayload({ test: false })
     const webhookEventId = await insertEvent('shopify', 'orders/paid', payload)
     const enqueue = vi.fn(async () => {})
-    const deps: WebhookProcessDeps = { db, enqueue }
+    const deps: WebhookProcessDeps = { db, enqueue, alert }
 
     await webhookProcessHandler(deps, 'shopify')([makeJob(webhookEventId)])
 
@@ -392,7 +394,7 @@ describe('webhookProcessHandler', () => {
     const webhookEventId = await insertEvent('shopify', 'orders/paid', payload)
     const enqueue = vi.fn(async () => {})
 
-    await webhookProcessHandler({ db, enqueue }, 'shopify')([makeJob(webhookEventId)])
+    await webhookProcessHandler({ db, enqueue, alert }, 'shopify')([makeJob(webhookEventId)])
 
     const [orderRow] = await db.select().from(orders).where(eq(orders.shopifyOrderGid, payload.admin_graphql_api_id))
     expect(orderRow!.isTest).toBe(true)
@@ -403,7 +405,7 @@ describe('webhookProcessHandler', () => {
     const webhookEventId = await insertEvent('cj', 'stock', { some: 'payload' })
     const enqueue = vi.fn(async () => {})
 
-    await webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
+    await webhookProcessHandler({ db, enqueue, alert }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
 
     expect(enqueue).not.toHaveBeenCalled()
     const [eventRow] = await db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookEventId))
@@ -425,7 +427,7 @@ describe('webhookProcessHandler', () => {
       const webhookEventId = await insertEvent('cj', 'order', payload)
       const enqueue = vi.fn(async () => {})
 
-      await webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
+      await webhookProcessHandler({ db, enqueue, alert }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
 
       const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
       expect(row!.status).toBe('shipped')
@@ -446,6 +448,98 @@ describe('webhookProcessHandler', () => {
       expect(enqueue).not.toHaveBeenCalled()
     })
 
+    it('CANCELLED on an active row (paid) with no direct path to cancelled falls back to needs_attention, with supplier_cancelled lastError + alert', async () => {
+      const supplierOrderId = unique('cj-order')
+      const rowId = await seedCjSupplierOrder('paid', { supplierOrderId })
+      const payload = cjOrderPayload({ orderId: supplierOrderId, orderStatus: 'CANCELLED' })
+      const webhookEventId = await insertEvent('cj', 'order', payload)
+      const enqueue = vi.fn(async () => {})
+
+      await webhookProcessHandler({ db, enqueue, alert }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
+
+      const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
+      expect(row!.status).toBe('needs_attention')
+      expect(row!.lastError).toBe('supplier_cancelled: CJ reports order cancelled (was paid)')
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows).toHaveLength(1)
+      expect(auditRows[0]!.action).toBe('webhook.processed')
+      expect(auditRows[0]!.detail).toEqual({
+        source: 'cj',
+        topic: 'order',
+        supplierOrderRowId: rowId,
+        from: 'paid',
+        to: 'needs_attention',
+      })
+
+      // Matched by this test's own row id, not by total count — this query is unscoped against a
+      // shared, persistent test DB (other tests/reruns in this file/suite may have left their own
+      // 'alert.supplier_cancelled' rows behind).
+      const alertRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'alert'), eq(auditLog.action, 'alert.supplier_cancelled')))
+      const match = alertRows.find((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === rowId)
+      expect(match).toBeDefined()
+      expect(match!.detail).toEqual({ severity: 'warning', supplierOrderRowId: rowId, priorStatus: 'paid' })
+      expect(enqueue).not.toHaveBeenCalled()
+    })
+
+    it('CANCELLED on a row where the direct transition IS legal (needs_attention -> cancelled) applies it directly, no fallback alert', async () => {
+      const supplierOrderId = unique('cj-order')
+      const rowId = await seedCjSupplierOrder('needs_attention', { supplierOrderId })
+      const payload = cjOrderPayload({ orderId: supplierOrderId, orderStatus: 'CANCELLED' })
+      const webhookEventId = await insertEvent('cj', 'order', payload)
+
+      await webhookProcessHandler({ db, enqueue: vi.fn(async () => {}), alert }, 'cj')([
+        makeJob(webhookEventId, 'webhook.cj.process'),
+      ])
+
+      const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
+      expect(row!.status).toBe('cancelled')
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows[0]!.action).toBe('webhook.processed')
+      expect(auditRows[0]!.detail).toMatchObject({ from: 'needs_attention', to: 'cancelled' })
+
+      // No alert row references THIS row's id — direct legal transition, no cancelled-fallback
+      // alert (checked by match, not total count: this query is unscoped against a shared,
+      // persistent test DB that may hold other tests'/reruns' 'alert.supplier_cancelled' rows).
+      const alertRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'alert'), eq(auditLog.action, 'alert.supplier_cancelled')))
+      const match = alertRows.find((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === rowId)
+      expect(match).toBeUndefined()
+    })
+
+    it('CANCELLED on a terminal row (delivered) is still ignored — no legal path even via the fallback', async () => {
+      const supplierOrderId = unique('cj-order')
+      const rowId = await seedCjSupplierOrder('delivered', { supplierOrderId })
+      const payload = cjOrderPayload({ orderId: supplierOrderId, orderStatus: 'CANCELLED' })
+      const webhookEventId = await insertEvent('cj', 'order', payload)
+
+      await webhookProcessHandler({ db, enqueue: vi.fn(async () => {}), alert }, 'cj')([
+        makeJob(webhookEventId, 'webhook.cj.process'),
+      ])
+
+      const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
+      expect(row!.status).toBe('delivered')
+
+      const auditRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityType, 'webhook_event'), eq(auditLog.entityId, webhookEventId)))
+      expect(auditRows[0]!.action).toBe('webhook.ignored')
+      expect(auditRows[0]!.detail).toMatchObject({ reason: 'illegal_transition', from: 'delivered', to: 'cancelled' })
+    })
+
     it('a backwards/illegal status (delivered row told "shipped" again) is ignored + audited, row untouched', async () => {
       const supplierOrderId = unique('cj-order')
       const rowId = await seedCjSupplierOrder('delivered', { supplierOrderId })
@@ -453,7 +547,7 @@ describe('webhookProcessHandler', () => {
       const webhookEventId = await insertEvent('cj', 'order', payload)
       const enqueue = vi.fn(async () => {})
 
-      await webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
+      await webhookProcessHandler({ db, enqueue, alert }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
 
       const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
       expect(row!.status).toBe('delivered')
@@ -478,7 +572,7 @@ describe('webhookProcessHandler', () => {
       const payload = cjOrderPayload({ orderId: supplierOrderId, orderStatus: 'PROCESSING' })
       const webhookEventId = await insertEvent('cj', 'order', payload)
 
-      await webhookProcessHandler({ db, enqueue: vi.fn(async () => {}) }, 'cj')([
+      await webhookProcessHandler({ db, enqueue: vi.fn(async () => {}), alert }, 'cj')([
         makeJob(webhookEventId, 'webhook.cj.process'),
       ])
 
@@ -499,7 +593,7 @@ describe('webhookProcessHandler', () => {
       const enqueue = vi.fn(async () => {})
 
       await expect(
-        webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')]),
+        webhookProcessHandler({ db, enqueue, alert }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')]),
       ).resolves.toBeUndefined()
 
       const [eventRow] = await db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookEventId))
@@ -527,7 +621,7 @@ describe('webhookProcessHandler', () => {
       const webhookEventId = await insertEvent('cj', 'logistics', payload)
       const enqueue = vi.fn(async () => {})
 
-      await webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
+      await webhookProcessHandler({ db, enqueue, alert }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')])
 
       const [row] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, rowId))
       expect(row!.status).toBe('paid') // untouched — tracking is a field update, never a status write
@@ -559,7 +653,7 @@ describe('webhookProcessHandler', () => {
       const enqueue = vi.fn(async () => {})
 
       await expect(
-        webhookProcessHandler({ db, enqueue }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')]),
+        webhookProcessHandler({ db, enqueue, alert }, 'cj')([makeJob(webhookEventId, 'webhook.cj.process')]),
       ).resolves.toBeUndefined()
 
       const [eventRow] = await db.select().from(webhookEvents).where(eq(webhookEvents.id, webhookEventId))
@@ -579,7 +673,7 @@ describe('webhookProcessHandler', () => {
     const webhookEventId = await insertEvent('shopify', 'orders/create', { id: 1 })
     const enqueue = vi.fn(async () => {})
 
-    await webhookProcessHandler({ db, enqueue }, 'shopify')([makeJob(webhookEventId)])
+    await webhookProcessHandler({ db, enqueue, alert }, 'shopify')([makeJob(webhookEventId)])
 
     expect(enqueue).not.toHaveBeenCalled()
     const auditRows = await db
@@ -592,7 +686,7 @@ describe('webhookProcessHandler', () => {
   it('replayed delivery under a NEW webhook event id (same order payload) does not duplicate the order row; enqueue is called again with the same singletonKey so pg-boss dedupes it', async () => {
     const payload = paidPayload()
     const enqueue = vi.fn(async (_name: string, _data: object, _opts?: SendOpts) => {})
-    const deps: WebhookProcessDeps = { db, enqueue }
+    const deps: WebhookProcessDeps = { db, enqueue, alert }
 
     const firstEventId = await insertEvent('shopify', 'orders/paid', payload)
     await webhookProcessHandler(deps, 'shopify')([makeJob(firstEventId)])
@@ -614,7 +708,7 @@ describe('webhookProcessHandler', () => {
     const poisonEventId = await insertEvent('shopify', 'orders/paid', poisonPayload)
     const goodEventId = await insertEvent('shopify', 'orders/create', { id: 42 })
     const enqueue = vi.fn(async () => {})
-    const deps: WebhookProcessDeps = { db, enqueue }
+    const deps: WebhookProcessDeps = { db, enqueue, alert }
 
     await expect(webhookProcessHandler(deps, 'shopify')([makeJob(poisonEventId), makeJob(goodEventId)])).rejects.toThrow()
 
