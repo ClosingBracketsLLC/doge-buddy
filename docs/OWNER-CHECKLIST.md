@@ -25,6 +25,10 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
   *Blocks:* 🔴 the **CJ live round-trip check** (token → `getBalance`) and recording real API fixtures. Mock-adapter and fixture builds proceed without it. ~15 min.
   *Check:* once `.env` is filled in, run `pnpm --filter @doge-buddy/ops verify-live` — the CJ section should print `CJ OK`.
 
+- [ ] 🟡 **CJ key → re-record `order/list` fixtures, then run the full-pipeline sandbox contract check (Phase 3 Tier 2).** Once the CJ key above is in place: (1) re-record `packages/supplier/test/fixtures/cj/order-list-*.json` against real CJ responses (the current fixtures are best-effort/unverified — see their own FIXTURE-ASSUMPTION comments); (2) run `CJ_CONTRACT=1 pnpm --filter @doge-buddy/supplier test` — this drives the real CJ sandbox through the full place → confirm → pay → track pipeline (skipped by default; the mock adapter covers the whole suite otherwise).
+  *Blocks:* 🔴 nothing in Phase 3's own build — the entire pipeline is proven against the mock adapter and static fixtures. Blocks confidence that real CJ API responses actually match those fixtures before the first live sandbox order. ~20–30 min.
+  *Check:* the contract test's own assertions pass against live CJ sandbox data instead of being skipped.
+
 - [ ] 🟡 **Ask Shopify support about the launch-store type** (do this early — the answer shapes Phase 7). Suggested message:
   > "I'm a developer building a store that must be free during development and become a live paid store at launch, without rebuilding. I understand Dev Dashboard development stores cannot be converted or transferred to a live store, and that the Partner Dashboard 'client transfer' store is the type meant for this. Can you confirm: (1) a Partner Dashboard client-transfer store can be transferred to my own merchant account and upgraded to a paid plan with all products/config intact, and (2) this is still the recommended path in 2026?"
   *Blocks:* 🔴 **creating the launch store (Phase 7 path)** only. Your existing test store covers all development until then. ~10 min to send.
@@ -55,4 +59,4 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ---
 
-*Maintained by Claude; last updated 2026-08-17 (Phase 2 storefront). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
+*Maintained by Claude; last updated 2026-08-18 (Phase 3 fulfillment). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
