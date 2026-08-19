@@ -78,6 +78,17 @@ const webhookDeps: WebhookDeps = {
 
 const app = buildServer({ pool, isQueueReady: () => queue.ready(), webhooks: webhookDeps })
 
+// Loud on purpose: which adapter actually backs the money path is the single most important fact
+// about this boot, and it's driven by an env var (`FULFILLMENT_SUPPLIER`) that's easy to leave
+// (or accidentally set) wrong — a silent mock boot in a real deployment would mock-fulfill every
+// real paid order with no error, no crash, nothing but a quiet no-op against CJ.
+app.log.info({ supplier: supplierAdapter.key }, 'fulfillment supplier adapter')
+if (supplierAdapter.key === 'mock' && config.shopify) {
+  app.log.warn(
+    'FULFILLMENT_SUPPLIER=mock with Shopify configured — real paid orders would be mock-fulfilled',
+  )
+}
+
 const alert = createAlerter(db, app.log)
 
 // Built here — before `startQueue` — because the `fulfillment.sync-tracking` queue it wires needs
