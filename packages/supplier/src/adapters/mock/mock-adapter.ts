@@ -94,6 +94,17 @@ export class MockSupplierAdapter implements SupplierAdapter {
   private orderCounter = 0
   private disputeCounter = 0
   private placeOrderFailuresRemaining: number
+  /**
+   * Per-instance nonce mixed into every `supplierOrderId`/`shipmentOrderId` this instance ever
+   * produces, so two different `MockSupplierAdapter` instances (a fresh one per test, or the same
+   * test file re-run against a dirty/never-reset shared DB) can never both mint the literal id
+   * `mock-order-1` — the collision that used to trip the partial unique index on
+   * `(supplier, supplier_order_id)` on a rerun. The counter below still starts at 0 and increments
+   * per call WITHIN one instance, so ids stay deterministic (`mock-order-<nonce>-1`,
+   * `mock-order-<nonce>-2`, ...) for tests that assert on call sequence — only the nonce varies
+   * across instances.
+   */
+  private readonly instanceNonce = Math.random().toString(36).slice(2, 8)
 
   constructor(opts: MockAdapterOptions = {}) {
     this.opts = opts
@@ -188,8 +199,8 @@ export class MockSupplierAdapter implements SupplierAdapter {
     const totalAmountCents = productAmountCents + postageAmountCents
 
     this.orderCounter += 1
-    const supplierOrderId = `mock-order-${this.orderCounter}`
-    const shipmentOrderId = `mock-ship-${this.orderCounter}`
+    const supplierOrderId = `mock-order-${this.instanceNonce}-${this.orderCounter}`
+    const shipmentOrderId = `mock-ship-${this.instanceNonce}-${this.orderCounter}`
 
     const result: PlaceOrderResult = {
       supplierOrderId,

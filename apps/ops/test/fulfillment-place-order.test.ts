@@ -63,17 +63,18 @@ describe('executePlaceOrder', () => {
   afterAll(() => pool.end())
 
   // Several tests below (real `placeOrder` calls through a fresh `MockSupplierAdapter`) end up
-  // with the SAME literal `supplier_order_id` ('mock-order-1') persisted into `supplier_orders`
-  // — the mock adapter's own order counter restarts at 0 for every new instance, and each of
-  // those tests deliberately constructs its own adapter for isolation. Harmless before the T18
-  // migration (no uniqueness constraint existed on `(supplier, supplier_order_id)`), but the new
-  // partial unique index (guards `findCjSupplierOrder`'s unordered lookup — see that migration's
-  // own comment) would make the SECOND such write in this shared, persistent, never-reset test
-  // database fail with a real constraint violation. Tracking each test's own `orders.id` here and
-  // deleting its `supplier_orders`/`orders` rows in `afterEach` (same pattern
+  // with a `supplier_order_id` persisted into `supplier_orders` — the mock adapter's own order
+  // counter restarts at 0 for every new instance, and each of those tests deliberately constructs
+  // its own adapter for isolation. `MockSupplierAdapter` now mixes a per-instance random nonce
+  // into every id it mints, so two fresh instances (in this run, or a rerun against a dirty,
+  // never-reset DB) can no longer collide on the partial unique index on
+  // `(supplier, supplier_order_id)` (added in T18, guards `findCjSupplierOrder`'s unordered
+  // lookup — see that migration's own comment) — but the cleanup below stays regardless, as cheap
+  // defense-in-depth and to keep this shared test database tidy. Tracking each test's own
+  // `orders.id` here and deleting its `supplier_orders`/`orders` rows in `afterEach` (same pattern
   // `wallet-monitor.test.ts`/`fulfillment-reconcile.test.ts` already use for their own
-  // shared-DB hygiene) means no row ever survives long enough to collide with a later test's
-  // identical id — every assertion above runs against the row BEFORE this cleanup fires.
+  // shared-DB hygiene) means no row outlives its own test — every assertion above runs against
+  // the row BEFORE this cleanup fires.
   let createdOrderIds: string[] = []
   afterEach(async () => {
     if (createdOrderIds.length > 0) {
@@ -210,8 +211,10 @@ describe('executePlaceOrder', () => {
 
     const row = await loadSupplierOrder(orderRowId)
     expect(row?.status).toBe('confirmed')
-    expect(row?.supplierOrderId).toBe('mock-order-1')
-    expect(row?.shipmentOrderId).toBe('mock-ship-1')
+    // Per-instance nonce (see MockSupplierAdapter) makes the exact id vary per instance/run —
+    // matched by pattern rather than the old hardcoded 'mock-order-1' literal.
+    expect(row?.supplierOrderId).toMatch(/^mock-order-.+-1$/)
+    expect(row?.shipmentOrderId).toMatch(/^mock-ship-.+-1$/)
     expect(row?.logisticName).toBe('Standard')
     expect(row?.productAmountCents).toBe(620)
     expect(row?.postageAmountCents).toBe(499)
@@ -398,7 +401,7 @@ describe('executePlaceOrder', () => {
 
     const afterCrash = await loadSupplierOrder(orderRowId)
     expect(afterCrash?.status).toBe('created')
-    expect(afterCrash?.supplierOrderId).toBe('mock-order-1')
+    expect(afterCrash?.supplierOrderId).toMatch(/^mock-order-.+-1$/)
     expect(adapter.placedOrders).toHaveLength(1)
     expect(placeOrderSpy).toHaveBeenCalledTimes(1)
 

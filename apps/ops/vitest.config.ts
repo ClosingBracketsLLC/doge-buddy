@@ -35,6 +35,10 @@ export default defineConfig({
     //     real timing waits (queue-fulfillment.test.ts's dedupe test alone takes several seconds
     //     regardless of what else runs alongside it), not by file-level parallelism. There is no
     //     real speed win being given up here today.
+    //
+    // Same reasoning extends outside this file's control: a stray `tsx src/index.ts` dev server
+    // left running against this same test DB registers its own real pg-boss workers on these
+    // queues and will race/steal jobs this suite sends. Kill any such process before running.
     fileParallelism: false,
   },
 })

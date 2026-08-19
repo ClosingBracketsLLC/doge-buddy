@@ -90,7 +90,9 @@ describe('MockSupplierAdapter specifics', () => {
       await expect(adapter.placeOrder(req)).rejects.toThrow(/429|rate limit|retryable/i)
       const result = await adapter.placeOrder(req)
 
-      expect(result.supplierOrderId).toBe('mock-order-1')
+      // Per-instance nonce (see mock-adapter.ts) makes the exact id vary per instance — only the
+      // trailing counter is asserted here, matched by pattern rather than hardcoded.
+      expect(result.supplierOrderId).toMatch(/^mock-order-.+-1$/)
       expect(adapter.placedOrders).toHaveLength(1)
 
       // A further call with the SAME idempotencyKey (e.g. a spurious extra retry after the real
@@ -108,7 +110,7 @@ describe('MockSupplierAdapter specifics', () => {
         shippingAddress: { name: 'T', line1: 'x', city: 'y', state: 'GA', zip: '1', country: 'US' },
         items: [{ supplierVariantId: 'mock-v1', quantity: 1 }],
       })
-      expect(result.supplierOrderId).toBe('mock-order-1')
+      expect(result.supplierOrderId).toMatch(/^mock-order-.+-1$/)
     })
 
     it('0: never fails (explicit)', async () => {
@@ -118,7 +120,7 @@ describe('MockSupplierAdapter specifics', () => {
         shippingAddress: { name: 'T', line1: 'x', city: 'y', state: 'GA', zip: '1', country: 'US' },
         items: [{ supplierVariantId: 'mock-v1', quantity: 1 }],
       })
-      expect(result.supplierOrderId).toBe('mock-order-1')
+      expect(result.supplierOrderId).toMatch(/^mock-order-.+-1$/)
     })
   })
 })

@@ -1,7 +1,7 @@
 import { auditLog, createDb, orders, supplierOrders } from '@doge-buddy/db'
 import { MockSupplierAdapter } from '@doge-buddy/supplier'
-import { and, eq } from 'drizzle-orm'
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { and, eq, inArray } from 'drizzle-orm'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
 import { deadLetterPayOrder, executePayOrder } from '../src/fulfillment/run-pay-order.ts'
 import type { PlaceOrderDeps } from '../src/fulfillment/run-place-order.ts'
@@ -65,6 +65,28 @@ describe('executePayOrder', () => {
   afterAll(() => pool.end())
   beforeEach(() => resetSettings(db))
 
+  // Several tests below (the two `insufficient balance` scenarios) deliberately end with the row
+  // parked in `awaiting_funds`, with no `total_amount_cents` ever set (this file's own
+  // `seedSupplierOrder` never sets it). Left uncleaned in this shared, persistent test database,
+  // that's exactly the "unknown_amounts" shape `cj-wallet-monitor.ts`'s own `executeWalletMonitor`
+  // treats as a hard block on resuming ANY `awaiting_funds` row (see that function's own doc
+  // comment) — `wallet-monitor.test.ts` already defends its OWN tests against this by wiping every
+  // `awaiting_funds` row in its `beforeEach` (see that file's doc comment, which names this file
+  // explicitly), but `fulfillment-e2e.test.ts`'s wallet-empty drill runs BEFORE both this file and
+  // wallet-monitor.test.ts in file order, so it has no such defense — a dirty rerun of the ops
+  // suite left it flaky, unable to tell "still short" apart from "blocked by someone else's stale
+  // row". Tracking each test's own `orders.id` here and deleting its `supplier_orders`/`orders`
+  // rows in `afterEach` (same pattern `fulfillment-place-order.test.ts` already uses) closes that
+  // gap at the source instead of relying on a downstream file's defensive wipe.
+  let createdOrderIds: string[] = []
+  afterEach(async () => {
+    if (createdOrderIds.length > 0) {
+      await db.delete(supplierOrders).where(inArray(supplierOrders.orderId, createdOrderIds))
+      await db.delete(orders).where(inArray(orders.id, createdOrderIds))
+    }
+    createdOrderIds = []
+  })
+
   function makeDeps(adapter: MockSupplierAdapter): { deps: PlaceOrderDeps; enqueue: ReturnType<typeof vi.fn> } {
     const enqueue = vi.fn(async () => {})
     const mockLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -84,6 +106,7 @@ describe('executePayOrder', () => {
       .insert(orders)
       .values({ shopifyOrderGid: orderGid, isTest: false, totalCents: 10_000 })
       .returning({ id: orders.id })
+    createdOrderIds.push(row!.id)
     return { orderGid, orderRowId: row!.id }
   }
 

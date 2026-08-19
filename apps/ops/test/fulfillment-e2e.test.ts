@@ -105,13 +105,15 @@ describe('fulfillment E2E: happy path + gate drills', () => {
       // hand-seeded one.
       //
       // Also overwrite supplier_order_id with a fresh unique value rather than reusing the mock
-      // adapter's own 'mock-order-1' (its in-memory counter restarts at 0 every test run, so that
-      // exact id is deterministically reused run after run). `findCjSupplierOrder`'s lookup is an
-      // unordered, unlimited SELECT — against this suite's persistent, never-reset shared test DB,
-      // a colliding id can match a DIFFERENT (older, already-synced) row instead of this one,
-      // which is exactly what happened the first time this test was written without this fix: the
-      // webhook silently updated a stale row and this row's own gid stayed null. A fresh
-      // `uniqueId()`-based id makes the lookup key unambiguous.
+      // adapter's own id (its in-memory counter restarts at 0 every test run, and while
+      // `MockSupplierAdapter`'s per-instance nonce now keeps that id from colliding with another
+      // instance's rows, it's still a 'mock'-supplier id, not a 'cj' one).
+      // `findCjSupplierOrder`'s lookup is an unordered, unlimited SELECT scoped to supplier='cj'
+      // — against this suite's persistent, never-reset shared test DB, a colliding id can match a
+      // DIFFERENT (older, already-synced) row instead of this one, which is exactly what happened
+      // the first time this test was written without this fix: the webhook silently updated a
+      // stale row and this row's own gid stayed null. A fresh `uniqueId()`-based id makes the
+      // lookup key unambiguous.
       const cjOrderId = uniqueId('cj-order-')
       await db
         .update(supplierOrders)
@@ -162,41 +164,50 @@ describe('fulfillment E2E: happy path + gate drills', () => {
       const orderGid = orderGidFor()
       const buildPayload = () => paidPayload(orderGid, { line_items: [{ variant_id: variantId, quantity: 1 }] })
 
-      const firstEventId = await insertWebhookEvent(db, 'shopify', 'orders/paid', buildPayload())
-      await q.boss.send('webhook.shopify.process', { webhookEventId: firstEventId })
+      // This test's own `adapter.placeOrder` call lands on a real 'mock'-supplier
+      // `supplier_order_id` (never relabeled to 'cj' the way the happy-path test above does), so
+      // — same reasoning as the kill-switch drill's own `finally` below — the row must not outlive
+      // this test in this shared, persistent, never-reset test database.
+      try {
+        const firstEventId = await insertWebhookEvent(db, 'shopify', 'orders/paid', buildPayload())
+        await q.boss.send('webhook.shopify.process', { webhookEventId: firstEventId })
 
-      // Wait for the FIRST delivery to fully settle (through place-order AND pay-order) before the
-      // duplicate arrives — this is what makes the invariant below unambiguous: by the time the
-      // second delivery's place-order job could possibly run, the row is already 'paid', so
-      // `executePlaceOrder`'s resume switch takes its idempotent no-op branch, guaranteed.
-      const paidRow = await waitFor(async () => {
-        const row = await loadSupplierOrderByOrderGid(db, orderGid)
-        return row?.status === 'paid' ? row : undefined
-      }, 25_000)
+        // Wait for the FIRST delivery to fully settle (through place-order AND pay-order) before the
+        // duplicate arrives — this is what makes the invariant below unambiguous: by the time the
+        // second delivery's place-order job could possibly run, the row is already 'paid', so
+        // `executePlaceOrder`'s resume switch takes its idempotent no-op branch, guaranteed.
+        const paidRow = await waitFor(async () => {
+          const row = await loadSupplierOrderByOrderGid(db, orderGid)
+          return row?.status === 'paid' ? row : undefined
+        }, 25_000)
 
-      const secondEventId = await insertWebhookEvent(db, 'shopify', 'orders/paid', buildPayload())
-      await q.boss.send('webhook.shopify.process', { webhookEventId: secondEventId })
+        const secondEventId = await insertWebhookEvent(db, 'shopify', 'orders/paid', buildPayload())
+        await q.boss.send('webhook.shopify.process', { webhookEventId: secondEventId })
 
-      // Proves the router itself handled the replay cleanly (upsert, not insert) — the row-count
-      // invariants below already hold at this point regardless of whether/when a resulting
-      // fulfillment.place-order job for the second delivery gets a turn on the singleton queue.
-      await waitFor(async () => {
-        const [row] = await db.select().from(webhookEvents).where(eq(webhookEvents.id, secondEventId))
-        return row?.processedAt ? true : undefined
-      }, 15_000)
+        // Proves the router itself handled the replay cleanly (upsert, not insert) — the row-count
+        // invariants below already hold at this point regardless of whether/when a resulting
+        // fulfillment.place-order job for the second delivery gets a turn on the singleton queue.
+        await waitFor(async () => {
+          const [row] = await db.select().from(webhookEvents).where(eq(webhookEvents.id, secondEventId))
+          return row?.processedAt ? true : undefined
+        }, 15_000)
 
-      const orderRows = await db.select().from(orders).where(eq(orders.shopifyOrderGid, orderGid))
-      expect(orderRows).toHaveLength(1)
+        const orderRows = await db.select().from(orders).where(eq(orders.shopifyOrderGid, orderGid))
+        expect(orderRows).toHaveLength(1)
 
-      const supplierOrderRows = await db
-        .select()
-        .from(supplierOrders)
-        .where(and(eq(supplierOrders.orderId, orderRows[0]!.id), eq(supplierOrders.supplier, 'mock')))
-      expect(supplierOrderRows).toHaveLength(1)
-      expect(supplierOrderRows[0]!.id).toBe(paidRow.id)
+        const supplierOrderRows = await db
+          .select()
+          .from(supplierOrders)
+          .where(and(eq(supplierOrders.orderId, orderRows[0]!.id), eq(supplierOrders.supplier, 'mock')))
+        expect(supplierOrderRows).toHaveLength(1)
+        expect(supplierOrderRows[0]!.id).toBe(paidRow.id)
 
-      const placedForThisOrder = adapter.placedOrders.filter((o) => o.supplierOrderId === paidRow.supplierOrderId)
-      expect(placedForThisOrder).toHaveLength(1)
+        const placedForThisOrder = adapter.placedOrders.filter((o) => o.supplierOrderId === paidRow.supplierOrderId)
+        expect(placedForThisOrder).toHaveLength(1)
+      } finally {
+        const leftoverRow = await loadSupplierOrderByOrderGid(db, orderGid)
+        if (leftoverRow) await db.delete(supplierOrders).where(eq(supplierOrders.id, leftoverRow.id))
+      }
     },
     30_000,
   )
@@ -298,12 +309,12 @@ describe('fulfillment E2E: happy path + gate drills', () => {
         )
       } finally {
         await settingsApi.set('killswitch.global', false)
-        // `localAdapter` is a fresh MockSupplierAdapter, so its first (and only) real `placeOrder`
-        // call above always lands on the same literal id ('mock-order-1') every run — harmless on
-        // its own, but the partial unique index on (supplier, supplier_order_id) that T18 adds
-        // (guards `findCjSupplierOrder`'s unordered lookup) means this row must not outlive this
-        // test, or the next fresh-adapter test anywhere in the suite that also places a "first"
-        // mock order would collide with it in this shared, persistent, never-reset test database.
+        // `localAdapter` is a fresh MockSupplierAdapter — its per-instance nonce (see
+        // mock-adapter.ts) keeps its first real `placeOrder` id from colliding with any other
+        // instance's rows under the partial unique index on (supplier, supplier_order_id) that
+        // T18 adds (guards `findCjSupplierOrder`'s unordered lookup), but this row must still not
+        // outlive this test — cheap defense-in-depth, and keeps this shared, persistent,
+        // never-reset test database tidy.
         const leftoverRow = await loadSupplierOrderByOrderGid(db, orderGid)
         if (leftoverRow) await db.delete(supplierOrders).where(eq(supplierOrders.id, leftoverRow.id))
       }
@@ -331,11 +342,12 @@ describe('fulfillment E2E: failure drills B (crash mid-create, wallet pause/resu
 
   /**
    * Every test below places a "first" real order through its own fresh, single-use
-   * MockSupplierAdapter — each one deterministically lands on the same literal supplier_order_id
-   * ('mock-order-1'), since the mock adapter's own counter restarts at 0 per instance. Harmless on
-   * its own, but the T18 partial unique index on (supplier, supplier_order_id) means the row must
-   * not outlive its own test — this shared, persistent test database never resets between tests,
-   * files, or runs. Called from a `finally` in every test that places a real order.
+   * MockSupplierAdapter — the mock adapter's own counter restarts at 0 per instance, and its
+   * per-instance nonce (see mock-adapter.ts) keeps that id from colliding with any other
+   * instance's rows under the T18 partial unique index on (supplier, supplier_order_id). The row
+   * still must not outlive its own test, though — this shared, persistent test database never
+   * resets between tests, files, or runs, and leftover rows are cheap to avoid. Called from a
+   * `finally` in every test that places a real order.
    */
   async function cleanupMockOrder(orderGid: string): Promise<void> {
     const row = await loadSupplierOrderByOrderGid(db, orderGid)
