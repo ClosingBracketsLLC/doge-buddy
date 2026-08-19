@@ -1,11 +1,14 @@
 import { createDb, orders, supplierOrders, webhookEvents } from '@doge-buddy/db'
-import { MockSupplierAdapter } from '@doge-buddy/supplier'
+import { type MockAdapterOptions, MockSupplierAdapter } from '@doge-buddy/supplier'
 import { and, eq } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
 import { upsertOrderFromPaidPayload } from '../src/fulfillment/order-upsert.ts'
-import { executePlaceOrder, type PlaceOrderDeps } from '../src/fulfillment/run-place-order.ts'
+import { executePayOrder } from '../src/fulfillment/run-pay-order.ts'
+import { executePlaceOrder, FULFILLMENT_RETRY_OPTS, type PlaceOrderDeps } from '../src/fulfillment/run-place-order.ts'
+import { executeReconcile, type ReconcileDeps } from '../src/fulfillment/run-reconcile.ts'
 import type { ShopifyFulfillmentOps } from '../src/fulfillment/run-sync-tracking.ts'
+import { executeWalletMonitor, type WalletMonitorDeps } from '../src/jobs/cj-wallet-monitor.ts'
 import { startQueue, type Queue } from '../src/queue.ts'
 import { createSettings } from '../src/settings.ts'
 import {
@@ -306,5 +309,319 @@ describe('fulfillment E2E: happy path + gate drills', () => {
       }
     },
     15_000,
+  )
+})
+
+/**
+ * Task 18: "Drills B" — the failure classes T17's own drills didn't cover: a crash mid-create, a
+ * wallet running dry then getting topped up, and reconcile recovering an order that never got a
+ * webhook at all. All three below use DIRECT executor calls, not the real queue — same
+ * established convention as the kill-switch drill above (see its own doc comment): none of these
+ * scenarios need pg-boss's actual timing (a crash retry, a wallet-monitor tick, and an hourly
+ * reconcile sweep are all just "call the executor again" from the caller's perspective), so
+ * driving them directly keeps the tests fast and deterministic while still exercising the real
+ * production executors end to end.
+ */
+describe('fulfillment E2E: failure drills B (crash mid-create, wallet pause/resume, webhook outage)', () => {
+  const { db, pool } = createDb(TEST_DB_URL)
+  const mockLog = { info: () => {}, warn: () => {}, error: () => {} }
+  const settingsApi = createSettings(db)
+
+  afterAll(() => pool.end())
+
+  /**
+   * Every test below places a "first" real order through its own fresh, single-use
+   * MockSupplierAdapter — each one deterministically lands on the same literal supplier_order_id
+   * ('mock-order-1'), since the mock adapter's own counter restarts at 0 per instance. Harmless on
+   * its own, but the T18 partial unique index on (supplier, supplier_order_id) means the row must
+   * not outlive its own test — this shared, persistent test database never resets between tests,
+   * files, or runs. Called from a `finally` in every test that places a real order.
+   */
+  async function cleanupMockOrder(orderGid: string): Promise<void> {
+    const row = await loadSupplierOrderByOrderGid(db, orderGid)
+    if (row) await db.delete(supplierOrders).where(eq(supplierOrders.id, row.id))
+  }
+
+  it(
+    'crash mid-create: confirmOrder throws once -> row parked at created; rerun resumes without a second placeOrder call, reaches confirmed',
+    async () => {
+      const localAdapter = new MockSupplierAdapter()
+      const enqueue = vi.fn(async () => {})
+      const deps: PlaceOrderDeps = { db, adapter: localAdapter, settings: settingsApi, alert: createAlerter(db, mockLog), enqueue }
+
+      const variantId = uniqueId('v-')
+      const variantGid = variantGidFor(variantId)
+      await seedMapping(db, { variantGid, supplierVariantId: 'mock-v1', supplierCostCents: 620 })
+      const orderGid = orderGidFor()
+      await upsertOrderFromPaidPayload(db, paidPayload(orderGid, { line_items: [{ variant_id: variantId, quantity: 1 }] }))
+
+      const confirmSpy = vi.spyOn(localAdapter, 'confirmOrder').mockImplementationOnce(async () => {
+        throw new Error('simulated crash before confirm completes')
+      })
+
+      try {
+        // Run 1 ("the worker crashes mid-create"): placeOrder succeeds (row -> created,
+        // supplierOrderId persisted), then confirmOrder throws — the exception propagates out of
+        // executePlaceOrder uncaught, exactly what a killed worker or a failed job attempt looks
+        // like from the caller's perspective (pg-boss would retry the job; not exercised here —
+        // see the drill-3 429-storm test below for real pg-boss retry mechanics).
+        await expect(executePlaceOrder(deps, orderGid)).rejects.toThrow('simulated crash before confirm completes')
+
+        const parkedRow = await loadSupplierOrderByOrderGid(db, orderGid)
+        expect(parkedRow?.status).toBe('created')
+        expect(parkedRow?.supplierOrderId).toBeTruthy()
+        expect(localAdapter.placedOrders).toHaveLength(1) // exactly one placeOrder call ever succeeded
+        expect(confirmSpy).toHaveBeenCalledTimes(1)
+
+        // Run 2 ("rerun" — a retried job, or a fresh worker picking the same order back up):
+        // resumes from 'created' via confirmOrPark directly — must NOT call placeOrder again.
+        await executePlaceOrder(deps, orderGid)
+
+        const confirmedRow = await loadSupplierOrderByOrderGid(db, orderGid)
+        expect(confirmedRow?.status).toBe('confirmed')
+        expect(localAdapter.placedOrders).toHaveLength(1) // still exactly one — resume never re-placed
+        expect(confirmSpy).toHaveBeenCalledTimes(2) // 1 throwing call + 1 real call
+        expect(enqueue).toHaveBeenCalledWith(
+          'fulfillment.pay-order',
+          { supplierOrderRowId: confirmedRow!.id },
+          { singletonKey: confirmedRow!.id, ...FULFILLMENT_RETRY_OPTS },
+        )
+      } finally {
+        await cleanupMockOrder(orderGid)
+      }
+    },
+    15_000,
+  )
+
+  it(
+    'wallet-empty pause/resume: insufficient balance parks awaiting_funds + pauses; restored balance + wallet monitor resumes to paid',
+    async () => {
+      // `opts` is passed BY REFERENCE into the adapter's constructor (MockSupplierAdapter stores
+      // it as-is, not a copy) — mutating it after construction changes what `getBalance`/`payOrder`
+      // return on every SUBSEQUENT call, without needing a second adapter instance. That's what
+      // "flip the mock balance" below actually does.
+      const opts: MockAdapterOptions = { failPayInsufficientBalance: true, balanceCents: 100_000 }
+      const localAdapter = new MockSupplierAdapter(opts)
+
+      // executePlaceOrder's own enqueue forwards straight into the real executePayOrder — safe
+      // here because at THIS point (first pay attempt) `fulfillment.paused_for_funds` is still
+      // false, so executePayOrder's own settings gate lets it through cleanly.
+      const forwardToPayOrder = vi.fn(async (name: string, data: object) => {
+        if (name === 'fulfillment.pay-order') {
+          await executePayOrder(deps, (data as { supplierOrderRowId: string }).supplierOrderRowId)
+        }
+      })
+      const deps: PlaceOrderDeps = {
+        db,
+        adapter: localAdapter,
+        settings: settingsApi,
+        alert: createAlerter(db, mockLog),
+        enqueue: forwardToPayOrder,
+      }
+
+      const variantId = uniqueId('v-')
+      const variantGid = variantGidFor(variantId)
+      await seedMapping(db, { variantGid, supplierVariantId: 'mock-v1', supplierCostCents: 620 })
+      const orderGid = orderGidFor()
+      await upsertOrderFromPaidPayload(db, paidPayload(orderGid, { line_items: [{ variant_id: variantId, quantity: 1 }] }))
+
+      try {
+        // place -> confirm -> (via forwardToPayOrder) pay: payOrder fails on insufficient balance,
+        // parking the row at awaiting_funds and setting the global pause flag — all within this
+        // one await, since forwardToPayOrder is awaited synchronously inside executePlaceOrder's
+        // own enqueuePayOrder call.
+        await executePlaceOrder(deps, orderGid)
+
+        const pausedRow = await loadSupplierOrderByOrderGid(db, orderGid)
+        expect(pausedRow?.status).toBe('awaiting_funds')
+        expect(await settingsApi.get('fulfillment.paused_for_funds')).toBe(true)
+
+        opts.failPayInsufficientBalance = false // "top up the wallet"
+
+        // executeWalletMonitor's OWN enqueue must NOT forward synchronously into executePayOrder
+        // the way executePlaceOrder's does above: wallet-monitor only clears
+        // `fulfillment.paused_for_funds` AFTER its enqueue loop finishes (see that function's own
+        // ordering rationale), so an executePayOrder call nested INSIDE that loop would still see
+        // the flag as true, hit its own settings gate, and re-enqueue itself — forever (verified
+        // this exact infinite loop with a throwaway repro before writing it this way). Recording
+        // the enqueue instead and driving executePayOrder AFTER executeWalletMonitor returns
+        // mirrors the real system's actual timing: a queued job only ever runs once some LATER
+        // worker tick picks it up, by which point the flag has already been cleared.
+        const recordedPayOrderRowIds: string[] = []
+        const recordEnqueue = vi.fn(async (name: string, data: object) => {
+          if (name === 'fulfillment.pay-order') {
+            recordedPayOrderRowIds.push((data as { supplierOrderRowId: string }).supplierOrderRowId)
+          }
+        })
+        const walletDeps: WalletMonitorDeps = {
+          db,
+          adapter: localAdapter,
+          settings: settingsApi,
+          alert: createAlerter(db, mockLog),
+          enqueue: recordEnqueue,
+        }
+        await executeWalletMonitor(walletDeps)
+
+        expect(await settingsApi.get('fulfillment.paused_for_funds')).toBe(false)
+        expect(recordedPayOrderRowIds).toEqual([pausedRow!.id])
+
+        // "the worker that would eventually pick up the job wallet-monitor just enqueued" — same
+        // direct-executor convention as everywhere else in this describe.
+        await executePayOrder(deps, pausedRow!.id)
+
+        const resumedRow = await loadSupplierOrderByOrderGid(db, orderGid)
+        expect(resumedRow?.status).toBe('paid')
+      } finally {
+        await settingsApi.set('fulfillment.paused_for_funds', false) // SETTINGS_DEFAULTS
+        await cleanupMockOrder(orderGid)
+      }
+    },
+    15_000,
+  )
+
+  it(
+    'webhook outage: no orders/paid webhook ever arrives; reconcile discovers the paid order via ordersUpdatedSince and places it',
+    async () => {
+      const localAdapter = new MockSupplierAdapter()
+      const forwardEnqueue = vi.fn(async (name: string, data: object) => {
+        if (name === 'fulfillment.place-order') {
+          await executePlaceOrder(placeDeps, (data as { orderGid: string }).orderGid)
+        }
+      })
+      const placeDeps: PlaceOrderDeps = {
+        db,
+        adapter: localAdapter,
+        settings: settingsApi,
+        alert: createAlerter(db, mockLog),
+        enqueue: forwardEnqueue,
+      }
+
+      const variantId = uniqueId('v-')
+      const variantGid = variantGidFor(variantId)
+      await seedMapping(db, { variantGid, supplierVariantId: 'mock-v1', supplierCostCents: 620 })
+      const orderGid = orderGidFor()
+      // No webhook at all — simulates the `orders` row existing (e.g. from a Shopify data sync
+      // outside this system's own webhook path) with NOTHING ever having enqueued
+      // fulfillment.place-order for it. Matches sweepOrphanedOrders's first sub-case ("an orders
+      // row already exists ... just enqueue place-order") — the harder "no orders row at all" thin
+      // sub-case is already covered directly in fulfillment-reconcile.test.ts.
+      await upsertOrderFromPaidPayload(db, paidPayload(orderGid, { line_items: [{ variant_id: variantId, quantity: 1 }] }))
+
+      const notUsed = async (): Promise<never> => {
+        throw new Error('not used by this drill')
+      }
+      const reconcileDeps: ReconcileDeps = {
+        db,
+        adapter: localAdapter,
+        settings: settingsApi,
+        alert: createAlerter(db, mockLog),
+        enqueue: forwardEnqueue,
+        shopifyOps: {
+          orderFulfillmentOrders: notUsed,
+          fulfillmentCreate: notUsed,
+          fulfillmentTrackingInfoUpdate: notUsed,
+          ordersUpdatedSince: async () => [
+            { id: orderGid, name: '#4242', test: false, displayFinancialStatus: 'PAID', updatedAt: new Date().toISOString() },
+          ],
+        },
+        // Fixed, deliberately-ancient clock: every OTHER sweep (2 stranded webhooks, 3 status
+        // drift, 4 overdue) runs unscoped queries against this same shared, persistent test
+        // database — a real "now" would make sweep 3 try to poll leftover rows from unrelated
+        // tests through THIS test's adapter (which has no idea about their supplierOrderIds) and
+        // fail per-row. Pinning "now" decades in the past puts every real row's timestamp AFTER
+        // every sweep's staleness cutoff, so sweeps 2-4 deterministically find nothing — isolating
+        // this test to exactly what sweep 1 (orphaned orders) does with the one item this test's
+        // own `ordersUpdatedSince` stub returns.
+        now: () => new Date('2020-01-01T00:00:00.000Z'),
+      }
+
+      try {
+        const result = await executeReconcile(reconcileDeps)
+
+        expect(result.orphaned).toBe(1)
+        expect(result.failures).toBe(0)
+        expect(forwardEnqueue).toHaveBeenCalledWith(
+          'fulfillment.place-order',
+          { orderGid },
+          { singletonKey: orderGid, ...FULFILLMENT_RETRY_OPTS },
+        )
+
+        const placedRow = await loadSupplierOrderByOrderGid(db, orderGid)
+        expect(placedRow?.status).toBe('confirmed')
+        expect(placedRow?.supplierOrderId).toBeTruthy()
+        expect(localAdapter.placedOrders).toHaveLength(1)
+      } finally {
+        await cleanupMockOrder(orderGid)
+      }
+    },
+    15_000,
+  )
+})
+
+/**
+ * Task 18 drill: 429 storm. Unlike the direct-executor drills above, this one specifically needs
+ * REAL pg-boss retries — the point is proving the production retry wiring (FULFILLMENT_RETRY_OPTS
+ * on the fulfillment.place-order queue) actually recovers from a transient supplier failure, not
+ * just that `executePlaceOrder` behaves correctly when called twice. Runs in its own describe (own
+ * queue, own adapter) rather than sharing the top describe's `q`/`adapter` — those are already
+ * mid-lifecycle across 4 tests by the time this file gets here, and this drill needs a supplier
+ * adapter configured with `failPlaceOrderTimes` from the start.
+ */
+describe('fulfillment E2E: 429 storm (real queue + pg-boss retries)', () => {
+  const { db, pool } = createDb(TEST_DB_URL)
+  const mockLog = { info: () => {}, warn: () => {}, error: () => {} }
+  const settingsApi = createSettings(db)
+
+  let q: Queue
+  let adapter: MockSupplierAdapter
+
+  beforeAll(async () => {
+    adapter = new MockSupplierAdapter({ failPlaceOrderTimes: 3 })
+    q = await startQueue(TEST_DB_URL, { adapter, settings: settingsApi, alert: createAlerter(db, mockLog) })
+  })
+
+  afterAll(async () => {
+    await q.stop()
+    await pool.end()
+  })
+
+  it(
+    'failPlaceOrderTimes: 3 -> pg-boss retries recover automatically -> exactly one mock order placed, >=3 attempts recorded, eventually confirmed',
+    async () => {
+      const placeOrderSpy = vi.spyOn(adapter, 'placeOrder')
+
+      const variantId = uniqueId('v-')
+      const variantGid = variantGidFor(variantId)
+      await seedMapping(db, { variantGid, supplierVariantId: 'mock-v1', supplierCostCents: 620 })
+      const orderGid = orderGidFor()
+      await upsertOrderFromPaidPayload(db, paidPayload(orderGid, { line_items: [{ variant_id: variantId, quantity: 1 }] }))
+
+      try {
+        // A small, fixed retry delay (not FULFILLMENT_RETRY_OPTS's production 30s/backoff shape)
+        // purely to keep this test's wall-clock time reasonable — what's under test is pg-boss's
+        // own automatic per-job retry MECHANISM on a thrown handler error, not the specific
+        // production backoff schedule (already a separately-documented literal in
+        // run-place-order.ts, unrelated to this drill). retryLimit: 5 leaves headroom above the 3
+        // injected failures.
+        await q.boss.send('fulfillment.place-order', { orderGid }, { retryLimit: 5, retryBackoff: false, retryDelay: 1 })
+
+        // Polls for 'confirmed' OR anything past it ('paid') — once the 4th attempt's placeOrder
+        // succeeds, confirmOrPark chains straight into enqueuing fulfillment.pay-order on the same
+        // real queue, which can race ahead to 'paid' before this poll's next tick.
+        const row = await waitFor(async () => {
+          const r = await loadSupplierOrderByOrderGid(db, orderGid)
+          return r && (r.status === 'confirmed' || r.status === 'paid') ? r : undefined
+        }, 35_000)
+
+        expect(placeOrderSpy.mock.calls.length).toBeGreaterThanOrEqual(3) // >= 3 attempts, per the brief
+        expect(row.supplierOrderId).toBeTruthy()
+        const placedForThisOrder = adapter.placedOrders.filter((o) => o.supplierOrderId === row.supplierOrderId)
+        expect(placedForThisOrder).toHaveLength(1) // exactly one mock order, despite the retried attempts
+      } finally {
+        const finalRow = await loadSupplierOrderByOrderGid(db, orderGid)
+        if (finalRow) await db.delete(supplierOrders).where(eq(supplierOrders.id, finalRow.id))
+      }
+    },
+    45_000,
   )
 })
