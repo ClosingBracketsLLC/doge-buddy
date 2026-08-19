@@ -18,6 +18,17 @@ export function grossMarginBps(revenueCents: number, costCents: number): number 
   return Math.round(((revenueCents - costCents) / revenueCents) * 10_000)
 }
 
+// NOTE (documented quirk, not a bug fix — real-world inputs never trigger it): rounding here
+// happens in TWO steps — `toFixed(3)` first rounds the input to 3 decimal places, then the code
+// below rounds that intermediate 3rd-decimal digit into whole cents. For most inputs this is
+// equivalent to rounding straight to cents, but a value that sits exactly on a
+// half-cent-of-a-half-cent boundary can double-round to a DIFFERENT result than a single direct
+// rounding would give: e.g. `usdToCents(1.0049)` — the true nearest cent is 1.00 (0.0049 is less
+// than half a cent) — first rounds to `"1.005"` (`toFixed(3)` rounds the 4th decimal digit, 9, up
+// into the 3rd), and THEN that intermediate `.005` rounds UP again to 1.01. Real money inputs
+// (Shopify's 2-decimal totals, CJ's own dollar amounts) never carry a 3rd-or-deeper decimal digit
+// in practice, so this has never been observed to matter — documented here so a future caller
+// feeding a pre-rounded-to-3-plus-decimals input isn't surprised by it.
 export function usdToCents(value: number | string): number {
   // First, validate and normalize to a number
   const n = typeof value === 'string' ? Number(value.trim() === '' ? Number.NaN : value) : value
@@ -45,4 +56,20 @@ export function usdToCents(value: number | string): number {
 
   assertCents(cents, 'usdToCents result')
   return cents
+}
+
+/**
+ * Inverse of `usdToCents`: integer cents -> a bare decimal-dollar string, always exactly two
+ * fraction digits, no currency symbol (`centsToUsd(1999) === '19.99'`, `centsToUsd(-50) ===
+ * '-0.50'`). For building request bodies that expect a plain decimal amount rather than a
+ * display value — `formatCents`'s `$12.34` is for showing a human a price, not for the wire
+ * format an API (e.g. CJ's dollar-denominated fields) consumes.
+ */
+export function centsToUsd(cents: number): string {
+  assertCents(cents)
+  const sign = cents < 0 ? '-' : ''
+  const abs = Math.abs(cents)
+  const dollars = Math.floor(abs / 100)
+  const rem = (abs % 100).toString().padStart(2, '0')
+  return `${sign}${dollars}.${rem}`
 }

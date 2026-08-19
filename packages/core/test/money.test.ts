@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assertCents, formatCents, grossMarginBps, usdToCents } from '@doge-buddy/core'
+import { assertCents, centsToUsd, formatCents, grossMarginBps, usdToCents } from '@doge-buddy/core'
 
 describe('formatCents', () => {
   it('formats integer cents as USD', () => {
@@ -53,5 +53,31 @@ describe('usdToCents', () => {
     expect(usdToCents(1e2)).toBe(10000) // 100 USD
     expect(usdToCents(1e-7)).toBe(0) // rounds to 0
     expect(() => usdToCents(1e21)).toThrow(RangeError) // overflow
+  })
+  it('double-rounds 1.0049 to 1.01 (documented quirk — see money.ts)', () => {
+    // The true nearest cent is 1.00 (0.0049 < half a cent), but the two-step rounding
+    // (toFixed(3) then round-to-cents) lands on 1.01 instead. Not a bug fix — just pinning the
+    // documented, currently-harmless-in-practice behavior so a future change to the rounding
+    // strategy is a deliberate, visible decision.
+    expect(usdToCents(1.0049)).toBe(101)
+  })
+})
+
+describe('centsToUsd', () => {
+  it('converts integer cents to a bare decimal-dollar string', () => {
+    expect(centsToUsd(1999)).toBe('19.99')
+    expect(centsToUsd(0)).toBe('0.00')
+    expect(centsToUsd(5)).toBe('0.05')
+    expect(centsToUsd(-1234)).toBe('-12.34')
+    expect(centsToUsd(100)).toBe('1.00')
+  })
+  it('rejects non-integers (same validation as usdToCents/formatCents)', () => {
+    expect(() => centsToUsd(12.5)).toThrow(RangeError)
+    expect(() => centsToUsd(Number.NaN)).toThrow(RangeError)
+  })
+  it('round-trips with usdToCents for whole-cent amounts', () => {
+    for (const cents of [0, 5, 100, 1999, 750, 123456]) {
+      expect(usdToCents(centsToUsd(cents))).toBe(cents)
+    }
   })
 })
