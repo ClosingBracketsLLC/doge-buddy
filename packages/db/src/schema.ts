@@ -110,7 +110,18 @@ export const supplierOrders = pgTable('supplier_orders', {
   paidAt: timestamp('paid_at', { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
-}, (t) => [uniqueIndex('supplier_orders_order_supplier_uq').on(t.orderId, t.supplier)])
+}, (t) => [
+  uniqueIndex('supplier_orders_order_supplier_uq').on(t.orderId, t.supplier),
+  // Guards `findCjSupplierOrder`'s (apps/ops) unordered, unlimited SELECT keyed on
+  // (supplier, supplier_order_id) — without this, a colliding supplier_order_id (e.g. from a
+  // supplier-side id reuse, or a bug elsewhere) could make that lookup silently return the wrong
+  // row. Partial (WHERE supplier_order_id IS NOT NULL) because the column is legitimately NULL
+  // for every row that hasn't been placed with the supplier yet (multiple such rows are normal
+  // and must not collide with each other).
+  uniqueIndex('supplier_orders_supplier_supplier_order_id_uq')
+    .on(t.supplier, t.supplierOrderId)
+    .where(sql`${t.supplierOrderId} IS NOT NULL`),
+])
 
 export const webhookEvents = pgTable('webhook_events', {
   id: id(),

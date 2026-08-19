@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "supplier_orders_supplier_supplier_order_id_uq" ON "supplier_orders" USING btree ("supplier","supplier_order_id") WHERE "supplier_orders"."supplier_order_id" IS NOT NULL;

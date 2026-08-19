@@ -8,8 +8,8 @@ import {
   supplierVariantMappings,
 } from '@doge-buddy/db'
 import { type Address, MockSupplierAdapter } from '@doge-buddy/supplier'
-import { and, eq } from 'drizzle-orm'
-import { afterAll, describe, expect, it, vi } from 'vitest'
+import { and, eq, inArray } from 'drizzle-orm'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
 import { type ShopifyOrderPaidPayload, upsertOrderFromPaidPayload } from '../src/fulfillment/order-upsert.ts'
 import { executePlaceOrder, type PlaceOrderDeps } from '../src/fulfillment/run-place-order.ts'
@@ -62,6 +62,27 @@ describe('executePlaceOrder', () => {
   const { db, pool } = createDb(url)
   afterAll(() => pool.end())
 
+  // Several tests below (real `placeOrder` calls through a fresh `MockSupplierAdapter`) end up
+  // with the SAME literal `supplier_order_id` ('mock-order-1') persisted into `supplier_orders`
+  // — the mock adapter's own order counter restarts at 0 for every new instance, and each of
+  // those tests deliberately constructs its own adapter for isolation. Harmless before the T18
+  // migration (no uniqueness constraint existed on `(supplier, supplier_order_id)`), but the new
+  // partial unique index (guards `findCjSupplierOrder`'s unordered lookup — see that migration's
+  // own comment) would make the SECOND such write in this shared, persistent, never-reset test
+  // database fail with a real constraint violation. Tracking each test's own `orders.id` here and
+  // deleting its `supplier_orders`/`orders` rows in `afterEach` (same pattern
+  // `wallet-monitor.test.ts`/`fulfillment-reconcile.test.ts` already use for their own
+  // shared-DB hygiene) means no row ever survives long enough to collide with a later test's
+  // identical id — every assertion above runs against the row BEFORE this cleanup fires.
+  let createdOrderIds: string[] = []
+  afterEach(async () => {
+    if (createdOrderIds.length > 0) {
+      await db.delete(supplierOrders).where(inArray(supplierOrders.orderId, createdOrderIds))
+      await db.delete(orders).where(inArray(orders.id, createdOrderIds))
+    }
+    createdOrderIds = []
+  })
+
   function spyAdapter(adapter: MockSupplierAdapter) {
     const spies = {} as Record<(typeof ALL_ADAPTER_METHODS)[number], ReturnType<typeof vi.spyOn>>
     for (const method of ALL_ADAPTER_METHODS) {
@@ -92,6 +113,7 @@ describe('executePlaceOrder', () => {
         },
       })
       .returning({ id: orders.id })
+    createdOrderIds.push(row!.id)
     return { orderGid, orderRowId: row!.id }
   }
 
@@ -493,6 +515,10 @@ describe('executePlaceOrder', () => {
       line_items: [{ variant_id: variantId, quantity: 1 }],
     }
     await upsertOrderFromPaidPayload(db, restPayload)
+    // Doesn't go through the local `seedOrder` helper (this test needs the REAL upsert path, not
+    // the hand-built fixture) — track its row explicitly so `afterEach` still cleans it up.
+    const [upsertedOrderRow] = await db.select().from(orders).where(eq(orders.shopifyOrderGid, orderGid))
+    createdOrderIds.push(upsertedOrderRow!.id)
 
     const adapter = new MockSupplierAdapter()
     const placeOrderSpy = vi.spyOn(adapter, 'placeOrder')
@@ -522,7 +548,7 @@ describe('executePlaceOrder', () => {
       expect.objectContaining({ fromCountry: 'US', toCountry: 'US', toZip: '62701' }),
     )
 
-    const row = await loadSupplierOrder((await db.select().from(orders).where(eq(orders.shopifyOrderGid, orderGid)))[0]!.id)
+    const row = await loadSupplierOrder(upsertedOrderRow!.id)
     expect(row?.status).toBe('confirmed')
   })
 })

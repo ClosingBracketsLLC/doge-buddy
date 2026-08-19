@@ -112,7 +112,14 @@ describe('executePayOrder', () => {
         idempotencyKey: `test-${nextId()}`,
         status: opts.status,
         shipmentOrderId: opts.shipmentOrderId === undefined ? null : opts.shipmentOrderId,
-        supplierOrderId: opts.supplierOrderId === undefined ? null : opts.supplierOrderId,
+        // The mock adapter's own order counter restarts at 0 for every fresh instance — many
+        // tests below deliberately construct their own adapter (e.g. for a distinct
+        // failPayInsufficientBalance option), so `placed.supplierOrderId` is the same literal
+        // ('mock-order-1') across most of them. `executePayOrder` only ever looks the order up in
+        // the adapter by `shipmentOrderId` (never by this column — see its own call site), so
+        // it's safe to make the DB value unique without touching what's actually passed to the
+        // adapter. Avoids colliding with the partial unique index on (supplier, supplier_order_id).
+        supplierOrderId: opts.supplierOrderId == null ? null : `${opts.supplierOrderId}-${nextId()}`,
       })
       .returning()
     return row!
@@ -383,7 +390,9 @@ describe('fulfillmentPayOrderHandler (retry-exhaustion dead-letter)', () => {
         idempotencyKey: `test-${nextId()}`,
         status: opts.status ?? 'confirmed',
         shipmentOrderId: opts.shipmentOrderId ?? null,
-        supplierOrderId: opts.supplierOrderId ?? null,
+        // See the sibling `seedSupplierOrder` above (executePayOrder describe) for why this needs
+        // a uniqueness suffix: every test here also places its "first" order on a fresh adapter.
+        supplierOrderId: opts.supplierOrderId == null ? null : `${opts.supplierOrderId}-${nextId()}`,
       })
       .returning()
     return row!

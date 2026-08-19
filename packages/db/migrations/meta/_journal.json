@@ -22,6 +22,13 @@
       "when": 1787090449809,
       "tag": "0002_overconfident_king_bedlam",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787099234643,
+      "tag": "0003_wealthy_madame_hydra",
+      "breakpoints": true
     }
   ]
 }

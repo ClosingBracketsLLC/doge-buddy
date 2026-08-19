@@ -295,6 +295,14 @@ describe('fulfillment E2E: happy path + gate drills', () => {
         )
       } finally {
         await settingsApi.set('killswitch.global', false)
+        // `localAdapter` is a fresh MockSupplierAdapter, so its first (and only) real `placeOrder`
+        // call above always lands on the same literal id ('mock-order-1') every run — harmless on
+        // its own, but the partial unique index on (supplier, supplier_order_id) that T18 adds
+        // (guards `findCjSupplierOrder`'s unordered lookup) means this row must not outlive this
+        // test, or the next fresh-adapter test anywhere in the suite that also places a "first"
+        // mock order would collide with it in this shared, persistent, never-reset test database.
+        const leftoverRow = await loadSupplierOrderByOrderGid(db, orderGid)
+        if (leftoverRow) await db.delete(supplierOrders).where(eq(supplierOrders.id, leftoverRow.id))
       }
     },
     15_000,
