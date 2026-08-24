@@ -143,9 +143,12 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       // Placeholder so the whole authed scope is gated from day one, even for paths Tasks 4-8
       // haven't registered yet (e.g. /admin/settings) — an unauthenticated request to any
       // /admin/... path must redirect to login rather than 404 (which would leak which admin
-      // routes exist). Real routes registered later take priority: find-my-way matches static
-      // segments before a trailing wildcard.
-      authed.get('/admin/*', async (_request, reply) => {
+      // routes exist). `.all()`, not `.get()`: a GET-only wildcard would let an unauthenticated
+      // non-GET request (POST, PUT, ...) to an unregistered path fall through to Fastify's
+      // default 404 without ever reaching the onRequest gate above — a method-shaped oracle for
+      // which admin routes exist. Real routes registered later take priority: find-my-way
+      // matches static segments before a trailing wildcard, for every method.
+      authed.all('/admin/*', async (_request, reply) => {
         return reply.code(404).send()
       })
     })

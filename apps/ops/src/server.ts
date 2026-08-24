@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import type pg from 'pg'
 import { actionRoutes, type ActionRouteDeps } from './http/actions.ts'
 import { adminRoutes, type AdminDeps } from './http/admin/routes.ts'
+import { redactTokenParam } from './http/redact.ts'
 import { webhookRoutes, type WebhookDeps } from './http/webhooks.ts'
 
 export interface ServerDeps {
@@ -13,7 +14,19 @@ export interface ServerDeps {
 }
 
 export function buildServer(deps: ServerDeps): FastifyInstance {
-  const app = Fastify({ logger: true })
+  const app = Fastify({
+    // Both the admin magic-link (`/admin/login/consume?t=...`) and Plan A's one-click proposal
+    // links (`/a/:id/approve|reject?t=...`) carry a raw single-use secret in their `t` query
+    // param. The default req serializer logs `req.url` verbatim, and this logger's output is
+    // retained by the hosting platform — so without redaction, every login/approve/reject click
+    // would permanently deposit a working bearer token into log storage. Overriding only the
+    // `req` serializer keeps Fastify's own default `res`/`err` serializers.
+    logger: {
+      serializers: {
+        req: (req) => ({ method: req.method, url: redactTokenParam(req.url), host: req.host, remoteAddress: req.ip }),
+      },
+    },
+  })
   const startedAt = Date.now()
 
   app.get('/healthz', async (_req, reply) => {

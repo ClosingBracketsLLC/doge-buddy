@@ -50,6 +50,14 @@ describe('admin login (magic link) + session gate', () => {
       expect(res.body).toBe('')
     }
 
+    // Non-GET methods must be gated too: a GET-only placeholder would let an unauthenticated
+    // POST to an unregistered admin path fall through to Fastify's default 404 without ever
+    // hitting the session check — a method-shaped oracle for which admin routes exist.
+    const postRes = await app.inject({ method: 'POST', url: '/admin/nonexistent' })
+    expect(postRes.statusCode).toBe(303)
+    expect(postRes.headers.location).toBe('/admin/login')
+    expect(postRes.body).toBe('')
+
     await app.close()
   })
 
