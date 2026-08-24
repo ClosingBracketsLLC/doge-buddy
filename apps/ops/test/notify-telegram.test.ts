@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createTelegramNotifier } from '../src/notify/telegram.ts'
+import { createNoopNotifier } from '../src/notify/notify.ts'
 
 const okResponse = () => new Response(JSON.stringify({ ok: true }), { status: 200 })
 
@@ -59,5 +60,31 @@ describe('createTelegramNotifier', () => {
     })
     await notify({ title: 'x', body: 'y' })
     expect('reply_markup' in JSON.parse(String(calls[0]!.init!.body))).toBe(false)
+  })
+
+  it('resolves false when alert throws on non-ok response — never rejects', async () => {
+    const throwingAlert = vi.fn(async () => { throw new Error('db down') })
+    const notify = createTelegramNotifier({
+      botToken: 't', chatId: '1', alert: throwingAlert,
+      fetchImpl: async () => new Response('{"ok":false}', { status: 403 }),
+    })
+    await expect(notify({ title: 'x', body: 'y' })).resolves.toBe(false)
+  })
+
+  it('resolves false when alert throws on fetch error — never rejects', async () => {
+    const throwingAlert = vi.fn(async () => { throw new Error('db down') })
+    const notify = createTelegramNotifier({
+      botToken: 't', chatId: '1', alert: throwingAlert,
+      fetchImpl: async () => { throw new Error('ECONNRESET') },
+    })
+    await expect(notify({ title: 'x', body: 'y' })).resolves.toBe(false)
+  })
+})
+
+describe('createNoopNotifier', () => {
+  it('resolves false when alert throws — never rejects', async () => {
+    const throwingAlert = vi.fn(async () => { throw new Error('db down') })
+    const notify = createNoopNotifier(throwingAlert)
+    await expect(notify({ title: 'x', body: 'y' })).resolves.toBe(false)
   })
 })

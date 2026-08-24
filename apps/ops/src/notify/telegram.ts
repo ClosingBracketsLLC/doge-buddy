@@ -10,6 +10,7 @@ export function createTelegramNotifier(opts: {
   fetchImpl?: FetchLike
 }): NotifyOwner {
   const fetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init))
+  const safeAlert = (...args: Parameters<Alert>) => opts.alert(...args).catch(() => {})
   return async (n: OwnerNotification): Promise<boolean> => {
     try {
       const payload: Record<string, unknown> = {
@@ -26,12 +27,12 @@ export function createTelegramNotifier(opts: {
       })
       if (!res.ok) {
         const bodyText = await res.text().catch(() => '')
-        await opts.alert('warning', 'notify_failed', { status: res.status, body: bodyText.slice(0, 300) })
+        await safeAlert('warning', 'notify_failed', { status: res.status, body: bodyText.slice(0, 300) })
         return false
       }
       return true
     } catch (err) {
-      await opts.alert('warning', 'notify_failed', { error: err instanceof Error ? err.message : String(err) })
+      await safeAlert('warning', 'notify_failed', { error: err instanceof Error ? err.message : String(err) })
       return false
     }
   }

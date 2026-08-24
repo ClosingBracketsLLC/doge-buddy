@@ -16,7 +16,7 @@ export type NotifyOwner = (n: OwnerNotification) => Promise<boolean>
 /** Config-absent fallback: alert-and-false, so notify-dependent paths degrade loudly, not fatally. */
 export function createNoopNotifier(alert: Alert): NotifyOwner {
   return async (n) => {
-    await alert('warning', 'notify_unconfigured', { title: n.title })
+    await alert('warning', 'notify_unconfigured', { title: n.title }).catch(() => {})
     return false
   }
 }
