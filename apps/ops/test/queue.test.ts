@@ -49,4 +49,46 @@ describe('queue', () => {
     expect(queue?.retryLimit).toBe(0)
     expect(queue?.expireInSeconds).toBe(3600)
   })
+
+  // Covers the path `createQueueRetrying`'s idempotent create alone can't reach: a queue that
+  // already exists (created here with pg-boss's defaults, same as any queue `startQueue` or an
+  // earlier no-opts `registerCron` call already stood up) must still pick up `opts` via
+  // `registerCron`'s `updateQueue` follow-up call. Queue name includes `Date.now()` (same pattern
+  // as `note` in the `demo.ping` test above) so reruns against this suite's real, persistent
+  // Postgres instance never see a queue mutated by a previous run.
+  it('registerCron with options updates retryLimit/expiration on a pre-existing queue', async () => {
+    const name = `test.cron-opts-preexisting-${Date.now()}`
+    await q.boss.createQueue(name)
+    const before = await q.boss.getQueue(name)
+    expect(before?.retryLimit).not.toBe(0)
+
+    await registerCron(q.boss, name, '0 13 * * 1', async () => {}, {
+      retryLimit: 0,
+      expireInSeconds: 3600,
+    })
+    const after = await q.boss.getQueue(name)
+    expect(after?.retryLimit).toBe(0)
+    expect(after?.expireInSeconds).toBe(3600)
+    expect(after?.policy).toBe(before?.policy)
+  })
+
+  // The regression this whole fix is about: pg-boss's `updateQueue` resets an omitted `policy` to
+  // 'standard' (see queue.ts's doc comment on `registerCron`), so a queue that was deliberately
+  // created with a non-standard policy must keep it after `registerCron(..., opts)` runs. Same
+  // per-run-unique naming as the test above, for the same reason.
+  it('registerCron with options preserves a pre-existing singleton policy', async () => {
+    const name = `test.cron-opts-singleton-${Date.now()}`
+    await q.boss.createQueue(name, { name, policy: 'singleton' })
+    const before = await q.boss.getQueue(name)
+    expect(before?.policy).toBe('singleton')
+
+    await registerCron(q.boss, name, '0 13 * * 1', async () => {}, {
+      retryLimit: 0,
+      expireInSeconds: 3600,
+    })
+    const after = await q.boss.getQueue(name)
+    expect(after?.retryLimit).toBe(0)
+    expect(after?.expireInSeconds).toBe(3600)
+    expect(after?.policy).toBe('singleton')
+  })
 })

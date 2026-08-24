@@ -202,7 +202,9 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
 /**
  * Per-cron queue options (`registerCron`'s `opts` param). Currently just the two knobs Phase 5's
  * `sourcing.weekly` cron needs to pin away from pg-boss defaults (retryLimit 2, a 15-minute
- * expiry) — extend as more crons need more `PgBoss.Queue` fields.
+ * expiry) — extend as more crons need more `PgBoss.Queue` fields. Deliberately excludes `policy`:
+ * `registerCron` reads and passes through whatever policy the queue already has (see below) so
+ * opts can never accidentally change it.
  */
 export interface CronJobOptions {
   retryLimit?: number
@@ -221,6 +223,15 @@ export interface CronJobOptions {
  * `registerCron` call created it first with defaults), that create is a silent no-op and the
  * options never apply. So follow up with `boss.updateQueue(name, { name, ...opts })`, which pg-boss
  * always applies (update, not create-if-missing) and makes the settings stick either way.
+ *
+ * That follow-up `updateQueue` call must pass `policy` explicitly. pg-boss's `updateQueue`
+ * (`manager.js`) destructures `const { policy = 'standard' } = options` *before* building its SQL
+ * params, so an omitted `policy` isn't passed through as `null` for the query's `COALESCE(...,
+ * policy)` to preserve — it's resolved to the literal string `'standard'` in JS first. That means
+ * calling `updateQueue` without `policy` silently downgrades any queue (e.g. one created elsewhere
+ * with `policy: 'singleton'`) back to `'standard'`. So read the queue's current policy via
+ * `getQueue` first and pass it straight through, defaulting to `'standard'` only for the
+ * brand-new-queue case where `getQueue` finds nothing yet.
  */
 export async function registerCron<ReqData extends object = object>(
   boss: PgBoss,
@@ -231,7 +242,8 @@ export async function registerCron<ReqData extends object = object>(
 ): Promise<void> {
   await createQueueRetrying(boss, name, opts ? { name, ...opts } : undefined)
   if (opts) {
-    await boss.updateQueue(name, { name, ...opts })
+    const current = await boss.getQueue(name)
+    await boss.updateQueue(name, { name, policy: current?.policy ?? 'standard', ...opts })
   }
   await boss.work(name, handler)
   await boss.schedule(name, cron)
