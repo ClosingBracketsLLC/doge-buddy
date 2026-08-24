@@ -133,24 +133,19 @@ export class CJSupplierAdapter implements SupplierAdapter {
   }
 
   async getProductReviews(supplierProductId: string, q?: { page?: number; pageSize?: number }): Promise<SupplierProductReview[]> {
-    const data = await this.client.request<{
-      data?: Parameters<typeof mapProductReview>[0][] | { list?: Parameters<typeof mapProductReview>[0][] | null; content?: Parameters<typeof mapProductReview>[0][] | null }
-    }>('GET', '/product/productComments', {
+    const data = await this.client.request<
+      Parameters<typeof mapProductReview>[0][] | { list?: Parameters<typeof mapProductReview>[0][] | null; content?: Parameters<typeof mapProductReview>[0][] | null } | null
+    >('GET', '/product/productComments', {
       query: { pid: supplierProductId, pageNum: q?.page ?? 1, pageSize: q?.pageSize ?? 20 },
       points: 10,
     })
-    // Defensive mapping: accept data.list, data.content, or data as the array
-    let comments: Parameters<typeof mapProductReview>[0][] = []
-    if (data.data) {
-      if (Array.isArray(data.data)) {
-        comments = data.data
-      } else if (data.data.list) {
-        comments = data.data.list || []
-      } else if (data.data.content) {
-        comments = data.data.content || []
-      }
-    }
-    return comments.map(mapProductReview)
+    // CjHttpClient.doHttp unwraps the envelope (line 303: return envelope.data), so data is already
+    // the unwrapped payload. Defensive mapping: accept data.list, data.content, or data as the array.
+    if (!data) return []
+    if (Array.isArray(data)) return data.map(mapProductReview)
+    if (data.list) return (data.list || []).map(mapProductReview)
+    if (data.content) return (data.content || []).map(mapProductReview)
+    return []
   }
 
   async getVariantStock(supplierVariantId: string): Promise<WarehouseStock[]> {

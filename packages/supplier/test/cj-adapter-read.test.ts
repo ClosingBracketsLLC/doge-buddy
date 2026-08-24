@@ -152,15 +152,58 @@ describe('CJSupplierAdapter read methods', () => {
   })
 
   it('getProductReviews maps CJ comment rows defensively', async () => {
-    const adapter = (await makeAdapter({ data: { list: [
+    const { adapter } = await makeAdapter({ list: [
       { score: 4, comment: 'good boy approved', commentDate: '2026-08-01' },
       { commentScore: '5', commentText: 'sturdy' },
-    ] } })).adapter
+    ] })
     const reviews = await adapter.getProductReviews('1952308304475578369')
     expect(reviews).toEqual([
       { rating: 4, content: 'good boy approved', reviewDate: '2026-08-01', countryCode: undefined },
       { rating: 5, content: 'sturdy', reviewDate: undefined, countryCode: undefined },
     ])
+  })
+
+  it('getProductReviews handles data.content array format', async () => {
+    const { adapter } = await makeAdapter({ content: [
+      { score: 3, comment: 'okay', commentDate: '2026-08-02' },
+    ] })
+    const reviews = await adapter.getProductReviews('test-id')
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0]).toEqual({ rating: 3, content: 'okay', reviewDate: '2026-08-02', countryCode: undefined })
+  })
+
+  it('getProductReviews handles flat array format', async () => {
+    const { adapter } = await makeAdapter([
+      { score: 5, comment: 'perfect' },
+    ])
+    const reviews = await adapter.getProductReviews('test-id')
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0]!.rating).toBe(5)
+  })
+
+  it('getProductReviews returns empty array for null data', async () => {
+    const { adapter } = await makeAdapter(null)
+    const reviews = await adapter.getProductReviews('test-id')
+    expect(reviews).toEqual([])
+  })
+})
+
+describe('getProductReviews rating edge cases', () => {
+  it('clamps rating 0 to 1 and 9 to 5', async () => {
+    const { adapter } = await makeAdapter([{ score: 0 }, { score: 9 }])
+    const reviews = await adapter.getProductReviews('test')
+    expect(reviews[0]!.rating).toBe(1)
+    expect(reviews[1]!.rating).toBe(5)
+  })
+  it('defaults rating to 5 when score is non-numeric', async () => {
+    const { adapter } = await makeAdapter([{ score: 'not-a-number' }])
+    const reviews = await adapter.getProductReviews('test')
+    expect(reviews[0]!.rating).toBe(5)
+  })
+  it('defaults rating to 5 when score is missing', async () => {
+    const { adapter } = await makeAdapter([{ comment: 'good' }])
+    const reviews = await adapter.getProductReviews('test')
+    expect(reviews[0]!.rating).toBe(5)
   })
 })
 

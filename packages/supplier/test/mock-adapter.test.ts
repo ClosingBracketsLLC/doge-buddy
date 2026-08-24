@@ -36,6 +36,16 @@ describe('MockSupplierAdapter specifics', () => {
     const [d] = await drifted.searchProducts({ keyword: 'rope' })
     expect(d!.sellPriceCents).toBe(Math.round(b!.sellPriceCents * 1.5))
   })
+  it('getProductReviews returns reviews for known pids only', async () => {
+    const adapter = new MockSupplierAdapter()
+    // Known pid (from MOCK_PRODUCTS)
+    const reviews = await adapter.getProductReviews('mock-p1')
+    expect(reviews).toHaveLength(2)
+    expect(reviews[0]!.rating).toBe(5)
+    // Unknown pid
+    const unknown = await adapter.getProductReviews('unknown-id')
+    expect(unknown).toEqual([])
+  })
   it('throws on unknown variant in placeOrder', async () => {
     const adapter = new MockSupplierAdapter()
     await expect(adapter.placeOrder({

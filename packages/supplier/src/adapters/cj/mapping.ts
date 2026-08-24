@@ -124,7 +124,7 @@ export function mapProductReview(comment: CjProductComment): SupplierProductRevi
   const rating = (() => {
     const score = comment.score ?? comment.commentScore
     if (score === undefined || score === null) return 5
-    const n = typeof score === 'string' ? parseInt(score, 10) : score
+    const n = Number(score)
     if (!Number.isFinite(n)) return 5
     return Math.max(1, Math.min(5, n))
   })()

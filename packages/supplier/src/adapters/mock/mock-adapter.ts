@@ -161,8 +161,10 @@ export class MockSupplierAdapter implements SupplierAdapter {
     }
   }
 
-  async getProductReviews(_supplierProductId: string, _q?: { page?: number; pageSize?: number }): Promise<SupplierProductReview[]> {
-    // Return canned reviews for any known pid, [] otherwise
+  async getProductReviews(supplierProductId: string, _q?: { page?: number; pageSize?: number }): Promise<SupplierProductReview[]> {
+    // Return canned reviews only for known pids (in MOCK_PRODUCTS), [] otherwise
+    const product = MOCK_PRODUCTS.find((p) => p.supplierProductId === supplierProductId)
+    if (!product) return []
     return [
       { rating: 5, content: 'Excellent quality and fast shipping!', reviewDate: '2026-08-15', countryCode: 'US' },
       { rating: 4, content: 'Good value for the price', reviewDate: '2026-08-10', countryCode: 'US' },
