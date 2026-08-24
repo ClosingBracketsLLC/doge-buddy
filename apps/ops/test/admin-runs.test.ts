@@ -226,6 +226,35 @@ describe('runs list + detail pages', () => {
     await app.close()
   })
 
+  // Belt-and-suspenders on the SUMMARY line specifically, not just the <pre> body: eventSummary /
+  // assistantTextPreview compose the first-120-chars text preview into the <summary> line, and
+  // that composed string only stays safe because it flows through html``'s single esc() pass —
+  // never its own raw()/independent escaping. This seeds an actual `type: 'assistant'` event with
+  // a `text` content block (the exact shape assistantTextPreview reads, per render-run.ts), so the
+  // <script> payload lands in the preview path, not just the JSON body.
+  it('7b. a <script> in an assistant text block reaches the summary preview ESCAPED, never as live markup', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const run = await seedRun()
+    const hostileAssistantMsg = {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: '<script>alert(document.cookie)</script>' }] },
+    }
+    await seedEvents(run.id, [hostileAssistantMsg])
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/runs/${run.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    // Confirms the fixture actually exercises assistantTextPreview (not just the <pre> body): the
+    // preview text appears inside the <summary> element.
+    expect(res.body).toMatch(/<summary>[^<]*&lt;script&gt;/)
+    expect(res.body).toContain('&lt;script&gt;')
+    expect(res.body).not.toContain('<script>alert(document.cookie)</script>')
+
+    await app.close()
+  })
+
   it('8. a non-UUID :id does not 500 or leak SQL — degrades to the safeHandle error page', async () => {
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
