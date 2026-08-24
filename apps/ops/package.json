@@ -12,7 +12,8 @@
     "verify-live": "tsx scripts/verify-live.ts",
     "replay-webhook": "tsx scripts/replay-webhook.ts",
     "seed-store": "tsx scripts/seed-store.ts",
-    "seed-proposal": "tsx scripts/seed-proposal.ts"
+    "seed-proposal": "tsx scripts/seed-proposal.ts",
+    "run-sourcing": "tsx scripts/run-sourcing.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.241",

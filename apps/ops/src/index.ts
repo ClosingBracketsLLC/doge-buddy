@@ -25,6 +25,7 @@ import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
+import { sourcingWeeklyHandler } from './jobs/sourcing-weekly.ts'
 import { loadDotEnv } from './load-env.ts'
 import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
 import { createTelegramNotifier } from './notify/telegram.ts'
@@ -32,6 +33,8 @@ import type { ProposalShopifyOps } from './proposals/run-apply.ts'
 import { registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
+import type { SourcingPipelineDeps } from './sourcing/pipeline.ts'
+import { createSerpApiTrends } from './sourcing/trends.ts'
 import { DrizzleCjTokenStore } from './stores/cj-token-store.ts'
 
 loadDotEnv(import.meta.url)
@@ -247,6 +250,26 @@ if (config.shopify && config.adminBaseUrl && shopifyClient) {
   // (self-healing for dropped/misdirected subscriptions) never gets registered — a production
   // deploy could silently lose this safety net, so make it loud instead of silent.
   app.log.warn('shopify webhook-audit cron disabled: ADMIN_BASE_URL not set')
+}
+
+// `sourcing.weekly` (Phase 5, Task 14): gated on `ANTHROPIC_API_KEY` (Task 4) — the disabled-warn
+// for the absent-key case already lives in that config log block above. `trends` is its own
+// independent gate (Task 7's SerpApi adapter, only when `SERPAPI_KEY` is also set) — its own
+// disabled-warn lives in the same log block; a missing SerpApi key degrades the run (Stage 3
+// skipped, `trends_stage_skipped` alert) rather than blocking the cron entirely. `retryLimit: 0` /
+// `expireInSeconds: 3600` (Task 5's `registerCron` options, Decision 11) mean a stuck or thrown run
+// is never silently retried — `claimDailyRun`'s same-day breaker is the only thing standing between
+// this cron and a second paid run today, so a blind retry would be actively dangerous here.
+if (config.anthropic) {
+  const trends = config.serpapi ? createSerpApiTrends({ apiKey: config.serpapi.apiKey }) : null
+  const sourcingDeps: SourcingPipelineDeps = {
+    db, adapter: supplierAdapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trends,
+  }
+  await registerCron(queue.boss, 'sourcing.weekly', '0 13 * * 1', sourcingWeeklyHandler(sourcingDeps), {
+    retryLimit: 0,
+    expireInSeconds: 3600,
+  })
+  app.log.info('sourcing.weekly cron ARMED — Mondays 13:00 UTC, sonnet-5, $2.00 stop-loss')
 }
 
 await app.listen({ port: config.port, host: config.host })
