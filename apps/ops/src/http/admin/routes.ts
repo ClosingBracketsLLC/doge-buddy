@@ -1,5 +1,5 @@
-import { PROPOSAL_TYPES, type ProposalType } from '@doge-buddy/core'
-import { auditLog, proposals, proposalStatus, type createDb } from '@doge-buddy/db'
+import { formatCents, PROPOSAL_TYPES, type ProposalType } from '@doge-buddy/core'
+import { agentRuns, auditLog, proposals, proposalStatus, supportTickets, type createDb } from '@doge-buddy/db'
 import { and, desc, eq, lt } from 'drizzle-orm'
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import type { SendOpts } from '../../fulfillment/types.ts'
@@ -17,10 +17,29 @@ import {
   SESSION_COOKIE,
   validateSession,
 } from './auth.ts'
-import { html, layout } from './html.ts'
+import { loadHealthStrip, type HealthStrip } from './health.ts'
+import { html, layout, type RawHtml } from './html.ts'
 import { renderProposalDetail, renderProposalRow } from './render-proposal.ts'
 
 const PROPOSAL_STATUSES = proposalStatus.enumValues
+
+/**
+ * Renders the dashboard's health strip: wallet balance (or 'n/a'), queue depth, last webhook
+ * received, the three kill switches (ON/OFF so the state reads unambiguously at a glance), and
+ * the pending-proposal count. Every field is a `HealthStrip` value already loaded by
+ * `loadHealthStrip` — this function only formats and escapes (via html``) for display.
+ */
+function renderHealthStrip(h: HealthStrip): RawHtml {
+  return html`<section id="health-strip">
+    <p>Wallet: ${h.walletCents === null ? 'n/a' : formatCents(h.walletCents)}</p>
+    <p>Queue depth: ${h.queueDepth}</p>
+    <p>Last webhook: ${h.lastWebhookAt ? h.lastWebhookAt.toISOString() : 'never'}</p>
+    <p>Killswitch: ${h.killswitch ? 'ON' : 'OFF'}</p>
+    <p>Fulfillment enabled: ${h.fulfillmentEnabled ? 'ON' : 'OFF'}</p>
+    <p>Paused for funds: ${h.pausedForFunds ? 'ON' : 'OFF'}</p>
+    <p>Pending proposals: ${h.pendingProposals}</p>
+  </section>`
+}
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -142,9 +161,70 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         }
       })
 
-      // Task 6 replaces this stub with the real dashboard.
       authed.get('/admin', async (_request, reply) => {
-        return reply.code(200).type('text/html; charset=utf-8').send(layout('Dashboard', html`<p>coming in Task 6</p>`))
+        return safeHandle('dashboard', reply, async () => {
+          const health = await loadHealthStrip(deps)
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Dashboard', renderHealthStrip(health)))
+        })
+      })
+
+      // Tickets and runs are Phase 5/6 features (agent-run support workflow, agent execution
+      // history) — this task only wires the pages' read side against the tables schema.ts
+      // already defines, so they render a real table the moment those phases start writing rows,
+      // and a plain "not yet" line until then.
+      authed.get('/admin/tickets', async (_request, reply) => {
+        return safeHandle('tickets', reply, async () => {
+          const rows = await deps.db
+            .select({ id: supportTickets.id, status: supportTickets.status, createdAt: supportTickets.createdAt })
+            .from(supportTickets)
+            .orderBy(desc(supportTickets.createdAt))
+            .limit(100)
+
+          const body =
+            rows.length === 0
+              ? html`<p>No tickets yet — Phase 6.</p>`
+              : html`<table>
+                  <tbody>
+                    ${rows.map(
+                      (t) => html`<tr>
+                        <td>${t.id}</td>
+                        <td>${t.status}</td>
+                        <td>${t.createdAt.toISOString()}</td>
+                      </tr>`,
+                    )}
+                  </tbody>
+                </table>`
+
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Tickets', body))
+        })
+      })
+
+      authed.get('/admin/runs', async (_request, reply) => {
+        return safeHandle('runs', reply, async () => {
+          const rows = await deps.db
+            .select({ id: agentRuns.id, workflow: agentRuns.workflow, status: agentRuns.status, createdAt: agentRuns.createdAt })
+            .from(agentRuns)
+            .orderBy(desc(agentRuns.createdAt))
+            .limit(100)
+
+          const body =
+            rows.length === 0
+              ? html`<p>No agent runs yet — Phase 5.</p>`
+              : html`<table>
+                  <tbody>
+                    ${rows.map(
+                      (r) => html`<tr>
+                        <td>${r.id}</td>
+                        <td>${r.workflow}</td>
+                        <td>${r.status}</td>
+                        <td>${r.createdAt.toISOString()}</td>
+                      </tr>`,
+                    )}
+                  </tbody>
+                </table>`
+
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Runs', body))
+        })
       })
 
       async function lookupProposal(id: string) {
