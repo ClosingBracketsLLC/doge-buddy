@@ -1,5 +1,5 @@
 import { agentRuns, auditLog, type createDb } from '@doge-buddy/db'
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -62,7 +62,10 @@ export async function sweepOrphanRuns(db: Db, alert: Alert): Promise<number> {
  * Sweeps orphans FIRST, outside this transaction: a previous run that crashed mid-flight without
  * reaching a terminal status must not sit around as a stale 'running' row confusing whatever else
  * inspects `agent_runs` (dashboards, monitoring) one moment longer than necessary — self-heal runs
- * on every claim attempt, not just at boot or on the watchdog's own schedule.
+ * on every claim attempt, not just at boot or on the watchdog's own schedule. It's also what makes
+ * the status filter below meaningful same-day, not just across a day boundary: a row this sweep
+ * just flipped to 'aborted' is no longer in the blocking set, so the very next line in this same
+ * call can claim past it.
  */
 export async function claimDailyRun(
   db: Db,
@@ -73,12 +76,19 @@ export async function claimDailyRun(
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'agent-run:' + input.workflow}))`)
     if (!input.force) {
+      // Only a live ('running') or a done ('succeeded') run enforces the one-claim-per-day rule.
+      // A 'failed' run, or a 'running' run the sweep above just flipped to 'aborted' because it
+      // crashed without reaching a terminal status, must NOT keep wedging the breaker for the
+      // rest of the day — that's the spec's promised same-day self-heal. Only 'running'/'succeeded'
+      // represent "a paid run is in flight or already completed today," which is the only thing
+      // this breaker exists to prevent duplicating.
       const [existing] = await tx
         .select({ id: agentRuns.id })
         .from(agentRuns)
         .where(
           and(
             eq(agentRuns.workflow, input.workflow),
+            inArray(agentRuns.status, ['running', 'succeeded']),
             sql`(${agentRuns.startedAt} AT TIME ZONE 'utc') >= date_trunc('day', now() AT TIME ZONE 'utc')`,
           ),
         )

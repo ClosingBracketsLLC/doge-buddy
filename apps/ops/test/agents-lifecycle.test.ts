@@ -70,6 +70,23 @@ describe('claimDailyRun / sweepOrphanRuns', () => {
     expect(rows.length).toBe(1)
   })
 
+  it('(b2) a succeeded run started today still blocks a second same-day claim', async () => {
+    // One-run-per-day must survive a status change: a run that finished (not just one still
+    // in flight) is exactly the case the breaker exists to prevent duplicating.
+    const workflow = trackWorkflow(uniqueWorkflow())
+    const first = await claimDailyRun(db, mockAlert(), { workflow, model: 'm', triggerRef: 'cron' })
+    if (!first.claimed) throw new Error('expected first claim to succeed')
+    await db.update(agentRuns).set({ status: 'succeeded' }).where(eq(agentRuns.id, first.runId))
+
+    const second = await claimDailyRun(db, mockAlert(), { workflow, model: 'm', triggerRef: 'manual' })
+    expect(second.claimed).toBe(false)
+    if (second.claimed) throw new Error('expected second claim to fail')
+    expect(second.existingRunId).toBe(first.runId)
+
+    const rows = await db.select().from(agentRuns).where(eq(agentRuns.workflow, workflow))
+    expect(rows.length).toBe(1)
+  })
+
   it('(c) force:true claims anyway, producing a second row', async () => {
     const workflow = trackWorkflow(uniqueWorkflow())
     const first = await claimDailyRun(db, mockAlert(), { workflow, model: 'm', triggerRef: 'cron' })
@@ -179,7 +196,7 @@ describe('claimDailyRun / sweepOrphanRuns', () => {
     expect(auditRows[0]?.entityType).toBe('agent_run')
   })
 
-  it('(f) self-heal: a run stuck running past yesterday no longer blocks/looks in-progress after the sweep, and claimDailyRun proceeds cleanly for a fresh workflow', async () => {
+  it('(f) cross-day self-heal: a run stuck running since yesterday no longer looks in-progress after the sweep, and claimDailyRun proceeds cleanly for that same workflow', async () => {
     // Deliberately more than a full day + ORPHAN_AFTER_MINUTES stale so this row is unambiguously
     // both (a) orphan-eligible and (b) outside "today"'s UTC window regardless of what time this
     // test happens to run — the day-scoped claim predicate excludes it either way, so this proves
@@ -201,5 +218,37 @@ describe('claimDailyRun / sweepOrphanRuns', () => {
 
     const [staleAfter] = await db.select().from(agentRuns).where(eq(agentRuns.id, staleRow!.id))
     expect(staleAfter?.status).toBe('aborted')
+  })
+
+  it('(f) same-day self-heal: a run stuck running 25+ minutes earlier TODAY no longer blocks a same-day claim once swept (spec:116)', async () => {
+    // This is the exact scenario the spec promises and the status-blind predicate (this task's
+    // first pass) could not satisfy: a crashed run that never reached a terminal status must not
+    // wedge the breaker for the REST OF THE SAME DAY. startedAt is only 25 minutes ago — still
+    // well within "today" by the UTC day-truncated predicate — so this only passes because
+    // claimDailyRun's status filter excludes 'aborted' rows, not because the row falls outside
+    // today's window (contrast with the cross-day test above, which relies on the day boundary
+    // instead).
+    const workflow = trackWorkflow(uniqueWorkflow('stuck-since-this-morning'))
+    const [staleRow] = await db
+      .insert(agentRuns)
+      .values({
+        workflow,
+        status: 'running',
+        model: 'm',
+        startedAt: sql`now() - interval '25 minutes'`,
+      })
+      .returning({ id: agentRuns.id })
+
+    const claimResult = await claimDailyRun(db, mockAlert(), { workflow, model: 'm', triggerRef: 'cron' })
+    expect(claimResult.claimed).toBe(true)
+
+    const [staleAfter] = await db.select().from(agentRuns).where(eq(agentRuns.id, staleRow!.id))
+    expect(staleAfter?.status).toBe('aborted')
+
+    // Both rows now exist for this workflow: the healed 'aborted' row and today's new 'running'
+    // claim — proving the self-heal didn't just skip creating a row, it actually let a fresh one
+    // through.
+    const rows = await db.select().from(agentRuns).where(eq(agentRuns.workflow, workflow))
+    expect(rows.length).toBe(2)
   })
 })
