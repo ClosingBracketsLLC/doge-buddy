@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { matchExcludedCategory, findClaimViolations, htmlToText, validateDescriptionHtml } from '../src/sourcing/guards'
+import { matchExcludedCategory, findClaimViolations, htmlToText, validateDescriptionHtml } from '../src/sourcing/guards.js'
 
 describe('guards', () => {
   it('matchExcludedCategory hits on any text field, case-insensitively', () => {

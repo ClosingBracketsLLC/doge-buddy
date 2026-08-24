@@ -135,8 +135,8 @@ export function validateDescriptionHtml(html: string): string | null {
   let match
 
   while ((match = tagRegex.exec(html)) !== null) {
-    const tagName = match[1].toLowerCase()
-    const attributes = match[2]
+    const tagName = (match[1] ?? '').toLowerCase()
+    const attributes = match[2] ?? ''
 
     // Check if tag is in allowlist
     if (!allowedTags.has(tagName)) {
