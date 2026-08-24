@@ -11,6 +11,13 @@ const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/dog
 describe('queue', () => {
   let q: Queue
   const { db, pool } = createDb(url)
+  // `registerCron` (via `boss.schedule`) writes a durable row to pg-boss's own `schedule` table,
+  // on top of the queue row itself — neither is torn down by anything in this suite, so without
+  // explicit cleanup every run of these `registerCron`-with-opts tests below would permanently
+  // grow `pgboss.queue`/`pgboss.schedule` with dead weekly schedules in the shared, persistent
+  // test Postgres instance. Each test that calls `registerCron` pushes its queue name here;
+  // `afterAll` unschedules + deletes every one of them.
+  const cronTestQueueNames: string[] = []
 
   beforeAll(async () => {
     const mockLog = { info: () => {}, warn: () => {}, error: () => {} }
@@ -21,6 +28,10 @@ describe('queue', () => {
     })
   })
   afterAll(async () => {
+    for (const name of cronTestQueueNames) {
+      await q.boss.unschedule(name)
+      await q.boss.deleteQueue(name)
+    }
     await q.stop()
     await pool.end()
   })
@@ -44,6 +55,7 @@ describe('queue', () => {
   })
 
   it('registerCron with options pins retryLimit and expiration on the queue', async () => {
+    cronTestQueueNames.push('test.cron-opts')
     await registerCron(q.boss, 'test.cron-opts', '0 13 * * 1', async () => {}, { retryLimit: 0, expireInSeconds: 3600 })
     const queue = await q.boss.getQueue('test.cron-opts')
     expect(queue?.retryLimit).toBe(0)
@@ -58,6 +70,7 @@ describe('queue', () => {
   // Postgres instance never see a queue mutated by a previous run.
   it('registerCron with options updates retryLimit/expiration on a pre-existing queue', async () => {
     const name = `test.cron-opts-preexisting-${Date.now()}`
+    cronTestQueueNames.push(name)
     await q.boss.createQueue(name)
     const before = await q.boss.getQueue(name)
     expect(before?.retryLimit).not.toBe(0)
@@ -78,6 +91,7 @@ describe('queue', () => {
   // per-run-unique naming as the test above, for the same reason.
   it('registerCron with options preserves a pre-existing singleton policy', async () => {
     const name = `test.cron-opts-singleton-${Date.now()}`
+    cronTestQueueNames.push(name)
     await q.boss.createQueue(name, { name, policy: 'singleton' })
     const before = await q.boss.getQueue(name)
     expect(before?.policy).toBe('singleton')
