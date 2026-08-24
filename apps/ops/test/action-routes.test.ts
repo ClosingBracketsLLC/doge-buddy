@@ -138,6 +138,30 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
     await app.close()
   })
 
+  it('3b. POST as a real browser form submit (application/x-www-form-urlencoded) -> 200 Approved, not 415', async () => {
+    // Regression (found live, Tier-2): Fastify has no built-in parser for urlencoded bodies, so
+    // the confirm page's own <form method="post"> submit — which every real browser sends with
+    // Content-Type: application/x-www-form-urlencoded — was rejected 415
+    // FST_ERR_CTP_INVALID_MEDIA_TYPE before the route ever ran. Tests and curl had no
+    // Content-Type header, which is why the gap was invisible until a real phone tapped Approve.
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const { row, token } = await seedPending()
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/a/${row.id}/approve?t=${token}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: '',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Approved')
+    expect(deps.enqueue).toHaveBeenCalledTimes(1)
+
+    await app.close()
+  })
+
   it('4. second POST with the same token -> friendly page, still exactly one enqueue, row untouched', async () => {
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, actions: deps })

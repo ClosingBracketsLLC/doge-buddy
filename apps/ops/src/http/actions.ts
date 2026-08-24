@@ -79,6 +79,19 @@ function isValidDecision(row: ProposalRow | undefined, token: string | undefined
 
 export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
   return async (fastify) => {
+    // Fastify ships parsers for application/json and text/plain ONLY — a real browser submitting
+    // the confirm page's <form method="post"> sends application/x-www-form-urlencoded, which
+    // 415'd (FST_ERR_CTP_INVALID_MEDIA_TYPE) before the route ever ran (found live on the first
+    // Telegram-button tap). These routes read nothing from the body — the token rides the query
+    // string — so the parser just accepts and discards it. Scoped to this plugin's encapsulation
+    // context, like the webhook plugin's raw-body parser.
+    fastify.addContentTypeParser(
+      'application/x-www-form-urlencoded',
+      { parseAs: 'buffer' },
+      (_req: unknown, _body: unknown, done: (err: Error | null, body?: unknown) => void) => {
+        done(null, undefined)
+      },
+    )
     async function lookup(proposalId: string): Promise<ProposalRow | undefined> {
       const [row] = await deps.db.select().from(proposals).where(eq(proposals.id, proposalId))
       return row
