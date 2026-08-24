@@ -293,6 +293,37 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
     await app.close()
   })
 
+  // Item 1: same enqueue-failure recovery shape as the admin surface (admin-decisions.test.ts's
+  // #11) — the transition already committed, so a failed enqueue must never un-approve, and the
+  // clicker must see a distinct copy rather than the normal "will go live shortly" text.
+  it('11. throwing enqueue on POST approve -> row STAYS approved, distinct re-send copy, critical alert', async () => {
+    alert = vi.fn(async () => {})
+    const deps: ActionRouteDeps = { db, enqueue: vi.fn(async () => { throw new Error('queue down') }), alert }
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const { row, token } = await seedPending()
+
+    const res = await app.inject({ method: 'POST', url: `/a/${row.id}/approve?t=${token}` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Approved ✓ — but queueing failed; the admin dashboard can re-send.')
+    expect(res.body).not.toContain('the listing will go live shortly')
+
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('approved')
+    expect(after!.decidedBy).toBe('owner')
+
+    expect(deps.alert).toHaveBeenCalledWith(
+      'critical',
+      'apply_enqueue_failed',
+      expect.objectContaining({ proposalId: row.id }),
+    )
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.approve')
+    expect(auditRows).toHaveLength(1) // the decision itself still committed and was audited
+
+    await app.close()
+  })
+
   it('10. malformed (non-UUID) proposalId on POST -> 200 friendly page, identical body, no write, no throw, alerted', async () => {
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, actions: deps })

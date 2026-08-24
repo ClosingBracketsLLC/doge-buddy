@@ -411,4 +411,119 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
 
     await app.close()
   })
+
+  // Item 1: enqueue failure after a committed approve must never strand the row with no way
+  // forward — the transition already committed, so this must never un-approve, and the operator
+  // must see an explicit signal (not the normal 303-to-detail a healthy approve gives).
+  it('11. throwing enqueue on authed approve -> row STAYS approved, explicit re-send copy, critical alert, no 303', async () => {
+    const deps = makeDeps({ enqueue: vi.fn(async () => { throw new Error('queue down') }) })
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const row = await seedPending()
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/approve`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: '',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Approved, but queueing the apply FAILED')
+    expect(res.body).toContain('Re-send')
+
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('approved')
+    expect(after!.decidedBy).toBe('owner')
+
+    expect(deps.alert).toHaveBeenCalledWith(
+      'critical',
+      'apply_enqueue_failed',
+      expect.objectContaining({ proposalId: row.id }),
+    )
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.approve')
+    expect(auditRows).toHaveLength(1) // the decision itself still committed and was audited
+
+    await app.close()
+  })
+
+  it('12. resend-apply on an approved row enqueues the exact Plan-A shape and audits proposal.apply_resent', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const [row] = await db
+      .insert(proposals)
+      .values({
+        type: 'new_listing',
+        status: 'approved',
+        summary: 'Stranded approval',
+        payload: VALID_NEW_LISTING_PAYLOAD,
+        sourceWorkflow: 'test',
+        actionTokenHash: null,
+        decidedBy: 'owner',
+        decidedAt: new Date(),
+      })
+      .returning()
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row!.id}/resend-apply`,
+      headers: { cookie },
+    })
+
+    expect(res.statusCode).toBe(303)
+    expect(res.headers.location).toBe(`/admin/proposals/${row!.id}`)
+
+    expect(deps.enqueue).toHaveBeenCalledTimes(1)
+    expect(deps.enqueue).toHaveBeenCalledWith(
+      'proposal.apply',
+      { proposalId: row!.id },
+      { retryLimit: 5, retryBackoff: true, retryDelay: 30, singletonKey: row!.id },
+    )
+
+    const auditRows = await auditRowsFor(row!.id, 'proposal.apply_resent')
+    expect(auditRows).toHaveLength(1)
+    expect(auditRows[0]!.actor).toBe('owner')
+
+    await app.close()
+  })
+
+  it("13. resend-apply on an 'applied' row -> already-handled page, no enqueue", async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const [row] = await db
+      .insert(proposals)
+      .values({
+        type: 'new_listing',
+        status: 'applied',
+        summary: 'Already applied',
+        payload: VALID_NEW_LISTING_PAYLOAD,
+        sourceWorkflow: 'test',
+        actionTokenHash: null,
+        decidedBy: 'owner',
+        decidedAt: new Date(),
+        appliedAt: new Date(),
+      })
+      .returning()
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row!.id}/resend-apply`,
+      headers: { cookie },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Already handled.')
+
+    expect(deps.enqueue).not.toHaveBeenCalled()
+
+    const auditRows = await auditRowsFor(row!.id, 'proposal.apply_resent')
+    expect(auditRows).toHaveLength(0)
+
+    await app.close()
+  })
 })

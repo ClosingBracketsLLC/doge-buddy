@@ -60,6 +60,18 @@ function resultPage(decision: Decision): string {
 }
 
 /**
+ * Rendered instead of the normal `resultPage('approve')` when the transition committed
+ * (the proposal IS 'approved' in the DB) but `enqueueProposalApply` itself threw — distinct copy
+ * so the clicker knows the apply still needs a nudge, rather than seeing the same "will go live
+ * shortly" text a healthy approve gets. Same recovery shape as Task 7's order-recovery
+ * enqueue-failure page: never un-approve, just surface the gap and point at the fix (the admin
+ * dashboard's resend-apply button, Item 1c).
+ */
+function enqueueFailedPage(): string {
+  return page('<p>Approved ✓ — but queueing failed; the admin dashboard can re-send.</p>')
+}
+
+/**
  * Timing-safe check that `token` (raw, from the query string) matches `row`'s stored hash, on a
  * row that is still pending and not yet expired. Both sides of the comparison are 64-char hex
  * sha256 digests, but length is still guarded before `timingSafeEqual` (which throws on unequal
@@ -157,7 +169,15 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
       })
 
       if (decision === 'approve') {
-        await enqueueProposalApply(deps.enqueue, proposalId)
+        try {
+          await enqueueProposalApply(deps.enqueue, proposalId)
+        } catch {
+          // The transition above already committed — never un-approve on an enqueue failure,
+          // just alert and tell the clicker where the fix lives (best-effort alert, same as
+          // every other alert call site here: its own failure must never break the response).
+          await deps.alert('critical', 'apply_enqueue_failed', { proposalId }).catch(() => {})
+          return enqueueFailedPage()
+        }
       }
 
       return resultPage(decision)

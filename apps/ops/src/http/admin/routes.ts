@@ -1,5 +1,6 @@
 import { formatCents, PROPOSAL_TYPES, type ProposalType } from '@doge-buddy/core'
 import {
+  adminSessions,
   agentRuns,
   auditLog,
   orders,
@@ -22,9 +23,11 @@ import { SETTINGS_DEFAULTS, type Settings, type SettingKey, type WorkflowMode } 
 import {
   consumeLoginToken,
   createLoginToken,
+  hashSessionToken,
   LOGIN_SENDS_HOURLY_CAP,
   loginSendsLastHour,
   parseCookieHeader,
+  serializeLogoutCookie,
   serializeSessionCookie,
   SESSION_COOKIE,
   validateSession,
@@ -43,8 +46,15 @@ const PROPOSAL_STATUSES = proposalStatus.enumValues
  * `loadHealthStrip` — this function only formats and escapes (via html``) for display.
  */
 function renderHealthStrip(h: HealthStrip): RawHtml {
+  // Visible below-threshold call-out, distinct from the plain "Wallet: $x.xx" line above it: an
+  // operator scanning the strip should not have to do the < comparison against the settings page
+  // themselves to notice the wallet is running low.
+  const belowThreshold = h.walletCents !== null && h.walletCents < h.walletAlertThresholdCents
   return html`<section id="health-strip">
     <p>Wallet: ${h.walletCents === null ? 'n/a' : formatCents(h.walletCents)}</p>
+    ${belowThreshold
+      ? html`<p id="wallet-alert">wallet: ${formatCents(h.walletCents!)} (BELOW ALERT THRESHOLD ${formatCents(h.walletAlertThresholdCents)})</p>`
+      : html``}
     <p>Queue depth: ${h.queueDepth}</p>
     <p>Last webhook: ${h.lastWebhookAt ? h.lastWebhookAt.toISOString() : 'never'}</p>
     <p>Killswitch: ${h.killswitch ? 'ON' : 'OFF'}</p>
@@ -231,77 +241,108 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       },
     )
 
+    /**
+     * Catch-all wrapper for the four PUBLIC (unauthenticated) login routes below — same shape as
+     * the authed scope's `safeHandle` further down (generic 200 page instead of a leaking 500,
+     * best-effort `admin_route_error` alert), adapted for a scope with no natural per-request
+     * `entityId` to attach: these routes act on the login flow itself, not on any one DB row, so
+     * the alert detail just names the phase instead. A local, non-shared copy — the authed
+     * `safeHandle` closes over the authed-scope `layout` call sites' own page title ('Proposal'),
+     * which doesn't fit this scope's 'Admin login' pages.
+     */
+    async function safeHandleLogin(
+      phase: string,
+      reply: FastifyReply,
+      work: () => Promise<FastifyReply>,
+    ): Promise<FastifyReply> {
+      try {
+        return await work()
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        await deps.alert('warning', 'admin_route_error', { phase, error: message }).catch(() => {})
+        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Something went wrong.</p>`))
+      }
+    }
+
     fastify.get('/admin/login', async (_request, reply) => {
-      const body = layout(
-        'Admin login',
-        html`<form method="post" action="/admin/login"><button type="submit">Send me a login link</button></form>`,
-      )
-      return reply.code(200).type('text/html; charset=utf-8').send(body)
+      return safeHandleLogin('login-form', reply, async () => {
+        const body = layout(
+          'Admin login',
+          html`<form method="post" action="/admin/login"><button type="submit">Send me a login link</button></form>`,
+        )
+        return reply.code(200).type('text/html; charset=utf-8').send(body)
+      })
     })
 
     fastify.post('/admin/login', async (_request, reply) => {
-      if ((await loginSendsLastHour(deps.db)) >= LOGIN_SENDS_HOURLY_CAP) {
-        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Try again later.</p>`))
-      }
+      return safeHandleLogin('login-send', reply, async () => {
+        if ((await loginSendsLastHour(deps.db)) >= LOGIN_SENDS_HOURLY_CAP) {
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Try again later.</p>`))
+        }
 
-      const token = await createLoginToken(deps.db)
-      const delivered = await deps.notify({
-        title: 'Doge Buddy admin login',
-        body: 'Tap to log in (link valid 15 minutes).',
-        actions: [{ label: 'Log in', url: `${deps.adminBaseUrl}/admin/login/consume?t=${token}` }],
+        const token = await createLoginToken(deps.db)
+        const delivered = await deps.notify({
+          title: 'Doge Buddy admin login',
+          body: 'Tap to log in (link valid 15 minutes).',
+          actions: [{ label: 'Log in', url: `${deps.adminBaseUrl}/admin/login/consume?t=${token}` }],
+        })
+
+        if (!delivered) {
+          // Alerting already happened inside notify() on the failure path — nothing more to do
+          // here than tell the operator the link didn't go out.
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Could not send the link — notifications unconfigured or failing.</p>`))
+        }
+
+        await deps.db.insert(auditLog).values({
+          actor: 'system',
+          action: 'admin.login_link_sent',
+          entityType: 'admin',
+        })
+        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Link sent — check Telegram.</p>`))
       })
-
-      if (!delivered) {
-        // Alerting already happened inside notify() on the failure path — nothing more to do here
-        // than tell the operator the link didn't go out.
-        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Could not send the link — notifications unconfigured or failing.</p>`))
-      }
-
-      await deps.db.insert(auditLog).values({
-        actor: 'system',
-        action: 'admin.login_link_sent',
-        entityType: 'admin',
-      })
-      return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Link sent — check Telegram.</p>`))
     })
 
     fastify.get('/admin/login/consume', async (request, reply) => {
-      const { t } = request.query as { t?: string }
-      // NEVER mutates on GET: only a presence/shape check, so the confirm page can be rendered
-      // (and re-rendered on refresh) without burning the token — only the POST below consumes it.
-      if (t) {
-        // `t` is attacker-influenced (straight off the query string): built into the action URL
-        // via encodeURIComponent for URL-safety, then run through html``'s normal auto-escaping
-        // like any other interpolation — no raw() here, so it stays inert even if the encoding
-        // step were ever wrong. (Quoted attribute value per Task 1's discipline.)
-        const action = `/admin/login/consume?t=${encodeURIComponent(t)}`
-        const body = layout(
-          'Confirm login',
-          html`<form method="post" action="${action}"><button type="submit">Log in</button></form>`,
-        )
-        return reply.code(200).type('text/html; charset=utf-8').send(body)
-      }
-      return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>${LOGIN_INVALID_COPY}</p>`))
+      return safeHandleLogin('consume-form', reply, async () => {
+        const { t } = request.query as { t?: string }
+        // NEVER mutates on GET: only a presence/shape check, so the confirm page can be rendered
+        // (and re-rendered on refresh) without burning the token — only the POST below consumes it.
+        if (t) {
+          // `t` is attacker-influenced (straight off the query string): built into the action URL
+          // via encodeURIComponent for URL-safety, then run through html``'s normal auto-escaping
+          // like any other interpolation — no raw() here, so it stays inert even if the encoding
+          // step were ever wrong. (Quoted attribute value per Task 1's discipline.)
+          const action = `/admin/login/consume?t=${encodeURIComponent(t)}`
+          const body = layout(
+            'Confirm login',
+            html`<form method="post" action="${action}"><button type="submit">Log in</button></form>`,
+          )
+          return reply.code(200).type('text/html; charset=utf-8').send(body)
+        }
+        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>${LOGIN_INVALID_COPY}</p>`))
+      })
     })
 
     fastify.post('/admin/login/consume', async (request, reply) => {
-      const { t } = request.query as { t?: string }
-      const result = t ? await consumeLoginToken(deps.db, t) : null
-      if (!result) {
-        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>${LOGIN_INVALID_COPY}</p>`))
-      }
+      return safeHandleLogin('consume-submit', reply, async () => {
+        const { t } = request.query as { t?: string }
+        const result = t ? await consumeLoginToken(deps.db, t) : null
+        if (!result) {
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>${LOGIN_INVALID_COPY}</p>`))
+        }
 
-      await deps.db.insert(auditLog).values({
-        actor: 'owner',
-        action: 'admin.login',
-        entityType: 'admin',
+        await deps.db.insert(auditLog).values({
+          actor: 'owner',
+          action: 'admin.login',
+          entityType: 'admin',
+        })
+
+        return reply
+          .header('set-cookie', serializeSessionCookie(result.sessionToken))
+          .code(303)
+          .header('location', '/admin')
+          .send()
       })
-
-      return reply
-        .header('set-cookie', serializeSessionCookie(result.sessionToken))
-        .code(303)
-        .header('location', '/admin')
-        .send()
     })
 
     await fastify.register(async (authed) => {
@@ -601,13 +642,61 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             })
 
             if (decision === 'approve') {
-              await enqueueProposalApply(deps.enqueue, id)
+              try {
+                await enqueueProposalApply(deps.enqueue, id)
+              } catch {
+                // The transition + audit above already committed — never un-approve on an
+                // enqueue failure. Alert (best-effort, matching every other alert call site) and
+                // render an EXPLICIT page naming the gap, instead of the normal 303 to the detail
+                // page, so the click doesn't silently look like a healthy approve. Item 1c's
+                // resend-apply form on that detail page is the fix path.
+                await deps.alert('critical', 'apply_enqueue_failed', { proposalId: id }).catch(() => {})
+                return reply
+                  .code(200)
+                  .type('text/html; charset=utf-8')
+                  .send(
+                    layout(
+                      'Proposal',
+                      html`<p>Approved, but queueing the apply FAILED — use the Re-send button on this proposal.</p>`,
+                    ),
+                  )
+              }
             }
 
             return reply.code(303).header('location', `/admin/proposals/${id}`).send()
           })
         })
       }
+
+      // Item 1c: idempotent recovery for a row stuck in 'approved' because its original
+      // enqueueProposalApply call failed (the 1a/1b failure page points here). Re-checks the
+      // row's CURRENT status rather than trusting the page that linked here — a stale tab, a
+      // double-click, or a row that already got applied by the time this posts all land on the
+      // same guard. Only 'approved' re-sends; anything else (including a row that raced ahead to
+      // applying/applied/failed between page load and this POST) renders the same "Already
+      // handled" page the approve/reject routes use. Safe to repeat: enqueueProposalApply's
+      // singletonKey dedupes an already-queued job, and executeApplyProposal's status dispatch
+      // (run-apply.ts) makes re-entering an applying/applied row a no-op, never a double-apply.
+      authed.post('/admin/proposals/:id/resend-apply', async (request, reply) => {
+        const { id } = request.params as { id: string }
+        return safeHandle(id, reply, async () => {
+          const row = await lookupProposal(id)
+          if (!row || row.status !== 'approved') {
+            return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Already handled.</p>`))
+          }
+
+          await enqueueProposalApply(deps.enqueue, id)
+
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: 'proposal.apply_resent',
+            entityType: 'proposal',
+            entityId: id,
+          })
+
+          return reply.code(303).header('location', `/admin/proposals/${id}`).send()
+        })
+      })
 
       // Retires the operations runbook's raw SQL: the full orders ⋈ supplier_orders view, with
       // needs_attention rows pinned on top (their lastError + a recovery form each) and every
@@ -879,6 +968,34 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           })
 
           return reply.code(303).header('location', '/admin/settings').send()
+        })
+      })
+
+      // Item 4: deletes the CURRENT session row (re-hashing the same cookie the onRequest hook
+      // above just validated — no need to trust anything the client claims beyond the cookie
+      // itself), clears the cookie client-side, and bounces to the login page. A missing/already-
+      // gone cookie can't reach here at all (the onRequest hook above already 303'd it away), so
+      // `cookie` is always present — but `parseCookieHeader` still returns `| undefined` by type,
+      // so the delete is skipped rather than passed a bogus hash of `undefined` on that
+      // theoretically-unreachable branch.
+      authed.post('/admin/logout', async (request, reply) => {
+        return safeHandle('logout', reply, async () => {
+          const cookie = parseCookieHeader(request.headers.cookie, SESSION_COOKIE)
+          if (cookie) {
+            await deps.db.delete(adminSessions).where(eq(adminSessions.tokenHash, hashSessionToken(cookie)))
+          }
+
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: 'admin.logout',
+            entityType: 'admin',
+          })
+
+          return reply
+            .header('set-cookie', serializeLogoutCookie())
+            .code(303)
+            .header('location', '/admin/login')
+            .send()
         })
       })
 

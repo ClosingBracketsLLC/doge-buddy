@@ -3,8 +3,8 @@
 AI-managed dog supply dropshipping store. Hydrogen storefront + an autonomous
 ops service (sourcing, fulfillment, support, scoring agents).
 
-Design docs: `docs/superpowers/specs/`. Current phase: 4 (proposals + admin), **shipped on both
-tiers.** **Plan A (the proposal pipeline) is merged and live-verified** — a seeded proposal was
+Design docs: `docs/superpowers/specs/`. Current phase: 4 (proposals + admin). **Plan A (the
+proposal pipeline) is merged and live-verified** — a seeded proposal was
 approved by one-click link and became a real, fulfillable, published product on the store. **Plan
 B (admin surface) is merged** — a magic-link login (Telegram-delivered) gates a dashboard at
 `<ADMIN_BASE_URL>/admin` with proposals, orders, and settings pages; spec at

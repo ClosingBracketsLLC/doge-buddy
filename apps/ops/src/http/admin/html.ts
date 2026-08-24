@@ -38,13 +38,19 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): RawHt
 
 const NAV = ['', 'proposals', 'orders', 'tickets', 'runs', 'settings'] as const
 
+// Unconditional in every layout() call, including the pre-login pages: a logged-out viewer
+// clicking it just re-hits the authed onRequest gate (POST /admin/logout, not session-checked
+// here) and lands back on /admin/login, same as any other unauthed POST to an authed path — no
+// per-caller "am I authed" flag needed to keep this minimal.
+const LOGOUT_FORM = html`<form method="post" action="/admin/logout" style="display:inline"><button type="submit">Log out</button></form>`
+
 export function layout(title: string, body: RawHtml): string {
   const links = NAV.map((p) => {
     const href = p === '' ? '/admin' : `/admin/${p}`
     return html`<a href="${raw(href)}">${p === '' ? 'dashboard' : p}</a>`
   })
   return html`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>
-    <nav>${links}</nav>
+    <nav>${links} ${LOGOUT_FORM}</nav>
     <main>${body}</main>
   </body></html>`.value
 }

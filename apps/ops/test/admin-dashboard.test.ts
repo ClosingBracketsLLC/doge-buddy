@@ -208,6 +208,38 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     await app.close()
   })
 
+  // Item 6: the strip must call out a wallet balance below the configured alert threshold
+  // visibly, not just leave the operator to eyeball the raw number against the settings page.
+  it('6b. wallet below fulfillment.wallet_alert_threshold_cents renders a visible BELOW ALERT THRESHOLD indicator', async () => {
+    const getWalletBalance = vi.fn(async () => ({ availableCents: 500, frozenCents: 0 }))
+    const deps = makeDeps({ getWalletBalance })
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('BELOW ALERT THRESHOLD')
+    expect(res.body).toContain('$5.00') // availableCents = 500
+    expect(res.body).toContain('$20.00') // code default fulfillment.wallet_alert_threshold_cents = 2000
+
+    await app.close()
+  })
+
+  it('6c. wallet AT/above the alert threshold shows no indicator', async () => {
+    const getWalletBalance = vi.fn(async () => ({ availableCents: 2000, frozenCents: 0 }))
+    const deps = makeDeps({ getWalletBalance })
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).not.toContain('BELOW ALERT THRESHOLD')
+
+    await app.close()
+  })
+
   it('7. killswitch ON renders visibly on the dashboard', async () => {
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, admin: deps })

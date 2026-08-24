@@ -91,9 +91,28 @@ function renderDecisionForms(p: ProposalRow): RawHtml {
     </form>`
 }
 
+/**
+ * The Item 1c recovery form: shown ONLY for `status === 'approved'` (never
+ * pending/applying/applied/failed/rejected/expired) — posts to the idempotent
+ * `/admin/proposals/:id/resend-apply` route, which re-enqueues `proposal.apply` for a row that
+ * committed to 'approved' but whose original enqueue failed (or as a manual nudge if an operator
+ * just wants to be sure). Safe to click more than once: `enqueueProposalApply`'s `singletonKey`
+ * dedupes an already-queued job, and `executeApplyProposal`'s status dispatch makes re-entering
+ * an already-`applying`/`applied` row a no-op rather than a double-apply.
+ */
+function renderResendForm(p: ProposalRow): RawHtml {
+  const action = `/admin/proposals/${p.id}/resend-apply`
+  return html`<form method="post" action="${action}">
+    <button type="submit">Re-send apply</button>
+  </form>`
+}
+
 export function renderProposalDetail(p: ProposalRow): RawHtml {
   const preview =
     p.type === 'new_listing' ? renderNewListingPreview(p.payload as NewListingPayload) : renderGenericPayload(p.payload)
+
+  const actions =
+    p.status === 'pending' ? renderDecisionForms(p) : p.status === 'approved' ? renderResendForm(p) : html``
 
   return html`<h1>Proposal ${p.id}</h1>
     <p>Type: ${p.type}</p>
@@ -101,5 +120,5 @@ export function renderProposalDetail(p: ProposalRow): RawHtml {
     <p>Summary: ${p.summary}</p>
     <p>Created: ${p.createdAt.toISOString()}</p>
     <p>Expires: ${p.expiresAt.toISOString()}</p>
-    ${preview} ${p.status === 'pending' ? renderDecisionForms(p) : html``}`
+    ${preview} ${actions}`
 }

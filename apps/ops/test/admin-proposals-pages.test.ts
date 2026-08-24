@@ -204,7 +204,7 @@ describe('proposals queue + detail pages', () => {
     await app.close()
   })
 
-  it('6. detail for an applied row shows no decision forms', async () => {
+  it('6. detail for an applied row shows no decision or resend forms (only the layout\'s own logout form)', async () => {
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
     const row = await seedProposal({ status: 'applied' })
@@ -213,8 +213,30 @@ describe('proposals queue + detail pages', () => {
     const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
 
     expect(res.statusCode).toBe(200)
-    expect(res.body).not.toContain('<form')
+    // Item 4 adds one always-present logout form to every authed page's nav, so this can no
+    // longer assert zero `<form` tags on the page — it asserts the proposal itself offers none.
+    expect(res.body).not.toContain(`action="/admin/proposals/${row.id}/approve"`)
+    expect(res.body).not.toContain(`action="/admin/proposals/${row.id}/reject"`)
+    expect(res.body).not.toContain(`action="/admin/proposals/${row.id}/resend-apply"`)
     expect(res.body).not.toContain('name="payload"')
+
+    await app.close()
+  })
+
+  it('6b. detail for an approved row shows exactly one resend-apply form, not the pending decision forms', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const row = await seedProposal({ status: 'approved' })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain(`action="/admin/proposals/${row.id}/resend-apply"`)
+    expect(res.body).not.toContain(`action="/admin/proposals/${row.id}/approve"`)
+    expect(res.body).not.toContain(`action="/admin/proposals/${row.id}/reject"`)
+    const resendFormCount = res.body.split(`action="/admin/proposals/${row.id}/resend-apply"`).length - 1
+    expect(resendFormCount).toBe(1)
 
     await app.close()
   })

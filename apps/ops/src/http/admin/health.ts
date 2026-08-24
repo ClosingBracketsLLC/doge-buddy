@@ -5,6 +5,9 @@ import type { AdminDeps } from './routes.ts'
 export interface HealthStrip {
   /** null => 'n/a' on the page: no getWalletBalance dep wired, or the live call threw. */
   walletCents: number | null
+  /** The `fulfillment.wallet_alert_threshold_cents` setting, read fresh every load — the strip
+   * renders a visible below-threshold indicator when `walletCents` is known and under this. */
+  walletAlertThresholdCents: number
   /** pgboss.job rows in state IN ('created','retry','active'); 0 if the pgboss schema doesn't exist yet. */
   queueDepth: number
   lastWebhookAt: Date | null
@@ -52,23 +55,33 @@ async function loadQueueDepth(db: AdminDeps['db']): Promise<number> {
 
 /** The dashboard's top-of-page health strip: wallet, queue depth, last webhook, the three kill switches, pending proposals. */
 export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
-  const [walletCents, queueDepth, lastWebhookRows, killswitch, fulfillmentEnabled, pausedForFunds, pendingRows] =
-    await Promise.all([
-      loadWalletCents(deps),
-      loadQueueDepth(deps.db),
-      deps.db
-        .select({ receivedAt: webhookEvents.receivedAt })
-        .from(webhookEvents)
-        .orderBy(desc(webhookEvents.receivedAt))
-        .limit(1),
-      deps.settings.get('killswitch.global'),
-      deps.settings.get('workflow.fulfillment.enabled'),
-      deps.settings.get('fulfillment.paused_for_funds'),
-      deps.db.select({ value: count() }).from(proposals).where(eq(proposals.status, 'pending')),
-    ])
+  const [
+    walletCents,
+    walletAlertThresholdCents,
+    queueDepth,
+    lastWebhookRows,
+    killswitch,
+    fulfillmentEnabled,
+    pausedForFunds,
+    pendingRows,
+  ] = await Promise.all([
+    loadWalletCents(deps),
+    deps.settings.get('fulfillment.wallet_alert_threshold_cents'),
+    loadQueueDepth(deps.db),
+    deps.db
+      .select({ receivedAt: webhookEvents.receivedAt })
+      .from(webhookEvents)
+      .orderBy(desc(webhookEvents.receivedAt))
+      .limit(1),
+    deps.settings.get('killswitch.global'),
+    deps.settings.get('workflow.fulfillment.enabled'),
+    deps.settings.get('fulfillment.paused_for_funds'),
+    deps.db.select({ value: count() }).from(proposals).where(eq(proposals.status, 'pending')),
+  ])
 
   return {
     walletCents,
+    walletAlertThresholdCents,
     queueDepth,
     lastWebhookAt: lastWebhookRows[0]?.receivedAt ?? null,
     killswitch,

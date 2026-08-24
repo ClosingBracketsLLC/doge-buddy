@@ -55,4 +55,39 @@ describe('admin auth core', () => {
     expect(parseCookieHeader(undefined, 'db_admin')).toBeUndefined()
     expect(parseCookieHeader('a=1', 'db_admin')).toBeUndefined()
   })
+
+  // Item 2: createLoginToken must purge expired admin_sessions rows before inserting its own —
+  // bounding unauthenticated login-row growth to one 15-minute (LOGIN_TOKEN_TTL_MS) window,
+  // rather than letting every anonymous POST /admin/login leave a permanent row behind.
+  it('createLoginToken purges an expired admin_sessions row before minting a new one', async () => {
+    const staleToken = await createLoginToken(db)
+    await db.update(adminSessions).set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(adminSessions.tokenHash, hashLoginToken(staleToken)))
+
+    const [staleStillThere] = await db.select().from(adminSessions)
+      .where(eq(adminSessions.tokenHash, hashLoginToken(staleToken)))
+    expect(staleStillThere).toBeDefined()
+
+    await createLoginToken(db)
+
+    const [staleGone] = await db.select().from(adminSessions)
+      .where(eq(adminSessions.tokenHash, hashLoginToken(staleToken)))
+    expect(staleGone).toBeUndefined()
+  })
+
+  // Item 5: the `!sessionToken` early return must run BEFORE the opportunistic purge — an
+  // unauthenticated probe (every request with no cookie at all) must never perform a DB write.
+  it('validateSession(undefined) short-circuits before the purge — an expired row survives the probe', async () => {
+    const staleToken = await createLoginToken(db)
+    await db.update(adminSessions).set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(adminSessions.tokenHash, hashLoginToken(staleToken)))
+
+    expect(await validateSession(db, undefined)).toBe(false)
+
+    const [staleStillThere] = await db.select().from(adminSessions)
+      .where(eq(adminSessions.tokenHash, hashLoginToken(staleToken)))
+    expect(staleStillThere).toBeDefined()
+
+    await db.delete(adminSessions).where(eq(adminSessions.tokenHash, hashLoginToken(staleToken)))
+  })
 })
