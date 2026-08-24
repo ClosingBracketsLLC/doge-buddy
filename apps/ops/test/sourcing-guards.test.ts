@@ -25,6 +25,9 @@ describe('guards', () => {
       ['<p>Our data : verified from three labs</p>', null],
       ['<p>Our data\n: verified</p>', null],
       ['<p>See the data on our site</p>', null],
+      ['<p>Our metadata: fields are verified</p>', null],
+      ['<p>Product metadata: verified across three independent labs</p>', null],
+      ['<p>See userdata: handled securely by our vendor</p>', null],
     ])('accepts %s', (html, expected) => expect(validateDescriptionHtml(html)).toBe(expected))
     it.each([
       '<script>alert(1)</script>',
@@ -42,6 +45,8 @@ describe('guards', () => {
       '<p>java\nscript:alert(1)</p>',
       '<p>java\tscript:x</p>',
       '<ѕcript>x</ѕcript>',
+      '<p>java​script:alert(1)</p>',  // zero-width space U+200B
+      '<p>da​ta:text/html,x</p>',   // zero-width space U+200B
     ])('rejects %s', (html) => expect(validateDescriptionHtml(html)).not.toBeNull())
     it('rejects tight less-than comparisons by design — descriptionHtml is real HTML, author must escape < as &lt;', () => {
       expect(validateDescriptionHtml('<p>works when a<b in size</p>')).not.toBeNull()

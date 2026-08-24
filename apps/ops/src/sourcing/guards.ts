@@ -98,13 +98,18 @@ function normalizeForSchemeDetection(html: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, ' ')
 
+  // Strip Unicode format characters (defense-in-depth: defeats zero-width spaces like U+200B)
+  // This only touches the throwaway normalized string used for scheme detection
+  normalized = normalized.replace(/\p{Cf}/gu, '')
+
   return normalized
 }
 
 /** Allowlist validator per spec §Stage 4.3. Returns null when valid, else a human-readable reason. */
 export function validateDescriptionHtml(html: string): string | null {
-  // Check for javascript: or data: anywhere (case-insensitive, literal)
-  if (/javascript:|data:/i.test(html)) {
+  // Check for javascript: or data: anywhere (case-insensitive, literal, with word boundaries)
+  // \b prevents compound words like "metadata:" from matching "data:"
+  if (/\bjavascript:|\bdata:/i.test(html)) {
     return 'HTML contains javascript: or data: URLs'
   }
 
@@ -112,11 +117,13 @@ export function validateDescriptionHtml(html: string): string | null {
   const normalized = normalizeForSchemeDetection(html)
   // javascript with whitespace tolerance between letters (catches java\nscript:, &#106;avascript:, etc)
   // This letter sequence is never innocent in dog-product copy
-  if (/j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*:/i.test(normalized)) {
+  // Word boundary prevents compound words like "javascript" substring in other contexts
+  if (/\bj\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*:/i.test(normalized)) {
     return 'HTML contains encoded or whitespace-obfuscated javascript: URLs'
   }
   // data contiguous only — a space before the colon means it's prose ("data : verified"), not a scheme
-  if (/data:/i.test(normalized)) {
+  // Word boundary prevents compound words like "metadata:" or "userdata:" from matching
+  if (/\bdata:/i.test(normalized)) {
     return 'HTML contains encoded or whitespace-obfuscated data: URLs'
   }
 
