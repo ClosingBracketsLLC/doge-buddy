@@ -42,6 +42,9 @@ const CJ_SIGNATURE_HEADERS = ['sign', 'cj-signature', 'x-cj-signature', 'signatu
 
 const CJ_WEBHOOK_TYPES: Record<string, SupplierWebhookEvent['type']> = {
   ORDER: 'order',
+  // Observed live 2026-08-23: CJ delivers `LOGISTIC` (singular) — the plural is kept as a
+  // defensive alias since the docs spell it that way.
+  LOGISTIC: 'logistics',
   LOGISTICS: 'logistics',
   STOCK: 'stock',
   PRODUCT: 'product',

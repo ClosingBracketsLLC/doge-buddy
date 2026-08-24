@@ -103,19 +103,17 @@ Both dispute endpoints require an order that has actually been **paid** — an u
 - The signature header is plain **`sign`** — not `cj-signature`/`x-cj-signature`/`signature`
   as originally guessed. Value observed base64, 32 bytes decoded, consistent with the
   documented `base64(hmacSHA256(openId, rawBody))`.
-- The probe body is a synthetic ORDER event: `{messageId, messageType: "UPDATE", openId,
-  params: {cjOrderId, createDate, deliveryDate, orderNum, orderStatus, logisticName,
-  trackNumber, …}}` with `"test"` values — and **no top-level `type` field**, unlike the docs
-  example. If real events also omit `type`, `parseWebhook` classifies them `other` and the
-  router won't treat them as order events — check the first real event's stored payload in
-  `webhook_events`.
+- Registration + the full delivery chain were **proven live 2026-08-23**: `/webhook/set`
+  succeeded once the `sign` header was checked, and real sandbox-order events flowed CJ →
+  signed webhook → HMAC verified → `webhook_events` → queue → processed. Real events carry a
+  top-level `type` — but the logistics value is **`LOGISTIC`** (singular), not the docs'
+  `LOGISTICS`; the adapter maps both. (The initial rejected probe had no `type` at all —
+  probe shape ≠ event shape.)
 - Rejected deliveries are captured to `audit_log` (`webhook.cj.rejected`: sanitized headers,
   bounded body preview, sha256) — the scheme is read off the audit trail, never guessed.
 
 ## Still unverified
 
-- **The HMAC formula end-to-end** — the header is confirmed; the key/formula matches docs but
-  passes live proof only when `/webhook/set` registration succeeds against the fixed endpoint.
 - `lastMileTrackNumber` never appeared on the observed sandbox order; presumed carrier-dependent.
 - `openDispute` / `getDispute` request bodies — not exercised by the contract suite.
-- Real (non-probe) webhook event shape — incl. whether the top-level `type` field exists.
+- STOCK / PRODUCT webhook event shapes (never subscribed or observed).

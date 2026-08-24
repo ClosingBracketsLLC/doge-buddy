@@ -406,6 +406,14 @@ describe('CJSupplierAdapter.verifyWebhook', () => {
 })
 
 describe('CJSupplierAdapter.parseWebhook', () => {
+  it('maps a LOGISTIC event (singular — the spelling CJ actually delivers, observed live 2026-08-23)', async () => {
+    const { adapter } = await makeAdapter(() => ok({}))
+    const body = { type: 'LOGISTIC', messageId: 'm-0', params: { orderId: 'cjo-1' } }
+    const rawBody = Buffer.from(JSON.stringify(body))
+
+    expect(adapter.parseWebhook(rawBody).type).toBe('logistics')
+  })
+
   it('maps a LOGISTICS event using messageId as externalEventId', async () => {
     const { adapter } = await makeAdapter(() => ok({}))
     const body = { type: 'LOGISTICS', messageId: 'm-1', orderId: 'cjo-1' }
