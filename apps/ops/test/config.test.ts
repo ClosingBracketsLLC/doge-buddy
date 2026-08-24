@@ -8,7 +8,6 @@ describe('loadConfig', () => {
       databaseUrl: 'postgres://u:p@h:5432/d',
       port: 3001,
       host: '0.0.0.0',
-      supplier: 'mock',
       fulfillmentSupplier: 'mock',
     })
   })
@@ -19,9 +18,8 @@ describe('loadConfig', () => {
     expect(() => loadConfig({})).toThrow(/DATABASE_URL/)
   })
 
-  it('defaults supplier to mock with no shopify/cj blocks', () => {
+  it('defaults fulfillmentSupplier to mock with no shopify/cj blocks', () => {
     const c = loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' })
-    expect(c.supplier).toBe('mock')
     expect(c.fulfillmentSupplier).toBe('mock')
     expect(c.shopify).toBeUndefined()
     expect(c.cj).toBeUndefined()
@@ -61,33 +59,15 @@ describe('loadConfig', () => {
     expect(c.cj).toEqual({ apiKey: 'api-key', openId: 'open-id' })
   })
 
-  it('accepts SUPPLIER=cj when the full CJ pair is set', () => {
+  it('ignores the retired SUPPLIER env var entirely (superseded by FULFILLMENT_SUPPLIER)', () => {
+    // SUPPLIER used to select the adapter before FULFILLMENT_SUPPLIER replaced it; it must now
+    // neither validate nor surface — a leftover SUPPLIER=cj in an old .env with no CJ creds
+    // must not fail startup.
     const c = loadConfig({
       DATABASE_URL: 'postgres://u:p@h:5432/d',
       SUPPLIER: 'cj',
-      CJ_API_KEY: 'k',
-      CJ_OPEN_ID: 'o',
     })
-    expect(c.supplier).toBe('cj')
-    expect(c.cj).toEqual({ apiKey: 'k', openId: 'o' })
-  })
-
-  it('throws mentioning CJ_API_KEY when SUPPLIER=cj without the CJ pair', () => {
-    expect(() =>
-      loadConfig({
-        DATABASE_URL: 'postgres://u:p@h:5432/d',
-        SUPPLIER: 'cj',
-      }),
-    ).toThrow(/CJ_API_KEY/)
-  })
-
-  it('throws when SUPPLIER is not mock or cj', () => {
-    expect(() =>
-      loadConfig({
-        DATABASE_URL: 'postgres://u:p@h:5432/d',
-        SUPPLIER: 'bogus',
-      }),
-    ).toThrow()
+    expect('supplier' in c).toBe(false)
   })
 
   it('accepts FULFILLMENT_SUPPLIER=cj when the full CJ pair is set', () => {
