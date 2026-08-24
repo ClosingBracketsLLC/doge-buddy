@@ -22,6 +22,9 @@ describe('guards', () => {
       ['<h2>Specs</h2><p>10cm</p>', null],
       ['<p>price < 100 dogs</p>', null],
       ['<p>rated <3 by pups</p>', null],
+      ['<p>Our data : verified from three labs</p>', null],
+      ['<p>Our data\n: verified</p>', null],
+      ['<p>See the data on our site</p>', null],
     ])('accepts %s', (html, expected) => expect(validateDescriptionHtml(html)).toBe(expected))
     it.each([
       '<script>alert(1)</script>',
@@ -40,5 +43,8 @@ describe('guards', () => {
       '<p>java\tscript:x</p>',
       '<ѕcript>x</ѕcript>',
     ])('rejects %s', (html) => expect(validateDescriptionHtml(html)).not.toBeNull())
+    it('rejects tight less-than comparisons by design — descriptionHtml is real HTML, author must escape < as &lt;', () => {
+      expect(validateDescriptionHtml('<p>works when a<b in size</p>')).not.toBeNull()
+    })
   })
 })

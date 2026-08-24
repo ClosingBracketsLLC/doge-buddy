@@ -66,38 +66,30 @@ export function htmlToText(html: string): string {
   return text
 }
 
-/** Normalize HTML for scheme detection: decode entities, strip whitespace, lowercase. */
+/** Normalize HTML for scheme detection: decode entities (single-pass, matching browser semantics). */
 function normalizeForSchemeDetection(html: string): string {
   let normalized = html
 
-  // Decode numeric entities (decimal)
+  // Decode numeric entities (decimal) — single-pass by design, so &amp;#106; stays inert as text
   normalized = normalized.replace(/&#(\d+);/g, (_, d) => {
-    try {
-      const codePoint = Number(d)
-      // Guard against NaN or huge codepoints
-      if (isNaN(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
-        return ''
-      }
-      return String.fromCharCode(codePoint)
-    } catch {
+    const codePoint = Number(d)
+    // Regex \d+ guarantees parseable input; codepoint validation guards against huge values
+    if (codePoint < 0 || codePoint > 0x10ffff) {
       return ''
     }
+    return String.fromCharCode(codePoint)
   })
 
-  // Decode numeric entities (hex)
+  // Decode numeric entities (hex) — single-pass by design
   normalized = normalized.replace(/&#x([0-9a-f]+);/gi, (_, h) => {
-    try {
-      const codePoint = parseInt(h, 16)
-      if (isNaN(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
-        return ''
-      }
-      return String.fromCharCode(codePoint)
-    } catch {
+    const codePoint = parseInt(h, 16)
+    if (codePoint < 0 || codePoint > 0x10ffff) {
       return ''
     }
+    return String.fromCharCode(codePoint)
   })
 
-  // Decode the 6 named entities
+  // Decode the 6 named entities — single-pass by design
   normalized = normalized
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -105,12 +97,6 @@ function normalizeForSchemeDetection(html: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, ' ')
-
-  // Strip all whitespace
-  normalized = normalized.replace(/\s+/g, '')
-
-  // Lowercase
-  normalized = normalized.toLowerCase()
 
   return normalized
 }
@@ -122,10 +108,16 @@ export function validateDescriptionHtml(html: string): string | null {
     return 'HTML contains javascript: or data: URLs'
   }
 
-  // Check for javascript: or data: via encoded entities and whitespace evasion
+  // Check for javascript: or data: via encoded entities, with targeted whitespace tolerance
   const normalized = normalizeForSchemeDetection(html)
-  if (/javascript:|data:/.test(normalized)) {
-    return 'HTML contains encoded or whitespace-obfuscated javascript: or data: URLs'
+  // javascript with whitespace tolerance between letters (catches java\nscript:, &#106;avascript:, etc)
+  // This letter sequence is never innocent in dog-product copy
+  if (/j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*:/i.test(normalized)) {
+    return 'HTML contains encoded or whitespace-obfuscated javascript: URLs'
+  }
+  // data contiguous only — a space before the colon means it's prose ("data : verified"), not a scheme
+  if (/data:/i.test(normalized)) {
+    return 'HTML contains encoded or whitespace-obfuscated data: URLs'
   }
 
   // Allowed tags
