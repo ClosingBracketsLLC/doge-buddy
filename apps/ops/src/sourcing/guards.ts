@@ -46,12 +46,45 @@ export function findClaimViolations(...texts: (string | null | undefined)[]): st
   return violations
 }
 
-/** Strips tags/entities to plain text for guard scans (no sanitizing — scanning only). */
+/**
+ * Decodes numeric decimal (`&#99;`) and hex (`&#x63;`) character references — one pass each, so
+ * `&amp;#99;` stays inert as text (only its `&amp;` is a named entity; the `#99;` is left literal
+ * here and the caller's named-entity pass runs AFTER this, never re-feeding a fresh `&#…`). Range
+ * guards reject codepoints <0 or >0x10FFFF (and non-finite ones) safely rather than crashing on a
+ * huge value like `&#999999999;`. Shared by htmlToText (FIX C3) and normalizeForSchemeDetection.
+ */
+function decodeNumericEntities(text: string): string {
+  return text
+    .replace(/&#(\d+);/g, (_, d) => {
+      const codePoint = Number(d)
+      if (!Number.isFinite(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        return ''
+      }
+      return String.fromCodePoint(codePoint)
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => {
+      const codePoint = parseInt(h, 16)
+      if (!Number.isFinite(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        return ''
+      }
+      return String.fromCodePoint(codePoint)
+    })
+}
+
+/**
+ * Strips tags/entities to plain text for guard scans (no sanitizing — scanning only). Decodes
+ * numeric/hex character references as well as the 6 named entities so the Stage 4 claims scrubber
+ * and category re-check see what the storefront/admin preview will actually render — otherwise
+ * agent copy like `<p>Instantly &#99;ures &#97;nxiety</p>` slips past both scans as literal
+ * entities while rendering the forbidden claim live (FIX C3).
+ */
 export function htmlToText(html: string): string {
   // Strip all tags
   let text = html.replace(/<[^>]*>/g, ' ')
 
-  // Decode the 6 entities
+  // Decode numeric/hex character references first, then the 6 named entities (this ordering keeps
+  // `&amp;#99;` literal — see decodeNumericEntities' note).
+  text = decodeNumericEntities(text)
   text = text
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -68,26 +101,9 @@ export function htmlToText(html: string): string {
 
 /** Normalize HTML for scheme detection: decode entities (single-pass, matching browser semantics). */
 function normalizeForSchemeDetection(html: string): string {
-  let normalized = html
-
-  // Decode numeric entities (decimal) — single-pass by design, so &amp;#106; stays inert as text
-  normalized = normalized.replace(/&#(\d+);/g, (_, d) => {
-    const codePoint = Number(d)
-    // Regex \d+ guarantees parseable input; codepoint validation guards against huge values
-    if (codePoint < 0 || codePoint > 0x10ffff) {
-      return ''
-    }
-    return String.fromCharCode(codePoint)
-  })
-
-  // Decode numeric entities (hex) — single-pass by design
-  normalized = normalized.replace(/&#x([0-9a-f]+);/gi, (_, h) => {
-    const codePoint = parseInt(h, 16)
-    if (codePoint < 0 || codePoint > 0x10ffff) {
-      return ''
-    }
-    return String.fromCharCode(codePoint)
-  })
+  // Decode numeric/hex character references (single-pass by design, so &amp;#106; stays inert as
+  // text), then the 6 named entities.
+  let normalized = decodeNumericEntities(html)
 
   // Decode the 6 named entities — single-pass by design
   normalized = normalized

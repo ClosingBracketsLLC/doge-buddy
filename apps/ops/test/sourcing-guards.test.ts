@@ -16,6 +16,28 @@ describe('guards', () => {
   it('htmlToText strips tags for scanning', () => {
     expect(htmlToText('<p>anxiety <strong>relief</strong></p>')).toBe('anxiety relief')
   })
+  describe('FIX C3: htmlToText decodes numeric/hex entities so the claims + category scans see them', () => {
+    it('decodes decimal and hex character references', () => {
+      expect(htmlToText('&#99;at &#x64;og')).toBe('cat dog')
+    })
+    it('single-pass safety: &amp;#99; stays literal, does not double-decode into "c"', () => {
+      expect(htmlToText('&amp;#99;')).toBe('&#99;')
+    })
+    it('does not crash on an out-of-range numeric reference', () => {
+      expect(() => htmlToText('<p>&#999999999;ok</p>')).not.toThrow()
+    })
+    it('findClaimViolations catches a claim term hidden behind decimal entities', () => {
+      // '<p>&#99;ures &#97;nxiety</p>' -> 'cures anxiety'; 'cures' is a disallowed claim phrase.
+      expect(findClaimViolations(htmlToText('<p>&#99;ures &#97;nxiety</p>'))).toContain('cures')
+    })
+    it('matchExcludedCategory catches an excluded term hidden behind decimal entities', () => {
+      // Same decoded text — 'anxiety' is an excluded-category term.
+      expect(matchExcludedCategory(htmlToText('<p>&#99;ures &#97;nxiety</p>'))).toBe('anxiety')
+    })
+    it('matchExcludedCategory catches an excluded term hidden behind a hex entity', () => {
+      expect(matchExcludedCategory(htmlToText('<p>&#x63;alming bed</p>'))).toBe('calming')
+    })
+  })
   describe('validateDescriptionHtml', () => {
     it.each([
       ['<p>Good <strong>toy</strong></p><ul><li>durable</li></ul>', null],
