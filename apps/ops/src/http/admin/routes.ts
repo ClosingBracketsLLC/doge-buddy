@@ -1,6 +1,7 @@
 import { formatCents, PROPOSAL_TYPES, type ProposalType } from '@doge-buddy/core'
 import {
   adminSessions,
+  agentRunEvents,
   agentRuns,
   auditLog,
   orders,
@@ -11,7 +12,7 @@ import {
   supportTickets,
   type createDb,
 } from '@doge-buddy/db'
-import { and, desc, eq, lt, ne } from 'drizzle-orm'
+import { and, asc, desc, eq, lt, ne } from 'drizzle-orm'
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { FULFILLMENT_RETRY_OPTS } from '../../fulfillment/run-place-order.ts'
 import { applyTransition, IllegalTransitionError, StaleStatusError } from '../../fulfillment/transitions.ts'
@@ -36,6 +37,7 @@ import { loadHealthStrip, type HealthStrip } from './health.ts'
 import { html, layout, raw, type RawHtml } from './html.ts'
 import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
 import { renderProposalDetail, renderProposalRow } from './render-proposal.ts'
+import { renderRunDetail, renderRunRow } from './render-run.ts'
 
 const PROPOSAL_STATUSES = proposalStatus.enumValues
 
@@ -395,7 +397,16 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       authed.get('/admin/runs', async (_request, reply) => {
         return safeHandle('runs', reply, async () => {
           const rows = await deps.db
-            .select({ id: agentRuns.id, workflow: agentRuns.workflow, status: agentRuns.status, createdAt: agentRuns.createdAt })
+            .select({
+              id: agentRuns.id,
+              workflow: agentRuns.workflow,
+              status: agentRuns.status,
+              createdAt: agentRuns.createdAt,
+              totalCostUsd: agentRuns.totalCostUsd,
+              modelUsage: agentRuns.modelUsage,
+              numTurns: agentRuns.numTurns,
+              finishedAt: agentRuns.finishedAt,
+            })
             .from(agentRuns)
             .orderBy(desc(agentRuns.createdAt))
             .limit(100)
@@ -405,18 +416,34 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
               ? html`<p>No agent runs yet — Phase 5.</p>`
               : html`<table>
                   <tbody>
-                    ${rows.map(
-                      (r) => html`<tr>
-                        <td>${r.id}</td>
-                        <td>${r.workflow}</td>
-                        <td>${r.status}</td>
-                        <td>${r.createdAt.toISOString()}</td>
-                      </tr>`,
-                    )}
+                    ${rows.map(renderRunRow)}
                   </tbody>
                 </table>`
 
           return reply.code(200).type('text/html; charset=utf-8').send(layout('Runs', body))
+        })
+      })
+
+      // Task 15: the run detail page. `safeHandle` is what turns a non-UUID `:id` (Postgres
+      // rejects it with "invalid input syntax for type uuid" on the SELECT below) into the
+      // generic degraded page instead of a 500 that echoes the query back at the client — same
+      // defense-in-depth as /admin/proposals/:id. `events` is loaded oldest-first (`asc(seq)`) so
+      // the transcript reads top-to-bottom in execution order.
+      authed.get('/admin/runs/:id', async (request, reply) => {
+        const { id } = request.params as { id: string }
+        return safeHandle(id, reply, async () => {
+          const [run] = await deps.db.select().from(agentRuns).where(eq(agentRuns.id, id))
+          if (!run) {
+            return reply.code(200).type('text/html; charset=utf-8').send(layout('Run', html`<p>Not found.</p>`))
+          }
+
+          const events = await deps.db
+            .select()
+            .from(agentRunEvents)
+            .where(eq(agentRunEvents.runId, id))
+            .orderBy(asc(agentRunEvents.seq))
+
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Run', renderRunDetail(run, events)))
         })
       })
 

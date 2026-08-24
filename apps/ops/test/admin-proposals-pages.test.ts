@@ -256,4 +256,45 @@ describe('proposals queue + detail pages', () => {
 
     await app.close()
   })
+
+  // Task 15: the "Description (as it will appear)" section. A descriptionHtml that passes the
+  // Task 6 allowlist (validateDescriptionHtml re-run at render time) renders raw — an approver
+  // needs to see real formatting, not escaped tag soup.
+  it('8. a valid allowlisted descriptionHtml renders its <strong> tag RAW', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const payload = { ...VALID_NEW_LISTING_PAYLOAD, descriptionHtml: '<p>A <strong>fine</strong> widget.</p>' }
+    const row = await seedProposal({ payload })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Description (as it will appear)')
+    expect(res.body).toContain('<strong>fine</strong>')
+
+    await app.close()
+  })
+
+  // THE REGRESSION ASSERTION: a descriptionHtml that does NOT pass the allowlist (e.g. a
+  // Phase-4-era proposal that never validated at submit, or an outright <script> injection) must
+  // NEVER reach raw() — it renders escaped, inside a <pre>, with a visible failure note. This is
+  // the only new raw() call this task adds, and re-validating here at render time is what keeps
+  // it unreachable for anything the allowlist wouldn't pass.
+  it('9. a <script> descriptionHtml renders ESCAPED with the failed-validation note, never as live markup', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const payload = { ...VALID_NEW_LISTING_PAYLOAD, descriptionHtml: '<script>alert(document.cookie)</script>' }
+    const row = await seedProposal({ payload })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('failed HTML validation — showing source')
+    expect(res.body).toContain('&lt;script&gt;')
+    expect(res.body).not.toContain('<script>alert(document.cookie)</script>')
+
+    await app.close()
+  })
 })

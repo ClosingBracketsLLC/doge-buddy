@@ -1,6 +1,7 @@
 import { formatCents, type NewListingPayload } from '@doge-buddy/core'
 import type { proposals } from '@doge-buddy/db'
-import { html, type RawHtml } from './html.ts'
+import { validateDescriptionHtml } from '../../sourcing/guards.ts'
+import { html, raw, type RawHtml } from './html.ts'
 
 export type ProposalRow = typeof proposals.$inferSelect
 export type ProposalListRow = Pick<ProposalRow, 'id' | 'type' | 'status' | 'summary' | 'createdAt' | 'expiresAt'>
@@ -21,11 +22,39 @@ export function renderProposalRow(p: ProposalListRow): RawHtml {
 }
 
 /**
+ * "Description (as it will appear)" section (Task 15). `descriptionHtml` is stored on the
+ * proposal payload but, until now, was never rendered anywhere for an approver to see before
+ * approval — this is the first surface that shows what will actually go live. SECURITY:
+ * `validateDescriptionHtml` (Task 6's tag/attribute allowlist) is RE-RUN here, at render time,
+ * rather than trusted from submit time — a manual/Phase-4-era proposal never passed it at submit
+ * at all. Only when it validates (`=== null`) does this reach `raw()`; that re-validation is what
+ * keeps `raw()` unreachable for anything the allowlist wouldn't pass. This is the ONLY new
+ * `raw()` call in this file (or anywhere in this task) — an invalid descriptionHtml (including an
+ * outright `<script>` injection) falls back to `esc()`-by-default inside a `<pre>` (the plain
+ * string interpolation below), with a visible failure note.
+ */
+function renderDescriptionSection(descriptionHtml: string): RawHtml {
+  const invalidReason = validateDescriptionHtml(descriptionHtml)
+  if (invalidReason === null) {
+    return html`<section id="description-preview">
+      <h3>Description (as it will appear)</h3>
+      <div class="description-html">${raw(descriptionHtml)}</div>
+    </section>`
+  }
+  return html`<section id="description-preview">
+    <h3>Description (as it will appear)</h3>
+    <p style="color:red">failed HTML validation — showing source</p>
+    <pre>${descriptionHtml}</pre>
+  </section>`
+}
+
+/**
  * `new_listing`'s typed "listing preview with images": title, category, delivery window, one
- * <img> per imageUrl (src escaped like any other interpolation), and a SKU/price/cost table
- * (formatCents for both money columns). `payload` is cast, not zod-parsed — a proposal that made
- * it into the DB already passed PAYLOAD_SCHEMAS at submit time, and this renderer's job is
- * display, not re-validation.
+ * <img> per imageUrl (src escaped like any other interpolation), a SKU/price/cost table
+ * (formatCents for both money columns), and the description preview above. `payload` is cast, not
+ * zod-parsed — a proposal that made it into the DB already passed PAYLOAD_SCHEMAS at submit time,
+ * and this renderer's job is display, not re-validation (descriptionHtml is the one exception,
+ * per renderDescriptionSection's own doc comment).
  */
 function renderNewListingPreview(payload: NewListingPayload): RawHtml {
   return html`<section>
@@ -51,6 +80,7 @@ function renderNewListingPreview(payload: NewListingPayload): RawHtml {
         )}
       </tbody>
     </table>
+    ${renderDescriptionSection(payload.descriptionHtml)}
   </section>`
 }
 
