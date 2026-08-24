@@ -242,4 +242,54 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
 
     await app.close()
   })
+
+  it('9. malformed (non-UUID) proposalId on GET -> 200 friendly page, identical body, no throw, alerted', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+
+    // Known-bad-token friendly response, to compare byte-for-byte against.
+    const { row } = await seedPending()
+    const reference = await app.inject({ method: 'GET', url: `/a/${row.id}/approve?t=not-the-real-token` })
+    expect(reference.statusCode).toBe(200)
+
+    const res = await app.inject({ method: 'GET', url: '/a/not-a-uuid/approve?t=x' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toBe(reference.body)
+    expect(res.body).toContain(FRIENDLY_COPY)
+
+    // No pre-check regex: the malformed id reaches the DB lookup, Postgres throws on the bad
+    // UUID literal, and the catch-all is what's actually degrading it here — so the alert fires.
+    expect(deps.alert).toHaveBeenCalledWith(
+      'warning',
+      'action_route_error',
+      expect.objectContaining({ proposalId: 'not-a-uuid' }),
+    )
+
+    await app.close()
+  })
+
+  it('10. malformed (non-UUID) proposalId on POST -> 200 friendly page, identical body, no write, no throw, alerted', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+
+    const { row } = await seedPending()
+    const reference = await app.inject({ method: 'GET', url: `/a/${row.id}/approve?t=not-the-real-token` })
+    expect(reference.statusCode).toBe(200)
+
+    const res = await app.inject({ method: 'POST', url: '/a/not-a-uuid/approve?t=x' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toBe(reference.body)
+    expect(res.body).toContain(FRIENDLY_COPY)
+
+    expect(deps.enqueue).not.toHaveBeenCalled()
+    expect(deps.alert).toHaveBeenCalledWith(
+      'warning',
+      'action_route_error',
+      expect.objectContaining({ proposalId: 'not-a-uuid' }),
+    )
+
+    await app.close()
+  })
 })

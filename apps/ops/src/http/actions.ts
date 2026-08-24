@@ -148,18 +148,41 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
       return resultPage(decision)
     }
 
+    /**
+     * Public, unauthenticated route: no input (a malformed `proposalId`, a future query-shape
+     * change, whatever) may ever surface as anything but the same friendly page at 200. Without
+     * this, e.g. a non-UUID `proposalId` reaches `lookup`'s `WHERE id = $1` and Postgres throws
+     * "invalid input syntax for type uuid", which Fastify's default error handler turns into a
+     * 500 whose body includes the raw query — a real leak on a link anyone can click. Every
+     * unexpected error is reported via `alert` (best-effort — its own failure must never break
+     * the response) and degrades to the exact same uniform page, so this can never become a
+     * state oracle even under a code path nobody anticipated.
+     */
+    async function safeRender(
+      proposalId: string,
+      work: () => Promise<string>,
+    ): Promise<string> {
+      try {
+        return await work()
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        await deps.alert('warning', 'action_route_error', { proposalId, error: message }).catch(() => {})
+        return friendlyPage()
+      }
+    }
+
     for (const decision of ['approve', 'reject'] as const) {
       fastify.get(`/a/:proposalId/${decision}`, async (request, reply) => {
         const { proposalId } = request.params as { proposalId: string }
         const { t } = request.query as { t?: string }
-        const body = await handleGet(decision, proposalId, t)
+        const body = await safeRender(proposalId, () => handleGet(decision, proposalId, t))
         return reply.code(200).type('text/html; charset=utf-8').send(body)
       })
 
       fastify.post(`/a/:proposalId/${decision}`, async (request, reply) => {
         const { proposalId } = request.params as { proposalId: string }
         const { t } = request.query as { t?: string }
-        const body = await handlePost(decision, proposalId, t)
+        const body = await safeRender(proposalId, () => handlePost(decision, proposalId, t))
         return reply.code(200).type('text/html; charset=utf-8').send(body)
       })
     }
