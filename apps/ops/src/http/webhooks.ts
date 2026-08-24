@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { auditLog, type createDb, webhookEvents } from '@doge-buddy/db'
+import { and, count, eq, gt, sql } from 'drizzle-orm'
 import { verifyShopifyWebhookHmac } from '@doge-buddy/shopify-admin'
 import type { FastifyPluginAsync } from 'fastify'
 import type { SendOpts } from '../fulfillment/types.ts'
@@ -21,6 +22,41 @@ export interface WebhookDeps {
 
 function sha256hex(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex')
+}
+
+const REDACTED_HEADERS = new Set(['authorization', 'cookie', 'set-cookie', 'proxy-authorization'])
+const CJ_REJECT_CAPTURE_HOURLY_CAP = 50
+const CJ_REJECT_BODY_PREVIEW_BYTES = 256
+
+async function captureRejectedCjRequest(
+  db: Db,
+  headers: Record<string, string | string[] | undefined>,
+  rawBody: Buffer,
+): Promise<void> {
+  const [row] = await db
+    .select({ recent: count() })
+    .from(auditLog)
+    .where(
+      and(eq(auditLog.action, 'webhook.cj.rejected'), gt(auditLog.createdAt, sql`now() - interval '1 hour'`)),
+    )
+  if ((row?.recent ?? 0) >= CJ_REJECT_CAPTURE_HOURLY_CAP) return
+
+  const sanitizedHeaders: Record<string, string | string[] | undefined> = {}
+  for (const [key, value] of Object.entries(headers)) {
+    sanitizedHeaders[key] = REDACTED_HEADERS.has(key.toLowerCase()) ? '[redacted]' : value
+  }
+
+  await db.insert(auditLog).values({
+    actor: 'system',
+    action: 'webhook.cj.rejected',
+    entityType: 'webhook',
+    detail: {
+      headers: sanitizedHeaders,
+      bodyPreview: rawBody.toString('utf8').slice(0, CJ_REJECT_BODY_PREVIEW_BYTES),
+      bodySha256: sha256hex(rawBody),
+      bodyLength: rawBody.length,
+    },
+  })
 }
 
 function headerString(value: string | string[] | undefined): string | undefined {
@@ -97,19 +133,14 @@ export function webhookRoutes(deps: WebhookDeps): FastifyPluginAsync {
         // CJ's signature scheme has never been observed on a live delivery (docs/cj-api-notes.md
         // §Still unverified) — CJ's own /webhook/set registration probe 401'd here. Every
         // rejected request is therefore diagnostic evidence: capture what CJ actually sent
-        // (headers, bounded body preview) before rejecting, so the scheme can be read off the
-        // audit trail instead of guessed at.
-        await deps.db.insert(auditLog).values({
-          actor: 'system',
-          action: 'webhook.cj.rejected',
-          entityType: 'webhook',
-          detail: {
-            headers: request.headers,
-            bodyPreview: rawBody.toString('utf8').slice(0, 1000),
-            bodySha256: sha256hex(rawBody),
-            bodyLength: rawBody.length,
-          },
-        })
+        // before rejecting, so the scheme can be read off the audit trail instead of guessed at.
+        // Headers are kept wholesale on purpose (the unknown signature header is the thing being
+        // hunted), except credential-bearing ones, which are redacted with presence preserved.
+        // The body preview is bounded (a validation probe may carry a challenge token worth
+        // seeing; full payloads of VERIFIED events land in webhook_events anyway), and inserts
+        // are capped per hour so an unauthenticated flood can't inflate audit_log — beyond the
+        // cap, requests still get their 401, just without a row.
+        await captureRejectedCjRequest(deps.db, request.headers, rawBody)
         return reply.code(401).send({ error: 'invalid signature' })
       }
 

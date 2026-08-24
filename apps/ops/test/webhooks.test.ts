@@ -299,7 +299,12 @@ describe('POST /webhooks', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/webhooks/cj',
-      headers: { 'content-type': 'application/json', 'x-cj-mystery-header': 'probe-value' },
+      headers: {
+        'content-type': 'application/json',
+        'x-cj-mystery-header': 'probe-value',
+        authorization: 'Bearer super-secret-token',
+        cookie: 'session=abc',
+      },
       payload: Buffer.from(body),
     })
     expect(res.statusCode).toBe(401)
@@ -311,10 +316,51 @@ describe('POST /webhooks', () => {
     })
     expect(match).toBeDefined()
     const detail = match!.detail as { headers: Record<string, string>; bodySha256: string; bodyLength: number }
+    // Unknown headers are kept wholesale — the whole point is discovering which one carries
+    // CJ's signature — but credential-bearing headers are redacted (presence still visible).
     expect(detail.headers['x-cj-mystery-header']).toBe('probe-value')
+    expect(detail.headers['authorization']).toBe('[redacted]')
+    expect(detail.headers['cookie']).toBe('[redacted]')
     expect(detail.bodySha256).toMatch(/^[a-f0-9]{64}$/)
     expect(detail.bodyLength).toBe(Buffer.byteLength(body))
 
+    // Cleanup so reruns never accumulate toward the hourly capture cap.
+    await db.delete(auditLog).where(eq(auditLog.id, match!.id))
+    await app.close()
+  })
+
+  it('9. rejected-CJ capture is capped per hour — floods still get 401 but stop writing rows', async () => {
+    const deps = makeDeps()
+    const app = buildServer({
+      pool,
+      isQueueReady: () => true,
+      webhooks: deps,
+    })
+    const floodMarker = `flood-${Date.now()}-9`
+
+    // Drive well past the cap; every request must still be 401'd.
+    for (let i = 0; i < 60; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/webhooks/cj',
+        headers: { 'content-type': 'application/json' },
+        payload: Buffer.from(JSON.stringify({ id: `${floodMarker}-${i}`, status: 'nope' })),
+      })
+      expect(res.statusCode).toBe(401)
+    }
+
+    const rows = await db.select().from(auditLog).where(eq(auditLog.action, 'webhook.cj.rejected'))
+    const floodRows = rows.filter((r) => {
+      const detail = r.detail as { bodyPreview?: string } | null
+      return detail?.bodyPreview?.includes(floodMarker)
+    })
+    // 50/hour cap shared with any other recent rejects, so assert the bound, not an exact count.
+    expect(floodRows.length).toBeGreaterThan(0)
+    expect(floodRows.length).toBeLessThanOrEqual(50)
+
+    for (const r of floodRows) {
+      await db.delete(auditLog).where(eq(auditLog.id, r.id))
+    }
     await app.close()
   })
 })

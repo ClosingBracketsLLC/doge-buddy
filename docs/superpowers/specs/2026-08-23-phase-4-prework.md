@@ -72,7 +72,10 @@ the SD order code) and the dead `SUPPLIER` env var (commit 25c1d93).
 4. **Admin rendering:** confirm server-rendered EJS/JSX-lite + htmx-style forms inside
    `apps/ops` (architecture §Admin) and pick the concrete template approach — nothing is
    installed yet. Also: admin routes as a sibling Fastify plugin behind an auth `preHandler` in
-   the existing `buildServer`, per the `http/webhooks.ts` pattern?
+   the existing `buildServer`, per the `http/webhooks.ts` pattern? Whatever renders, note that
+   `audit_log.detail` now stores **attacker-controlled bytes** (`webhook.cj.rejected` captures
+   raw headers/body from unauthenticated requests) — any admin page that displays audit detail
+   must escape it (stored-XSS hazard).
 5. **Canary-gate mechanism (decide the seam now, build in Phase 7):** risks §canary wants
    per-order owner approval for the first ~10 real orders, but fulfillment deliberately never
    creates proposals (architecture §Failure philosophy) and its toggle is on/off, not
