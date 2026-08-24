@@ -150,6 +150,18 @@ describe('CJSupplierAdapter read methods', () => {
     expect(balance).toEqual({ availableCents: 15320, frozenCents: 1000 })
     expect(client.pointsSpentToday()).toBe(0) // 0 points, priority
   })
+
+  it('getProductReviews maps CJ comment rows defensively', async () => {
+    const adapter = (await makeAdapter({ data: { list: [
+      { score: 4, comment: 'good boy approved', commentDate: '2026-08-01' },
+      { commentScore: '5', commentText: 'sturdy' },
+    ] } })).adapter
+    const reviews = await adapter.getProductReviews('1952308304475578369')
+    expect(reviews).toEqual([
+      { rating: 4, content: 'good boy approved', reviewDate: '2026-08-01', countryCode: undefined },
+      { rating: 5, content: 'sturdy', reviewDate: undefined, countryCode: undefined },
+    ])
+  })
 })
 
 describe('parseAgingDays', () => {

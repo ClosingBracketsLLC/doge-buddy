@@ -7,6 +7,7 @@ import type {
   SupplierOrderStatus,
   SupplierOrderStatusValue,
   SupplierProductDetail,
+  SupplierProductReview,
   SupplierProductSummary,
   SupplierVariantDetail,
   TrackingInfo,
@@ -99,6 +100,42 @@ export function mapProductDetail(detail: CjProductDetail): SupplierProductDetail
     imageUrls: detail.productImageSet ?? [],
     categoryName: detail.categoryName,
     variants: detail.variants.map(mapVariantDetail),
+  }
+}
+
+/**
+ * CJ's product/productComments response wire shape is UNVERIFIED (used under CJ_CONTRACT gating).
+ * Defensive mapping accepts multiple field name variations for score, content, and date;
+ * clamps rating to 1-5 with default 5 when absent; defaults content to '' and reviewDate/countryCode
+ * to undefined.
+ */
+interface CjProductComment {
+  score?: number | string
+  commentScore?: number | string
+  comment?: string
+  commentText?: string
+  content?: string
+  commentDate?: string
+  createDate?: string
+  countryCode?: string
+}
+
+export function mapProductReview(comment: CjProductComment): SupplierProductReview {
+  const rating = (() => {
+    const score = comment.score ?? comment.commentScore
+    if (score === undefined || score === null) return 5
+    const n = typeof score === 'string' ? parseInt(score, 10) : score
+    if (!Number.isFinite(n)) return 5
+    return Math.max(1, Math.min(5, n))
+  })()
+
+  const content = comment.comment ?? comment.commentText ?? comment.content ?? ''
+
+  return {
+    rating,
+    content,
+    reviewDate: comment.commentDate ?? comment.createDate,
+    countryCode: comment.countryCode,
   }
 }
 

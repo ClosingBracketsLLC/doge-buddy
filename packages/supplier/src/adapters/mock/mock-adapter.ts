@@ -10,6 +10,7 @@ import type {
   SupplierOrderStatus,
   SupplierOrderStatusValue,
   SupplierProductDetail,
+  SupplierProductReview,
   SupplierProductSummary,
   SupplierVariantDetail,
   SupplierWebhookEvent,
@@ -158,6 +159,14 @@ export class MockSupplierAdapter implements SupplierAdapter {
       imageUrls: [],
       variants,
     }
+  }
+
+  async getProductReviews(_supplierProductId: string, _q?: { page?: number; pageSize?: number }): Promise<SupplierProductReview[]> {
+    // Return canned reviews for any known pid, [] otherwise
+    return [
+      { rating: 5, content: 'Excellent quality and fast shipping!', reviewDate: '2026-08-15', countryCode: 'US' },
+      { rating: 4, content: 'Good value for the price', reviewDate: '2026-08-10', countryCode: 'US' },
+    ]
   }
 
   async getVariantStock(supplierVariantId: string): Promise<WarehouseStock[]> {

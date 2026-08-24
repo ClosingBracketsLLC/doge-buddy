@@ -30,6 +30,13 @@ export interface SupplierVariantDetail {
   imageUrl?: string
 }
 
+export interface SupplierProductReview {
+  rating: number // 1-5
+  content: string
+  reviewDate?: string
+  countryCode?: string
+}
+
 export interface SupplierProductDetail {
   supplierProductId: string
   title: string
@@ -116,6 +123,7 @@ export interface SupplierAdapter {
     maxPriceCents?: number
   }): Promise<SupplierProductSummary[]>
   getProduct(supplierProductId: string): Promise<SupplierProductDetail>
+  getProductReviews(supplierProductId: string, q?: { page?: number; pageSize?: number }): Promise<SupplierProductReview[]>
 
   getVariantStock(supplierVariantId: string): Promise<WarehouseStock[]>
   quoteShipping(q: {

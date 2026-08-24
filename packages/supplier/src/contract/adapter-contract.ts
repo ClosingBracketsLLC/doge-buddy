@@ -44,6 +44,14 @@ export function runAdapterContractTests(name: string, setup: () => Promise<Adapt
       expect(Number.isSafeInteger(detail.variants[0]!.priceCents)).toBe(true)
     })
 
+    it('returns product reviews with defensive mapping (CJ_CONTRACT only)', async () => {
+      if (process.env.CJ_CONTRACT !== '1') return
+      const { adapter } = await setup()
+      const pid = process.env.CJ_CONTRACT_PID ?? '1952308304475578369'
+      const reviews = await adapter.getProductReviews(pid)
+      expect(Array.isArray(reviews)).toBe(true)
+    })
+
     it('reports per-warehouse stock for a known variant', async () => {
       const { adapter, knownVariantId } = await setup()
       const stock = await adapter.getVariantStock(knownVariantId)

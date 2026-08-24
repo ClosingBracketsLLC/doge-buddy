@@ -10,6 +10,7 @@ import type {
   SupplierKey,
   SupplierOrderStatus,
   SupplierProductDetail,
+  SupplierProductReview,
   SupplierProductSummary,
   SupplierWebhookEvent,
   TrackingInfo,
@@ -25,6 +26,7 @@ import {
   mapOrderStatusDetail,
   mapOrderTracking,
   mapProductDetail,
+  mapProductReview,
   mapProductSummary,
   mapStock,
 } from './mapping.ts'
@@ -128,6 +130,27 @@ export class CJSupplierAdapter implements SupplierAdapter {
       points: 10,
     })
     return mapProductDetail(data)
+  }
+
+  async getProductReviews(supplierProductId: string, q?: { page?: number; pageSize?: number }): Promise<SupplierProductReview[]> {
+    const data = await this.client.request<{
+      data?: Parameters<typeof mapProductReview>[0][] | { list?: Parameters<typeof mapProductReview>[0][] | null; content?: Parameters<typeof mapProductReview>[0][] | null }
+    }>('GET', '/product/productComments', {
+      query: { pid: supplierProductId, pageNum: q?.page ?? 1, pageSize: q?.pageSize ?? 20 },
+      points: 10,
+    })
+    // Defensive mapping: accept data.list, data.content, or data as the array
+    let comments: Parameters<typeof mapProductReview>[0][] = []
+    if (data.data) {
+      if (Array.isArray(data.data)) {
+        comments = data.data
+      } else if (data.data.list) {
+        comments = data.data.list || []
+      } else if (data.data.content) {
+        comments = data.data.content || []
+      }
+    }
+    return comments.map(mapProductReview)
   }
 
   async getVariantStock(supplierVariantId: string): Promise<WarehouseStock[]> {
