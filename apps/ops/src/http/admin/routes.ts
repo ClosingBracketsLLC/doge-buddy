@@ -1,5 +1,6 @@
-import { auditLog, proposals, type createDb } from '@doge-buddy/db'
-import { eq } from 'drizzle-orm'
+import { PROPOSAL_TYPES, type ProposalType } from '@doge-buddy/core'
+import { auditLog, proposals, proposalStatus, type createDb } from '@doge-buddy/db'
+import { and, desc, eq, lt } from 'drizzle-orm'
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import type { SendOpts } from '../../fulfillment/types.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
@@ -17,6 +18,9 @@ import {
   validateSession,
 } from './auth.ts'
 import { html, layout } from './html.ts'
+import { renderProposalDetail, renderProposalRow } from './render-proposal.ts'
+
+const PROPOSAL_STATUSES = proposalStatus.enumValues
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -149,6 +153,37 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       }
 
       /**
+       * Bulk-flips lazily-expired pending rows before a proposals page renders them — same
+       * guarded UPDATE shape as proposal-expire-sweep.ts's periodic job (and+eq+lt, returning
+       * ids, one audit row per id), but tagged `via: 'admin-load'` since the trigger here is an
+       * admin page view rather than the sweep job, and (unlike the sweep) optionally scoped to a
+       * single row: the list route wants every such row flipped before it reads the page, the
+       * detail route only wants the one row it's about to render.
+       */
+      async function sweepExpiredOnLoad(scopeId?: string): Promise<void> {
+        const conditions = [eq(proposals.status, 'pending'), lt(proposals.expiresAt, new Date())]
+        if (scopeId) conditions.push(eq(proposals.id, scopeId))
+
+        const expiredIds = await deps.db
+          .update(proposals)
+          .set({ status: 'expired' })
+          .where(and(...conditions))
+          .returning({ id: proposals.id })
+
+        if (expiredIds.length > 0) {
+          await deps.db.insert(auditLog).values(
+            expiredIds.map((row) => ({
+              actor: 'system',
+              action: 'proposal.expired',
+              entityType: 'proposal',
+              entityId: row.id,
+              detail: { via: 'admin-load' },
+            })),
+          )
+        }
+      }
+
+      /**
        * Catch-all wrapper for authed admin page/action handlers — the same class of defense
        * actions.ts's `safeRender` provides for the public /a/ links: any unexpected error thrown
        * inside `work` (most concretely a malformed `:id` reaching a `WHERE id = $1` on a uuid
@@ -174,6 +209,61 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Something went wrong.</p>`))
         }
       }
+
+      // Queue + detail pages (Task 5). Both run the lazy-expiry sweep above for exactly what
+      // they're about to show, then read fresh so a just-flipped row never renders stale.
+      authed.get('/admin/proposals', async (request, reply) => {
+        return safeHandle('proposals-list', reply, async () => {
+          await sweepExpiredOnLoad()
+
+          const { type, status } = request.query as { type?: string; status?: string }
+          const conditions = []
+          if (type && (PROPOSAL_TYPES as readonly string[]).includes(type)) {
+            conditions.push(eq(proposals.type, type as ProposalType))
+          }
+          if (status && (PROPOSAL_STATUSES as readonly string[]).includes(status)) {
+            conditions.push(eq(proposals.status, status as (typeof PROPOSAL_STATUSES)[number]))
+          }
+
+          const rows = await deps.db
+            .select({
+              id: proposals.id,
+              type: proposals.type,
+              status: proposals.status,
+              summary: proposals.summary,
+              createdAt: proposals.createdAt,
+              expiresAt: proposals.expiresAt,
+            })
+            .from(proposals)
+            .where(conditions.length > 0 ? and(...conditions) : undefined)
+            .orderBy(desc(proposals.createdAt))
+            .limit(100)
+
+          const body = layout(
+            'Proposals',
+            html`<table>
+              <tbody>
+                ${rows.map(renderProposalRow)}
+              </tbody>
+            </table>`,
+          )
+          return reply.code(200).type('text/html; charset=utf-8').send(body)
+        })
+      })
+
+      authed.get('/admin/proposals/:id', async (request, reply) => {
+        const { id } = request.params as { id: string }
+        return safeHandle(id, reply, async () => {
+          await sweepExpiredOnLoad(id)
+
+          const row = await lookupProposal(id)
+          if (!row) {
+            return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Not found.</p>`))
+          }
+
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', renderProposalDetail(row)))
+        })
+      })
 
       // Session-authed counterpart to actions.ts's public /a/:proposalId/approve|reject — same
       // guarded-UPDATE + lazy-expiry mechanics (StaleProposalStatusError means someone else, an
