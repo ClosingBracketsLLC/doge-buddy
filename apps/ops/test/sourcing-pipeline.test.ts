@@ -173,6 +173,11 @@ describe('runSourcingPipeline', () => {
   // `sourcing.weekly` is a fixed, hardcoded workflow name in pipeline.ts (per spec, not a test
   // param) — a leftover 'running'/'succeeded' row from a previous (non-reset) run of THIS file
   // would wedge test (b)'s "first call claims cleanly" assumption. Purge before anything runs.
+  // Scoped by `workflow = 'sourcing.weekly'` rather than by this file's own row ids (which don't
+  // exist yet at this point) — safe because that literal workflow name is written ONLY by
+  // `runSourcingPipeline` (and, in production, the real `sourcing.weekly` cron), so no other test
+  // file's rows can ever match this filter; it is this file's own namespace, not a shared column
+  // value another suite could collide on.
   beforeAll(async () => {
     const stale = await db.select({ id: agentRuns.id }).from(agentRuns).where(eq(agentRuns.workflow, 'sourcing.weekly'))
     const staleIds = stale.map((r) => r.id)
@@ -190,8 +195,10 @@ describe('runSourcingPipeline', () => {
 
   const createdRunIds: string[] = []
   // Every test's ProductSpec pids (harvest writes a `cj_trending` sourcing_signals row per fetched
-  // summary) and titles (the trends stub writes a `google_trends` row per keyword, keyed by title).
+  // summary) and titles (the trends stub writes a `google_trends` row per keyword, keyed by
+  // title — `candidateSpecs()` below pushes both as it builds each test's fixtures).
   const createdPids: string[] = []
+  const createdKeywords: string[] = []
   afterEach(async () => {
     if (createdRunIds.length > 0) {
       await db.delete(agentRunEvents).where(inArray(agentRunEvents.runId, createdRunIds))
@@ -204,10 +211,18 @@ describe('runSourcingPipeline', () => {
       await db.delete(sourcingSignals).where(inArray(sourcingSignals.supplierProductId, createdPids))
       createdPids.length = 0
     }
-    // The stub trends provider's `snapshot: { keyword }` rows have no supplierProductId, so they
-    // can't be swept by the pid delete above — keyword is unique-per-test (`uid()`-suffixed pid
-    // baked into the ProductSpec title via the pid itself), so match on keyword instead.
-    await db.delete(sourcingSignals).where(eq(sourcingSignals.source, 'google_trends'))
+    if (createdKeywords.length > 0) {
+      // The stub trends provider's `snapshot: { keyword }` rows have no supplierProductId, so
+      // they can't be swept by the pid delete above. Scoped to THIS file's own known keywords
+      // (`source = 'google_trends' AND keyword IN (...)`) rather than every `google_trends` row
+      // in the shared test DB — a source-wide delete would race any other test file that writes
+      // that source (see commit d51d95c's dirty-DB-rerun fix for the same class of bug in the
+      // fulfillment suite).
+      await db
+        .delete(sourcingSignals)
+        .where(and(eq(sourcingSignals.source, 'google_trends'), inArray(sourcingSignals.keyword, createdKeywords)))
+      createdKeywords.length = 0
+    }
   })
 
   function baseDeps(overrides: Partial<SourcingPipelineDeps> = {}): SourcingPipelineDeps {
@@ -225,7 +240,9 @@ describe('runSourcingPipeline', () => {
   }
 
   /** Three harvestable candidates (>= MIN_CANDIDATES), fresh pids per call. Registers the pids
-   * for `sourcing_signals` cleanup so callers don't have to remember to. */
+   * AND titles (harvest's `cj_trending` rows key on the former; the trends stage's
+   * `google_trends` rows key on the latter, per `candidates.map(c => c.title)` in pipeline.ts) for
+   * `sourcing_signals` cleanup so callers don't have to remember to. */
   function candidateSpecs(): ProductSpec[] {
     const specs: ProductSpec[] = [
       { pid: uid(), title: 'Rope Pull Toy', categoryName: 'Toys', sellPriceCents: 2999, listedNum: 500, liveCostCents: 1000 },
@@ -233,6 +250,7 @@ describe('runSourcingPipeline', () => {
       { pid: uid(), title: 'Interactive Puzzle Toy', categoryName: 'Toys', sellPriceCents: 2499, listedNum: 300, liveCostCents: 950 },
     ]
     createdPids.push(...specs.map((s) => s.pid))
+    createdKeywords.push(...specs.map((s) => s.title))
     return specs
   }
 
