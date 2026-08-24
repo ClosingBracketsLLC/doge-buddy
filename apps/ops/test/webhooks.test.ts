@@ -1,4 +1,4 @@
-import { createDb, webhookEvents } from '@doge-buddy/db'
+import { auditLog, createDb, webhookEvents } from '@doge-buddy/db'
 import { createHmac } from 'node:crypto'
 import { and, eq } from 'drizzle-orm'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -279,6 +279,41 @@ describe('POST /webhooks', () => {
     expect(match).toBeDefined()
     expect(match!.externalEventId).toMatch(/^[a-f0-9]{64}$/)
     expect(deps.enqueue).toHaveBeenCalledWith('webhook.cj.process', { webhookEventId: match!.id })
+
+    await app.close()
+  })
+
+  it('8. rejected CJ request is captured to audit_log with its headers (signature-scheme diagnosis)', async () => {
+    // CJ's signature scheme has never been observed on a live delivery (docs/cj-api-notes.md
+    // §Still unverified) — CJ's own registration probe 401'd against this route. Every rejected
+    // request must leave diagnostic evidence: which headers CJ sent, what the body looked like.
+    const deps = makeDeps()
+    const app = buildServer({
+      pool,
+      isQueueReady: () => true,
+      webhooks: deps,
+    })
+    const marker = `probe-${Date.now()}-8`
+    const body = JSON.stringify({ id: marker, status: 'nope' })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/webhooks/cj',
+      headers: { 'content-type': 'application/json', 'x-cj-mystery-header': 'probe-value' },
+      payload: Buffer.from(body),
+    })
+    expect(res.statusCode).toBe(401)
+
+    const rows = await db.select().from(auditLog).where(eq(auditLog.action, 'webhook.cj.rejected'))
+    const match = rows.find((r) => {
+      const detail = r.detail as { bodyPreview?: string } | null
+      return detail?.bodyPreview?.includes(marker)
+    })
+    expect(match).toBeDefined()
+    const detail = match!.detail as { headers: Record<string, string>; bodySha256: string; bodyLength: number }
+    expect(detail.headers['x-cj-mystery-header']).toBe('probe-value')
+    expect(detail.bodySha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(detail.bodyLength).toBe(Buffer.byteLength(body))
 
     await app.close()
   })

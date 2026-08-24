@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { type createDb, webhookEvents } from '@doge-buddy/db'
+import { auditLog, type createDb, webhookEvents } from '@doge-buddy/db'
 import { verifyShopifyWebhookHmac } from '@doge-buddy/shopify-admin'
 import type { FastifyPluginAsync } from 'fastify'
 import type { SendOpts } from '../fulfillment/types.ts'
@@ -94,6 +94,22 @@ export function webhookRoutes(deps: WebhookDeps): FastifyPluginAsync {
 
       const rawBody = request.body as Buffer
       if (!deps.cjVerify(rawBody, request.headers)) {
+        // CJ's signature scheme has never been observed on a live delivery (docs/cj-api-notes.md
+        // §Still unverified) — CJ's own /webhook/set registration probe 401'd here. Every
+        // rejected request is therefore diagnostic evidence: capture what CJ actually sent
+        // (headers, bounded body preview) before rejecting, so the scheme can be read off the
+        // audit trail instead of guessed at.
+        await deps.db.insert(auditLog).values({
+          actor: 'system',
+          action: 'webhook.cj.rejected',
+          entityType: 'webhook',
+          detail: {
+            headers: request.headers,
+            bodyPreview: rawBody.toString('utf8').slice(0, 1000),
+            bodySha256: sha256hex(rawBody),
+            bodyLength: rawBody.length,
+          },
+        })
         return reply.code(401).send({ error: 'invalid signature' })
       }
 
