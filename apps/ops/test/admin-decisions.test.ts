@@ -357,4 +357,58 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
 
     await app.close()
   })
+
+  it('9. malformed (non-UUID) proposalId on authed approve -> 200 generic error page, no 500, no SQL leak, alerted', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/admin/proposals/not-a-uuid/approve',
+      headers: { ...FORM_HEADERS, cookie },
+      payload: '',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Something went wrong.')
+    expect(res.body.toLowerCase()).not.toContain('select')
+    expect(res.body.toLowerCase()).not.toContain('invalid input syntax')
+
+    expect(deps.enqueue).not.toHaveBeenCalled()
+    expect(deps.alert).toHaveBeenCalledWith(
+      'warning',
+      'admin_route_error',
+      expect.objectContaining({ proposalId: 'not-a-uuid' }),
+    )
+
+    await app.close()
+  })
+
+  it('10. malformed (non-UUID) proposalId on authed reject -> 200 generic error page, no 500, no SQL leak, alerted', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/admin/proposals/not-a-uuid/reject',
+      headers: { ...FORM_HEADERS, cookie },
+      payload: '',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Something went wrong.')
+    expect(res.body.toLowerCase()).not.toContain('select')
+    expect(res.body.toLowerCase()).not.toContain('invalid input syntax')
+
+    expect(deps.enqueue).not.toHaveBeenCalled()
+    expect(deps.alert).toHaveBeenCalledWith(
+      'warning',
+      'admin_route_error',
+      expect.objectContaining({ proposalId: 'not-a-uuid' }),
+    )
+
+    await app.close()
+  })
 })

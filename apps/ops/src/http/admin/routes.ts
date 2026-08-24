@@ -1,6 +1,6 @@
 import { auditLog, proposals, type createDb } from '@doge-buddy/db'
 import { eq } from 'drizzle-orm'
-import type { FastifyPluginAsync } from 'fastify'
+import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import type { SendOpts } from '../../fulfillment/types.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
 import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts'
@@ -148,6 +148,33 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         return row
       }
 
+      /**
+       * Catch-all wrapper for authed admin page/action handlers — the same class of defense
+       * actions.ts's `safeRender` provides for the public /a/ links: any unexpected error thrown
+       * inside `work` (most concretely a malformed `:id` reaching a `WHERE id = $1` on a uuid
+       * column, which Postgres rejects with "invalid input syntax for type uuid" — Fastify's
+       * default error handler would otherwise turn that into a 500 whose body echoes the raw
+       * query, column list, and the attacker-controlled id right back at the client) is alerted
+       * and degraded to a generic, information-free 200 page instead of leaking internals.
+       * Session-authed here (unlike actions.ts's public routes) so this is defense in depth
+       * rather than an outsider-reachable leak, but the Plan A precedent is to never skip it.
+       * Reusable: later routes in this same authed scope (Tasks 5-8's proposal/order/ticket
+       * pages) should wrap their handlers with this too, not reimplement it.
+       */
+      async function safeHandle(
+        entityId: string,
+        reply: FastifyReply,
+        work: () => Promise<FastifyReply>,
+      ): Promise<FastifyReply> {
+        try {
+          return await work()
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          await deps.alert('warning', 'admin_route_error', { proposalId: entityId, error: message }).catch(() => {})
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Something went wrong.</p>`))
+        }
+      }
+
       // Session-authed counterpart to actions.ts's public /a/:proposalId/approve|reject — same
       // guarded-UPDATE + lazy-expiry mechanics (StaleProposalStatusError means someone else, an
       // owner via the one-click link or a concurrent admin tab, already decided this row), but
@@ -156,105 +183,107 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       for (const decision of ['approve', 'reject'] as const) {
         authed.post(`/admin/proposals/:id/${decision}`, async (request, reply) => {
           const { id } = request.params as { id: string }
-          const row = await lookupProposal(id)
+          return safeHandle(id, reply, async () => {
+            const row = await lookupProposal(id)
 
-          // Lazy expiry, mirroring actions.ts's POST path exactly: a pending row past its
-          // expiresAt flips to 'expired' the moment anyone actually acts on it, regardless of
-          // which surface (link or admin) triggered the act. The flip itself is always
-          // attributed to 'system' — the admin/'owner' context only applies to a real decision.
-          if (row && row.status === 'pending' && !(row.expiresAt.getTime() > Date.now())) {
+            // Lazy expiry, mirroring actions.ts's POST path exactly: a pending row past its
+            // expiresAt flips to 'expired' the moment anyone actually acts on it, regardless of
+            // which surface (link or admin) triggered the act. The flip itself is always
+            // attributed to 'system' — the admin/'owner' context only applies to a real decision.
+            if (row && row.status === 'pending' && !(row.expiresAt.getTime() > Date.now())) {
+              try {
+                await applyProposalTransition(deps.db, id, 'pending', 'expired')
+                await deps.db.insert(auditLog).values({
+                  actor: 'system',
+                  action: 'proposal.expired',
+                  entityType: 'proposal',
+                  entityId: id,
+                  detail: { via: 'lazy-expiry' },
+                })
+              } catch (err) {
+                if (!(err instanceof StaleProposalStatusError)) throw err
+              }
+              return reply
+                .code(200)
+                .type('text/html; charset=utf-8')
+                .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
+            }
+
+            if (!row || row.status !== 'pending') {
+              return reply
+                .code(200)
+                .type('text/html; charset=utf-8')
+                .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
+            }
+
+            // Edit-then-approve: an optional `payload` form field carries JSON text (from a
+            // textarea) that replaces the proposal's stored payload before applying. Only approve
+            // honors it — reject has nothing to validate a replacement payload against.
+            let patchedPayload: unknown
+            if (decision === 'approve') {
+              const body = (request.body ?? {}) as { payload?: string }
+              if (body.payload) {
+                let parsedJson: unknown
+                try {
+                  parsedJson = JSON.parse(body.payload)
+                } catch (err) {
+                  const message = err instanceof Error ? err.message : String(err)
+                  return reply
+                    .code(400)
+                    .type('text/html; charset=utf-8')
+                    .send(layout('Proposal', html`<p>Invalid JSON: ${message}</p>`))
+                }
+
+                const schema = PAYLOAD_SCHEMAS[row.type]
+                const result = schema.safeParse(parsedJson)
+                if (!result.success) {
+                  const issues = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+                  return reply
+                    .code(400)
+                    .type('text/html; charset=utf-8')
+                    .send(
+                      layout(
+                        'Proposal',
+                        html`<p>Invalid payload:</p>
+                          <ul>
+                            ${issues.map((issue) => html`<li>${issue}</li>`)}
+                          </ul>`,
+                      ),
+                    )
+                }
+                patchedPayload = result.data
+              }
+            }
+
+            const status = decision === 'approve' ? 'approved' : 'rejected'
             try {
-              await applyProposalTransition(deps.db, id, 'pending', 'expired')
-              await deps.db.insert(auditLog).values({
-                actor: 'system',
-                action: 'proposal.expired',
-                entityType: 'proposal',
-                entityId: id,
-                detail: { via: 'lazy-expiry' },
+              await applyProposalTransition(deps.db, id, 'pending', status, {
+                decidedBy: 'owner',
+                decidedAt: new Date(),
+                actionTokenHash: null,
+                ...(patchedPayload ? { payload: patchedPayload } : {}),
               })
             } catch (err) {
-              if (!(err instanceof StaleProposalStatusError)) throw err
-            }
-            return reply
-              .code(200)
-              .type('text/html; charset=utf-8')
-              .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
-          }
-
-          if (!row || row.status !== 'pending') {
-            return reply
-              .code(200)
-              .type('text/html; charset=utf-8')
-              .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
-          }
-
-          // Edit-then-approve: an optional `payload` form field carries JSON text (from a
-          // textarea) that replaces the proposal's stored payload before applying. Only approve
-          // honors it — reject has nothing to validate a replacement payload against.
-          let patchedPayload: unknown
-          if (decision === 'approve') {
-            const body = (request.body ?? {}) as { payload?: string }
-            if (body.payload) {
-              let parsedJson: unknown
-              try {
-                parsedJson = JSON.parse(body.payload)
-              } catch (err) {
-                const message = err instanceof Error ? err.message : String(err)
-                return reply
-                  .code(400)
-                  .type('text/html; charset=utf-8')
-                  .send(layout('Proposal', html`<p>Invalid JSON: ${message}</p>`))
+              if (err instanceof StaleProposalStatusError) {
+                return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Already handled.</p>`))
               }
-
-              const schema = PAYLOAD_SCHEMAS[row.type]
-              const result = schema.safeParse(parsedJson)
-              if (!result.success) {
-                const issues = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-                return reply
-                  .code(400)
-                  .type('text/html; charset=utf-8')
-                  .send(
-                    layout(
-                      'Proposal',
-                      html`<p>Invalid payload:</p>
-                        <ul>
-                          ${issues.map((issue) => html`<li>${issue}</li>`)}
-                        </ul>`,
-                    ),
-                  )
-              }
-              patchedPayload = result.data
+              throw err
             }
-          }
 
-          const status = decision === 'approve' ? 'approved' : 'rejected'
-          try {
-            await applyProposalTransition(deps.db, id, 'pending', status, {
-              decidedBy: 'owner',
-              decidedAt: new Date(),
-              actionTokenHash: null,
-              ...(patchedPayload ? { payload: patchedPayload } : {}),
+            await deps.db.insert(auditLog).values({
+              actor: 'owner',
+              action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
+              entityType: 'proposal',
+              entityId: id,
+              detail: { via: 'admin', edited: Boolean(patchedPayload) },
             })
-          } catch (err) {
-            if (err instanceof StaleProposalStatusError) {
-              return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Already handled.</p>`))
+
+            if (decision === 'approve') {
+              await enqueueProposalApply(deps.enqueue, id)
             }
-            throw err
-          }
 
-          await deps.db.insert(auditLog).values({
-            actor: 'owner',
-            action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
-            entityType: 'proposal',
-            entityId: id,
-            detail: { via: 'admin', edited: Boolean(patchedPayload) },
+            return reply.code(303).header('location', `/admin/proposals/${id}`).send()
           })
-
-          if (decision === 'approve') {
-            await enqueueProposalApply(deps.enqueue, id)
-          }
-
-          return reply.code(303).header('location', `/admin/proposals/${id}`).send()
         })
       }
 
