@@ -109,7 +109,7 @@ export interface SupplierAdapter {
     keyword?: string
     categoryId?: string
     countryCode?: string
-    trending?: boolean
+    flag?: 'trending' | 'new'
     page?: number
     pageSize?: number
     minPriceCents?: number

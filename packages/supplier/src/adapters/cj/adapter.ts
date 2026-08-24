@@ -108,7 +108,7 @@ export class CJSupplierAdapter implements SupplierAdapter {
       countryCode: q.countryCode,
       page: q.page ?? 1,
       size: q.pageSize ?? 20,
-      productFlag: q.trending ? 0 : undefined,
+      productFlag: q.flag === 'trending' ? 0 : q.flag === 'new' ? 1 : undefined,
       verifiedWarehouse: q.countryCode ? 1 : undefined,
       startSellPrice: q.minPriceCents !== undefined ? q.minPriceCents / 100 : undefined,
       endSellPrice: q.maxPriceCents !== undefined ? q.maxPriceCents / 100 : undefined,

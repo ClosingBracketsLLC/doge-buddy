@@ -39,7 +39,7 @@ describe('CJSupplierAdapter read methods', () => {
   it('searchProducts builds the listV2 query and maps summaries', async () => {
     const { adapter, client, calls } = await makeAdapter(loadFixture('product-listV2'))
     const result = await adapter.searchProducts({
-      keyword: 'dog rope', countryCode: 'US', trending: true, pageSize: 10,
+      keyword: 'dog rope', countryCode: 'US', flag: 'trending', pageSize: 10,
     })
 
     expect(calls).toHaveLength(1) // no auth round-trip
@@ -56,6 +56,17 @@ describe('CJSupplierAdapter read methods', () => {
     })
     expect(result[1]!.sellPriceCents).toBe(480) // string USD input
     expect(client.pointsSpentToday()).toBe(50)
+  })
+
+  it('maps flag "trending" to productFlag 0 and "new" to productFlag 1', async () => {
+    const { adapter, calls } = await makeAdapter(loadFixture('product-listV2'))
+    await adapter.searchProducts({ flag: 'trending' })
+    await adapter.searchProducts({ flag: 'new' })
+    await adapter.searchProducts({})
+
+    expect(calls[0]!.url).toContain('productFlag=0')
+    expect(calls[1]!.url).toContain('productFlag=1')
+    expect(calls[2]!.url).not.toContain('productFlag')
   })
 
   it('searchProducts collapses a variant price RANGE to its low end', async () => {
