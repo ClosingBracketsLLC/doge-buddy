@@ -259,6 +259,39 @@ describe('submitProposal', () => {
     expect(row).toBeDefined()
   })
 
+  it('auto mode: enqueue throw is swallowed — resolves approved, alerts apply_enqueue_failed, row stays approved', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn(async () => {
+      throw new Error('boss unavailable')
+    })
+    const alert = vi.fn(async () => {})
+
+    await settings.set('workflow.sourcing.mode', 'auto')
+    try {
+      const result = await submitProposal(
+        { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+        {
+          type: 'new_listing',
+          summary: 'New listing: Dog Snuff Pad',
+          payload: newListingPayload(),
+          sourceWorkflow: 'sourcing-agent',
+        },
+      )
+
+      expect(result.status).toBe('approved')
+      expect(sent).toHaveLength(0)
+
+      expect(alert).toHaveBeenCalledWith('critical', 'apply_enqueue_failed', { proposalId: result.id })
+
+      const [row] = await db.select().from(proposals).where(eq(proposals.id, result.id))
+      expect(row!.status).toBe('approved')
+      expect(row!.autoApproved).toBe(true)
+    } finally {
+      await settings.set('workflow.sourcing.mode', 'manual')
+    }
+  })
+
   it('manual mode with no adminBaseUrl: alerts notify_unconfigured, no notify call, still lands pending', async () => {
     const settings = createSettings(db)
     const { notify, sent } = createCaptureNotifier()

@@ -40,6 +40,24 @@ describe('NewListingPayloadSchema', () => {
       NewListingPayloadSchema.safeParse({ ...validListing, deliveryMinDays: 9, deliveryMaxDays: 7 }).success,
     ).toBe(false)
   })
+
+  it('rejects imageUrls that are not http(s) (javascript:/data: schemes)', () => {
+    expect(
+      NewListingPayloadSchema.safeParse({ ...validListing, imageUrls: ['javascript:alert(1)'] }).success,
+    ).toBe(false)
+    expect(
+      NewListingPayloadSchema.safeParse({ ...validListing, imageUrls: ['data:text/html;x'] }).success,
+    ).toBe(false)
+  })
+
+  it('accepts an https imageUrls entry', () => {
+    expect(
+      NewListingPayloadSchema.safeParse({
+        ...validListing,
+        imageUrls: ['https://cf.cjdropshipping.com/x.png'],
+      }).success,
+    ).toBe(true)
+  })
 })
 
 describe('RefundPayloadSchema', () => {

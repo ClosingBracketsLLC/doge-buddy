@@ -27,7 +27,13 @@ export const NewListingPayloadSchema = z
     title: z.string().min(1).max(255),
     descriptionHtml: z.string().min(1),
     categoryTag: z.enum(CATEGORY_TAGS),
-    imageUrls: z.array(z.string().url()).min(1),
+    imageUrls: z
+      .array(
+        z
+          .url()
+          .refine((u) => u.startsWith('http://') || u.startsWith('https://'), 'imageUrls must be http(s)'),
+      )
+      .min(1),
     shipsFrom: z.literal('US'),
     deliveryMinDays: z.number().int().min(1),
     deliveryMaxDays: z.number().int().min(1),

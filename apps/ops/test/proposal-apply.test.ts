@@ -54,6 +54,20 @@ function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopi
   }
 }
 
+/** Minimal `Pick<SupplierAdapter, 'subscribeProductWebhook'>` fake — same spirit as
+ * `MockSupplierAdapter.subscribeProductWebhook` (`packages/supplier`): records every
+ * `supplierProductId` passed, in call order, on `subscribedProductIds`. `subscribeProductWebhook`
+ * itself is overridable so a test can make it throw and assert the apply still succeeds. */
+function fakeAdapter(overrides: { subscribeProductWebhook?: (supplierProductId: string) => Promise<void> } = {}) {
+  const subscribedProductIds: string[] = []
+  return {
+    subscribedProductIds,
+    subscribeProductWebhook: overrides.subscribeProductWebhook ?? (async (supplierProductId: string) => {
+      subscribedProductIds.push(supplierProductId)
+    }),
+  }
+}
+
 // `fakeShopify`'s `productSet` mints deterministic gids from a per-instance counter that always
 // starts at 0 — every test's *own* fresh `fakeShopify()` therefore produces the exact same literal
 // first-call gids (`gid://shopify/Product/1`, `gid://shopify/ProductVariant/1000`), and test 4
@@ -165,12 +179,17 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const shopify = fakeShopify()
     const productSetSpy = vi.spyOn(shopify, 'productSet')
     const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
 
-    await executeApplyProposal({ db, alert, shopify }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter }, row.id)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('applied')
     expect(after!.appliedAt).toBeInstanceOf(Date)
+
+    // Apply-time CJ product-webhook subscribe (Task 16): fired strictly after the applied
+    // transition, best-effort, once per unique supplierProductId in the payload.
+    expect(adapter.subscribedProductIds).toEqual([payload.variants[0]!.supplierProductId])
 
     const productRow = await loadProduct(row.id)
     expect(productRow).toBeDefined()
@@ -218,6 +237,63 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // 1b. Apply-time subscribe is best-effort: a throw must not fail the apply
+  // ---------------------------------------------------------------------------
+  it('1b. product-webhook subscribe throw: apply still succeeds, warning alert fired', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const payload = row.payload as ReturnType<typeof newListingPayload>
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter({
+      subscribeProductWebhook: async () => {
+        throw new Error('cj subscribe unavailable')
+      },
+    })
+
+    await executeApplyProposal({ db, alert, shopify, adapter }, row.id)
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applied')
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'product_webhook_subscribe_failed',
+      expect.objectContaining({
+        proposalId: row.id,
+        supplierProductId: payload.variants[0]!.supplierProductId,
+        error: 'cj subscribe unavailable',
+      }),
+    )
+  })
+
+  // ---------------------------------------------------------------------------
+  // 1c. Re-run of an already-applied proposal: no second subscribe
+  // ---------------------------------------------------------------------------
+  it('1c. re-run of an already-applied proposal returns before subscribing again', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
+
+    await executeApplyProposal({ db, alert, shopify, adapter }, row.id)
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applied')
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    expect(adapter.subscribedProductIds).toHaveLength(1)
+
+    // Re-run against the same (now 'applied') row — the existing dispatch-no-op branch (test 5)
+    // returns before reaching the resolve-payload/subscribe step, so no second subscribe call.
+    await executeApplyProposal({ db, alert, shopify, adapter }, row.id)
+    expect(adapter.subscribedProductIds).toHaveLength(1)
+  })
+
+  // ---------------------------------------------------------------------------
   // 2. Fulfillability proof
   // ---------------------------------------------------------------------------
   it('2. fulfillability proof: the mapping row joins back to a variant with cost + gid set', async () => {
@@ -226,7 +302,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const shopify = fakeShopify()
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
 
     const productRow = await loadProduct(row.id)
     createdProductIds.push(productRow!.id)
@@ -272,7 +348,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     })
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
 
     expect(shopify.calls).not.toContain('productSet:DRAFT')
     expect(shopify.calls).toContain('productSet:ACTIVE')
@@ -314,7 +390,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     ]
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
 
     expect(shopify.calls).toContain('find')
     expect(shopify.calls).not.toContain('productSet:DRAFT')
@@ -346,7 +422,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       const shopify = fakeShopify()
       const alert = vi.fn(async () => {})
 
-      await executeApplyProposal({ db, alert, shopify }, row.id)
+      await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
 
       expect(shopify.calls).toEqual([])
       const after = await loadProposal(row.id)
@@ -371,7 +447,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     }
     const alert = vi.fn(async () => {})
 
-    await expect(executeApplyProposal({ db, alert, shopify }, row.id)).rejects.toThrow(/online store publish failed/)
+    await expect(executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)).rejects.toThrow(/online store publish failed/)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('applying')
@@ -396,7 +472,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     }
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('applied')
@@ -419,13 +495,13 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const shopify = fakeShopify()
     const alert = vi.fn(async () => {})
 
-    await expect(executeApplyProposal({ db, alert, shopify }, row.id)).rejects.toThrow(/unimplemented/)
+    await expect(executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)).rejects.toThrow(/unimplemented/)
 
     const midway = await loadProposal(row.id)
     expect(midway!.status).toBe('applying')
 
     const err = new Error('unimplemented proposal type: refund')
-    await deadLetterApplyProposal({ db, alert, shopify }, row.id, err)
+    await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id, err)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('failed')
@@ -448,7 +524,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       const shopify = fakeShopify()
       const alert = vi.fn(async () => {})
 
-      await deadLetterApplyProposal({ db, alert, shopify }, row.id, new Error('boom'))
+      await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id, new Error('boom'))
 
       const after = await loadProposal(row.id)
       expect(after!.status).toBe('failed')
@@ -491,7 +567,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     })
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
 
     const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, sku))
     expect(variantRow).toBeDefined()
@@ -524,7 +600,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     // A applies clean first.
     const shopifyA = fakeShopify()
     const alertA = vi.fn(async () => {})
-    await executeApplyProposal({ db, alert: alertA, shopify: shopifyA }, rowA.id)
+    await executeApplyProposal({ db, alert: alertA, shopify: shopifyA, adapter: fakeAdapter() }, rowA.id)
 
     const afterA = await loadProposal(rowA.id)
     expect(afterA!.status).toBe('applied')
@@ -562,7 +638,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     }
     const alertB = vi.fn(async () => {})
     await expect(
-      executeApplyProposal({ db, alert: alertB, shopify: shopifyB }, rowB.id),
+      executeApplyProposal({ db, alert: alertB, shopify: shopifyB, adapter: fakeAdapter() }, rowB.id),
     ).rejects.toThrow(/sku collision/)
 
     // B's own product row was already created (step 2, before the variant loop's guard fires) —
@@ -575,7 +651,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
 
     // Dead-letter B: the job wrapper's retry-exhaustion path, same as test 8.
     const err = new Error(`sku collision: ${sharedSku} already belongs to another product`)
-    await deadLetterApplyProposal({ db, alert: alertB, shopify: shopifyB }, rowB.id, err)
+    await deadLetterApplyProposal({ db, alert: alertB, shopify: shopifyB, adapter: fakeAdapter() }, rowB.id, err)
 
     const afterB = await loadProposal(rowB.id)
     expect(afterB!.status).toBe('failed')

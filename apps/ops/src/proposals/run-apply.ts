@@ -1,5 +1,6 @@
 import { centsToUsd, NewListingPayloadSchema } from '@doge-buddy/core'
 import { auditLog, products, productVariants, proposals, supplierVariantMappings, type createDb } from '@doge-buddy/db'
+import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { eq, sql } from 'drizzle-orm'
 import { applyProposalTransition, StaleProposalStatusError } from './transitions.ts'
 
@@ -34,6 +35,13 @@ export interface ApplyProposalDeps {
   db: Db
   alert: Alert
   shopify: ProposalShopifyOps
+  /**
+   * Only the supplier-adapter surface `executeApplyProposal` needs post-apply (Task 16): subscribing
+   * to the supplier's per-product webhook for every `supplierProductId` the just-applied payload
+   * references. A strict, hand-picked subset of `SupplierAdapter`'s full surface, same spirit as
+   * `ProposalShopifyOps` above.
+   */
+  adapter: Pick<SupplierAdapter, 'subscribeProductWebhook'>
 }
 
 /**
@@ -210,6 +218,24 @@ export async function executeApplyProposal(deps: ApplyProposalDeps, proposalId: 
     entityId: proposalId,
     detail: { productGid },
   })
+
+  // 5. Apply-time CJ product-webhook subscribe (Task 16). Strictly AFTER the applied transition
+  // committed above — never before, and never allowed to affect the apply's own success: a
+  // subscribe failure here must not roll back or retry the apply that already landed, so each
+  // call is wrapped in its own best-effort catch (alert, never throw). A resumed/retried apply
+  // that finds the row already 'applied' returns from the `row.status === 'approved'` /
+  // `!== 'applying'` dispatch above long before reaching this point, so a re-run never
+  // double-subscribes.
+  const supplierProductIds = [...new Set(payload.variants.map((v) => v.supplierProductId))]
+  for (const supplierProductId of supplierProductIds) {
+    await deps.adapter.subscribeProductWebhook(supplierProductId).catch((err) =>
+      deps.alert('warning', 'product_webhook_subscribe_failed', {
+        proposalId,
+        supplierProductId,
+        error: String(err instanceof Error ? err.message : err),
+      }).catch(() => {}),
+    )
+  }
 }
 
 /**

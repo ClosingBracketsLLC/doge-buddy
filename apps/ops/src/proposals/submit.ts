@@ -170,7 +170,15 @@ export async function submitProposal(
     detail: { via: 'auto' },
   })
 
-  await enqueueProposalApply(deps.enqueue, id)
+  try {
+    await enqueueProposalApply(deps.enqueue, id)
+  } catch {
+    // The transition above already committed — never un-approve on an enqueue failure, just
+    // alert and let `/admin` resend-apply recover it. Same precedent as the action-route's
+    // `enqueueFailedPage` path (`http/actions.ts`) — best-effort alert, its own failure must
+    // never break this response.
+    await deps.alert('critical', 'apply_enqueue_failed', { proposalId: id }).catch(() => {})
+  }
 
   return { id, status: 'approved' }
 }

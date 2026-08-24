@@ -130,6 +130,11 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
       publishablePublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
     },
+    // Task 16: the apply-time CJ product-webhook subscribe needs only `subscribeProductWebhook`
+    // off the same supplier adapter every other queue here already threads through — no
+    // no-config fallback needed (unlike `shopify`/`proposalShopify` above), since `deps.adapter`
+    // is required on `FulfillmentQueueDeps` and already used unconditionally by `placeOrderDeps`.
+    adapter: deps.adapter,
   }
 
   await createQueueRetrying(boss, 'demo.ping')
