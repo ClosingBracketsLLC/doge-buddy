@@ -99,6 +99,41 @@ describe('createSerpApiTrends', () => {
     expect(ghost!.snapshot).toEqual({ timelineData: [] })
   })
 
+  it('does not mis-key: a missing keyword FIRST in the batch never inherits its batch-mate\'s tagged entry by position', async () => {
+    // 'real' is tagged and occupies index 0 of `values` (SerpApi omits entries for terms with no
+    // data — it does not pad with holes). 'ghost' is requested first (batchIndex 0) but has no
+    // data. A naive `values[batchIndex]` fallback would wrongly hand 'ghost' the entry tagged for
+    // 'real'. Since at least one entry in `values` carries `query`, no positional guessing is
+    // allowed at all — 'ghost' must resolve to null, not to 40.
+    const fixture = serpApiFixture([{ date: 'Week 1', values: [{ query: 'real', extracted_value: 40 }] }])
+    const fetchFn = vi.fn(async () => jsonResponse(fixture))
+    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+
+    const [ghost, real] = await provider.fetchInterest(['ghost', 'real'])
+
+    expect(ghost!.score).toBeNull()
+    expect(ghost!.snapshot).toEqual({ timelineData: [] })
+    expect(real!.score).toBe(40)
+  })
+
+  it('resolves positionally only for a genuinely untagged/legacy response shape (no values[] entry carries a query field)', async () => {
+    const untagged = {
+      interest_over_time: {
+        timeline_data: [
+          { date: 'Week 1', values: [{ extracted_value: 15 }, { extracted_value: 35 }] },
+          { date: 'Week 2', values: [{ extracted_value: 25 }, { extracted_value: 45 }] },
+        ],
+      },
+    }
+    const fetchFn = vi.fn(async () => jsonResponse(untagged))
+    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+
+    const [first, second] = await provider.fetchInterest(['first kw', 'second kw'])
+
+    expect(first!.score).toBe(20) // mean(15, 25) — resolved by position 0
+    expect(second!.score).toBe(40) // mean(35, 45) — resolved by position 1
+  })
+
   it(`caps requests at SERPAPI_MAX_REQUESTS_PER_RUN (${SERPAPI_MAX_REQUESTS_PER_RUN}); tail keywords beyond the cap come back score: null with no request fired`, async () => {
     const fetchFn = vi.fn(async () => jsonResponse(serpApiFixture([])))
     const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })

@@ -80,9 +80,13 @@ function scrubApiKey(text: string, apiKey: string): string {
 
 /**
  * Finds the `values[]` entry for `keyword` in one timeline point. Matches by the `query` field
- * SerpApi echoes back per requested term; falls back to the term's positional index within the
- * batch when no entry's `query` matches (defensive — an undocumented/malformed SerpApi shape
- * should degrade a signal to null rather than crash the run).
+ * SerpApi echoes back per requested term. Positional fallback (`values[batchIndex]`) is ONLY
+ * valid for a genuinely untagged/legacy response shape — one where NO entry carries a `query`
+ * field at all — because it assumes `values[]` is ordered exactly like the request's `q` list.
+ * The instant even one entry is query-tagged, a keyword that fails the exact match must resolve
+ * to undefined (-> score null), never to some other keyword's positionally-nearby entry: SerpApi
+ * omits entries for terms with no data, so position drifts out of sync with the request order as
+ * soon as one keyword in the batch is missing.
  */
 function findValueForKeyword(
   values: SerpApiTimelineValue[] | undefined,
@@ -90,7 +94,9 @@ function findValueForKeyword(
   batchIndex: number,
 ): SerpApiTimelineValue | undefined {
   if (!values || values.length === 0) return undefined
-  return values.find((v) => v.query === keyword) ?? values[batchIndex]
+  const anyTagged = values.some((v) => v.query != null)
+  if (anyTagged) return values.find((v) => v.query === keyword)
+  return values[batchIndex]
 }
 
 /**
