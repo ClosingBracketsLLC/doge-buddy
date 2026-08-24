@@ -38,6 +38,7 @@ editor, orders recovery UI). Plan A is independently verifiable without Plan B.
 | Phase 7 canary gate (seam only) | Pre-place hold: a future `fulfillment.canary_hold` setting parks new supplier orders pre-place, surfaced on `/admin/orders` with a Release action. Fulfillment stays proposal-free. Phase 4 builds `/admin/orders` hold-capable; Phase 7 adds the setting. |
 | Auto-mode granularity | Per-workflow string settings as the parent spec'd: `workflow.{sourcing,support_reply,refund,deprecation}.mode` = `'manual' \| 'auto'`, default `'manual'`. `refund.auto_max_cents` (default 2500) joins `SETTINGS_DEFAULTS` **and is enforced at submit**: auto + `refund` + amount above cap → falls back to the manual path (parent guardrail). |
 | CJ `webhook/product/subscribe` after listing | **Deferred to Phase 5** (recorded deviation): product-change webhooks serve sourcing/stock sync, which doesn't exist yet. Everything else the parent's apply step mandates lands now (see §6). |
+| Shopify inventory on new listings | **Untracked, deliberately** (recorded deviation from the parent's `inventorySetQuantities` mention): `NewListingPayload` carries no stock figure, and for a dropship store local Shopify inventory is a lie — Phase 3's gate 4 verifies live CJ stock at order time, and Shopify must never block a sale on phantom local counts. Variants are created with `inventoryItem: { tracked: false }`; `inventorySetQuantities` is not called. Revisit only if a future phase adds real held stock. |
 | Prework item 7 (CJ webhook signature) | **Already settled live 2026-08-23**, before this spec: signature rides the `sign` header; registration + real deliveries proven end-to-end (see `docs/cj-api-notes.md` §Webhooks). No Phase 4 work item. |
 | Proposal link columns | Stay loose uuids (no FK migration), as originally designed. |
 | Audit actors | `'owner'` for human decisions; `'system'` for machine actions (sweeps, lazy flips, apply job) — matching the existing convention; `'system:auto'` appears only in `decided_by`. |
@@ -155,7 +156,8 @@ no-op. The `new_listing` apply (the only type wired this phase):
    price + supplier-cost cents from the payload) and `supplier_variant_mappings` rows
    (supplier `'cj'`, the payload's CJ pid/vid) — **without these, fulfillment parks every
    order for the product as `unmapped_item`**; they are not optional bookkeeping.
-4. `inventorySetQuantities` from the payload's stock figure (parent-mandated).
+4. Variants are inventory-untracked (`inventoryItem: { tracked: false }` in the productSet
+   input) — see the Decisions table; `inventorySetQuantities` is deliberately not called.
 5. Flip ACTIVE; `publishablePublish` to every publication from `listPublications`
    (per-publication failure containment). Outcome rule: product ACTIVE **and** the Online
    Store publication succeeded → `applied` (other publication failures audit + alert);
