@@ -1,7 +1,10 @@
-import { auditLog, type createDb } from '@doge-buddy/db'
+import { auditLog, proposals, type createDb } from '@doge-buddy/db'
+import { eq } from 'drizzle-orm'
 import type { FastifyPluginAsync } from 'fastify'
 import type { SendOpts } from '../../fulfillment/types.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
+import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts'
+import { applyProposalTransition, StaleProposalStatusError } from '../../proposals/transitions.ts'
 import type { Settings } from '../../settings.ts'
 import {
   consumeLoginToken,
@@ -139,6 +142,121 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       authed.get('/admin', async (_request, reply) => {
         return reply.code(200).type('text/html; charset=utf-8').send(layout('Dashboard', html`<p>coming in Task 6</p>`))
       })
+
+      async function lookupProposal(id: string) {
+        const [row] = await deps.db.select().from(proposals).where(eq(proposals.id, id))
+        return row
+      }
+
+      // Session-authed counterpart to actions.ts's public /a/:proposalId/approve|reject — same
+      // guarded-UPDATE + lazy-expiry mechanics (StaleProposalStatusError means someone else, an
+      // owner via the one-click link or a concurrent admin tab, already decided this row), but
+      // reached via the cookie session instead of a bearer token, and with an optional
+      // edit-then-approve payload override.
+      for (const decision of ['approve', 'reject'] as const) {
+        authed.post(`/admin/proposals/:id/${decision}`, async (request, reply) => {
+          const { id } = request.params as { id: string }
+          const row = await lookupProposal(id)
+
+          // Lazy expiry, mirroring actions.ts's POST path exactly: a pending row past its
+          // expiresAt flips to 'expired' the moment anyone actually acts on it, regardless of
+          // which surface (link or admin) triggered the act. The flip itself is always
+          // attributed to 'system' — the admin/'owner' context only applies to a real decision.
+          if (row && row.status === 'pending' && !(row.expiresAt.getTime() > Date.now())) {
+            try {
+              await applyProposalTransition(deps.db, id, 'pending', 'expired')
+              await deps.db.insert(auditLog).values({
+                actor: 'system',
+                action: 'proposal.expired',
+                entityType: 'proposal',
+                entityId: id,
+                detail: { via: 'lazy-expiry' },
+              })
+            } catch (err) {
+              if (!(err instanceof StaleProposalStatusError)) throw err
+            }
+            return reply
+              .code(200)
+              .type('text/html; charset=utf-8')
+              .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
+          }
+
+          if (!row || row.status !== 'pending') {
+            return reply
+              .code(200)
+              .type('text/html; charset=utf-8')
+              .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
+          }
+
+          // Edit-then-approve: an optional `payload` form field carries JSON text (from a
+          // textarea) that replaces the proposal's stored payload before applying. Only approve
+          // honors it — reject has nothing to validate a replacement payload against.
+          let patchedPayload: unknown
+          if (decision === 'approve') {
+            const body = (request.body ?? {}) as { payload?: string }
+            if (body.payload) {
+              let parsedJson: unknown
+              try {
+                parsedJson = JSON.parse(body.payload)
+              } catch (err) {
+                const message = err instanceof Error ? err.message : String(err)
+                return reply
+                  .code(400)
+                  .type('text/html; charset=utf-8')
+                  .send(layout('Proposal', html`<p>Invalid JSON: ${message}</p>`))
+              }
+
+              const schema = PAYLOAD_SCHEMAS[row.type]
+              const result = schema.safeParse(parsedJson)
+              if (!result.success) {
+                const issues = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+                return reply
+                  .code(400)
+                  .type('text/html; charset=utf-8')
+                  .send(
+                    layout(
+                      'Proposal',
+                      html`<p>Invalid payload:</p>
+                        <ul>
+                          ${issues.map((issue) => html`<li>${issue}</li>`)}
+                        </ul>`,
+                    ),
+                  )
+              }
+              patchedPayload = result.data
+            }
+          }
+
+          const status = decision === 'approve' ? 'approved' : 'rejected'
+          try {
+            await applyProposalTransition(deps.db, id, 'pending', status, {
+              decidedBy: 'owner',
+              decidedAt: new Date(),
+              actionTokenHash: null,
+              ...(patchedPayload ? { payload: patchedPayload } : {}),
+            })
+          } catch (err) {
+            if (err instanceof StaleProposalStatusError) {
+              return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Already handled.</p>`))
+            }
+            throw err
+          }
+
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
+            entityType: 'proposal',
+            entityId: id,
+            detail: { via: 'admin', edited: Boolean(patchedPayload) },
+          })
+
+          if (decision === 'approve') {
+            await enqueueProposalApply(deps.enqueue, id)
+          }
+
+          return reply.code(303).header('location', `/admin/proposals/${id}`).send()
+        })
+      }
 
       // Placeholder so the whole authed scope is gated from day one, even for paths Tasks 4-8
       // haven't registered yet (e.g. /admin/settings) — an unauthenticated request to any

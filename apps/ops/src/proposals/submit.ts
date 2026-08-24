@@ -11,7 +11,7 @@ import { generateActionToken } from './tokens.ts'
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
 
-const PAYLOAD_SCHEMAS = {
+export const PAYLOAD_SCHEMAS = {
   new_listing: NewListingPayloadSchema,
   support_reply: SupportReplyPayloadSchema,
   refund: RefundPayloadSchema,
