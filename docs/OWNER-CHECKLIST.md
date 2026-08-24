@@ -41,7 +41,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ## Later phases (no action yet — listed so nothing surprises you)
 
-- [ ] ⚪ **Anthropic API key** (Phase 5 — sourcing agent). 🔴 blocks agent runs when we get there.
+- [x] ~~Anthropic API key.~~ **Done (2026-08-24):** key in `apps/ops/.env`, validated against the API (free `count_tokens` probe). *Remaining sub-steps when Phase 5's live runs start:* add `ANTHROPIC_API_KEY` to Railway's variables, and consider a workspace spend limit in the Anthropic console (~$10/mo hard cap matches the design's ≤$0.75/wk sourcing budget).
 - [ ] ⚪ **Domain name decision** + DNS access (Phase 6 email, Phase 7 launch). You said you own one — tell Claude which. 🔴 blocks Google Workspace setup and launch cutover.
 - [ ] ⚪ **Google Workspace** (support@ user, ~$7/mo) **+ GCP project** with service account & domain-wide delegation (Phase 6). 🔴 blocks the support agent going live.
 - [ ] ⚪ **FunkyDori webfont license check** (Phase 2). Not a blocker — Lilita One is the stand-in display face (the `--font-display` token in tailwind.css is the FunkyDori swap point); Poppins is the body face.
