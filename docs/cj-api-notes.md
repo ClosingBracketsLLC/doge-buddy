@@ -95,9 +95,27 @@ Both dispute endpoints require an order that has actually been **paid** — an u
 - Contract-test idempotency keys must be unique per run — orders outlive the run, so a fixed key
   makes the next run reuse an order that has already advanced past the expected state.
 
+## Webhooks (updated 2026-08-23, from CJ's live registration probe)
+
+- `POST /webhook/set` **probes the callback URL at registration time and requires a 200** —
+  error `1600300` names the status it got instead. A 401-on-unverifiable endpoint therefore
+  can't be registered until verification actually passes.
+- The signature header is plain **`sign`** — not `cj-signature`/`x-cj-signature`/`signature`
+  as originally guessed. Value observed base64, 32 bytes decoded, consistent with the
+  documented `base64(hmacSHA256(openId, rawBody))`.
+- The probe body is a synthetic ORDER event: `{messageId, messageType: "UPDATE", openId,
+  params: {cjOrderId, createDate, deliveryDate, orderNum, orderStatus, logisticName,
+  trackNumber, …}}` with `"test"` values — and **no top-level `type` field**, unlike the docs
+  example. If real events also omit `type`, `parseWebhook` classifies them `other` and the
+  router won't treat them as order events — check the first real event's stored payload in
+  `webhook_events`.
+- Rejected deliveries are captured to `audit_log` (`webhook.cj.rejected`: sanitized headers,
+  bounded body preview, sha256) — the scheme is read off the audit trail, never guessed.
+
 ## Still unverified
 
-- **Webhook signing.** `verifyWebhook` assumes `base64(hmacSHA256(openId, rawBody))` under one of
-  `cj-signature` / `x-cj-signature` / `signature`. No live CJ webhook has been received yet.
+- **The HMAC formula end-to-end** — the header is confirmed; the key/formula matches docs but
+  passes live proof only when `/webhook/set` registration succeeds against the fixed endpoint.
 - `lastMileTrackNumber` never appeared on the observed sandbox order; presumed carrier-dependent.
 - `openDispute` / `getDispute` request bodies — not exercised by the contract suite.
+- Real (non-probe) webhook event shape — incl. whether the top-level `type` field exists.
