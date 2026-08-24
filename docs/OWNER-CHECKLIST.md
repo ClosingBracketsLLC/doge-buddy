@@ -41,11 +41,12 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ## Later phases (no action yet — listed so nothing surprises you)
 
-- [x] ~~Anthropic API key.~~ **Done (2026-08-24):** key in `apps/ops/.env`, validated against the API (free `count_tokens` probe). *Remaining sub-steps when Phase 5's live runs start:* add `ANTHROPIC_API_KEY` to Railway's variables, and consider a workspace spend limit in the Anthropic console (~$10/mo hard cap matches the design's ≤$0.75/wk sourcing budget).
+- [x] ~~Anthropic API key.~~ **Done (2026-08-24):** key in `apps/ops/.env`, validated against the API (free `count_tokens` probe), **and added to Railway's variables same day**. *Optional remaining sub-step:* a workspace spend limit in the Anthropic console (~$15/mo hard cap comfortably covers the approved $2.00/run weekly sourcing budget).
+- [x] ~~SerpApi account (Google Trends bridge for Phase 5).~~ **Done (2026-08-24):** free-tier account created, `SERPAPI_KEY` in gitignored `apps/ops/.env`, validated against the account endpoint (Free Plan, 250 searches/mo, 250 left — the weekly run uses ~18–45/wk). *Remaining sub-step before Phase 5's live runs on Railway:* add `SERPAPI_KEY` to Railway's variables.
 - [ ] ⚪ **Domain name decision** + DNS access (Phase 6 email, Phase 7 launch). You said you own one — tell Claude which. 🔴 blocks Google Workspace setup and launch cutover.
 - [ ] ⚪ **Google Workspace** (support@ user, ~$7/mo) **+ GCP project** with service account & domain-wide delegation (Phase 6). 🔴 blocks the support agent going live.
 - [ ] ⚪ **FunkyDori webfont license check** (Phase 2). Not a blocker — Lilita One is the stand-in display face (the `--font-display` token in tailwind.css is the FunkyDori swap point); Poppins is the body face.
-- [ ] ⚪ **Apply for the Google Trends official API alpha** (free, approval is slow — applying early helps Phase 5). Not a blocker — SerpApi bridges it.
+- [x] ~~Apply for the Google Trends official API alpha.~~ **Applied (2026-08-24).** Approval is slow (months-to-never per applicant reports) — SerpApi bridges it meanwhile; the Phase 5 trends adapter is swappable, so approval landing later is a drop-in.
 - [ ] ⚪ **CJ wallet top-up ~$150** (Phase 7 canary). 🔴 blocks the first real order. Top-up is manual only — no API.
 - [ ] ⚪ **Policy pages → Shopify Settings** (Phase 7). Paste `apps/storefront/app/content/policies.tsx` copy into Shopify Settings → Policies and review/finalize before launch.
 - [ ] ⚪ **Business checks before launch** (Phase 7): Shopify Payments setup, US tax registrations in Shopify Tax, general liability insurance for the LLC (recommended), policy pages review.
@@ -56,4 +57,4 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 *Maintained by Claude; last updated 2026-08-24 (Phase 4 Plan B merged — admin surface wired; Tier-2 dashboard walk added above). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** Phase 5 prework (sourcing agent) — blocked on the ⚪ **Anthropic API key** item above (Later phases section); until that's filled in, build work can continue against fixtures/mocks but agent runs themselves can't. Phase 4 (Plan A + Plan B) is merged; only its Tier-2 admin-dashboard walk above is still open.
+**Next build session starts here →** Phase 5 (sourcing agent) is **fully unblocked and in flight**: prework committed (`docs/superpowers/specs/2026-08-24-phase-5-prework.md`), brainstorm decisions locked (SerpApi + alpha filed; $2.00/run budget; build `getProductReviews`; cron armed on merge, Mondays 13:00 UTC), design spec at `docs/superpowers/specs/2026-08-24-phase-5-sourcing-agent-design.md`. Resume at whatever the spec's Status line says (spec review → plan → SDD execution). Phase 4 (Plan A + Plan B) is merged; only its Tier-2 admin-dashboard walk above is still open.
