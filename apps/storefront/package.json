@@ -5,7 +5,7 @@
   "version": "2026.4.6",
   "type": "module",
   "scripts": {
-    "build": "shopify hydrogen build --codegen --path \"$(pwd)\"",
+    "build": "shopify hydrogen build --codegen --path \"$(pwd)\" --no-lockfile-check",
     "dev": "shopify hydrogen dev --codegen --path \"$(pwd)\"",
     "preview": "shopify hydrogen preview --build --path \"$(pwd)\"",
     "lint": "eslint --no-error-on-unmatched-pattern .",

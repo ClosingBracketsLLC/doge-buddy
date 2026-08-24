@@ -42,6 +42,6 @@ jobs:
         # --path "$PWD" for the same pnpm INIT_CWD quirk the storefront's own scripts work
         # around (see README): without it the Shopify CLI resolves the project root to the
         # repo root and Hydrogen's project detection breaks.
-        run: pnpm exec shopify hydrogen deploy --path "$PWD"
+        run: pnpm exec shopify hydrogen deploy --path "$PWD" --no-lockfile-check
         env:
           SHOPIFY_HYDROGEN_DEPLOYMENT_TOKEN: ${{ secrets.OXYGEN_DEPLOYMENT_TOKEN_1000173017 }}
