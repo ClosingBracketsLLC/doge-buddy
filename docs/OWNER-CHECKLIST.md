@@ -28,6 +28,15 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 - [x] ~~Phase 4 Tier-2 verification.~~ **Done (2026-08-24) — closed by Robert's thumb.** The full production path ran live: seeded proposal → Telegram message with buttons → phone tap → deployed confirm page → form POST → guarded approval (`decided_by: owner`) → deployed apply worker → real ACTIVE product `gid://shopify/Product/8947876659288` with its CJ fulfillment mapping. The first tap surfaced a real bug (Fastify has no urlencoded parser, so real browser form submits 415'd — invisible to tests/curl, which send no Content-Type; fixed in 7efd26f with a regression test). Second Dog Snuff Pad listing on the store is the proof artifact — delete either duplicate via admin whenever. **Phase 4 Plan A is complete on every tier.**
 
+- [ ] 🟡 **Phase 4B Tier-2 verification** — after the next push + Railway redeploy, visit
+  `https://doge-buddyops-production.up.railway.app/admin/login` on your phone, tap the button to
+  request a login link, tap the Telegram login link when it arrives, and walk the
+  dashboard/proposals/orders/settings pages. Then approve one seeded proposal from the dashboard
+  (not the old one-click Telegram link) — seed one first with
+  `pnpm --filter @doge-buddy/ops seed-proposal` run against the Railway DB (`DATABASE_URL` set to
+  the Railway Postgres connection string), then find it on `/admin/proposals` and approve it from
+  there. Closes Phase 4 Plan B's live tier.
+
 - [ ] ⚪ **Rotate the Railway Postgres password** (Settings on the Postgres service → regenerate credentials) — the public `DATABASE_PUBLIC_URL` was pasted into the Claude chat log during deploy verification (2026-08-23). Low urgency, private log, but hygiene says rotate. Claude's local verification scripts will need the new value if you want DB checks re-run afterward.
 
 ## Later phases (no action yet — listed so nothing surprises you)
@@ -45,6 +54,6 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ---
 
-*Maintained by Claude; last updated 2026-08-24 (Phase 4 Plan A merged + live-verified; first green CI + first Oxygen deploy; Hydrogen/Oxygen done). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
+*Maintained by Claude; last updated 2026-08-24 (Phase 4 Plan B merged — admin surface wired; Tier-2 dashboard walk added above). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** Phase 4 **Plan B** (admin surface: magic-link login, dashboard, proposals/orders/settings pages) — spec §§4-5 of `docs/superpowers/specs/2026-08-23-phase-4-proposals-design.md` (approved), written via superpowers:writing-plans, executed subagent-driven like Plan A (`docs/superpowers/plans/2026-08-23-phase-4a-proposal-pipeline.md` is the precedent; its parked/deferred items are listed at the end of the Plan A merge summary in the 2026-08-24 chat and in the spec's own Decisions table).
+**Next build session starts here →** Phase 5 prework (sourcing agent) — blocked on the ⚪ **Anthropic API key** item above (Later phases section); until that's filled in, build work can continue against fixtures/mocks but agent runs themselves can't. Phase 4 (Plan A + Plan B) is merged; only its Tier-2 admin-dashboard walk above is still open.

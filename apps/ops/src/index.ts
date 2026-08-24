@@ -18,6 +18,7 @@ import { loadConfig } from './config.ts'
 import type { ReconcileDeps } from './fulfillment/run-reconcile.ts'
 import type { ShopifyFulfillmentOps } from './fulfillment/run-sync-tracking.ts'
 import type { ActionRouteDeps } from './http/actions.ts'
+import type { AdminDeps } from './http/admin/routes.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
@@ -63,7 +64,8 @@ if (config.fulfillmentSupplier === 'cj') {
 // alerter) as one of its own dependencies, so building the server has to come first. The
 // webhook route's `enqueue` closes over this `let` binding rather than an already-assigned
 // value; that's safe because webhook routes only ever run at request time, which is after
-// `app.listen()`, which is itself after `queue` is assigned below.
+// `app.listen()`, which is itself after `queue` is assigned below. Same closure, same safety
+// argument for the action routes' and admin routes' `enqueue` (both request-time-only consumers).
 let queue: Queue
 
 // pg-boss's 3-arg `send` overload requires a real SendOptions object (not `undefined`), so
@@ -94,20 +96,42 @@ const webhookDeps: WebhookDeps = {
 // `enqueue` just above: declare a `let` for the real alerter and assign it right after `app`
 // exists (see `alertImpl = createAlerter(db, app.log)` below); `alert` here is a thin closure over
 // that binding. Safe for the same reason `enqueue`'s closure over `queue` is safe — action routes
-// only ever run at request time, which is after `app.listen()`, which is itself after `alertImpl`
-// is assigned.
+// (and, likewise, admin routes below) only ever run at request time, which is after
+// `app.listen()`, which is itself after `alertImpl` is assigned.
 let alertImpl: ReturnType<typeof createAlerter>
 const alert = (severity: AlertSeverity, kind: string, detail: Record<string, unknown>): Promise<void> =>
   alertImpl(severity, kind, detail)
 
 const actionDeps: ActionRouteDeps = { db, enqueue, alert }
 
-// The `/a/:proposalId/approve|reject` routes are gated on `ADMIN_BASE_URL` per spec §7 — those
-// links are only ever generated (and only ever meant to be reachable) once an admin base URL is
-// configured, same conditional-spread style as `webhookDeps` above.
+// Owner-notification seam for the proposal pipeline (Task 6): Telegram when configured, else the
+// alert-and-false noop fallback (`createNoopNotifier`). Built here (rather than down by
+// `shopifyOps`/`proposalShopify`, which it doesn't depend on) so it's available for `adminDeps`
+// just below — its first real consumer is the admin magic-link login route (`POST /admin/login`),
+// which calls `deps.notify(...)` to deliver the login link.
+const notify: NotifyOwner = config.telegram
+  ? createTelegramNotifier({ ...config.telegram, alert })
+  : createNoopNotifier(alert)
+
+// AdminDeps (Plan B): same db/settings/enqueue/alert bindings as actionDeps, plus `notify` (the
+// magic-link login send) and `adminBaseUrl` (the login link's own host, same value actions.ts's
+// one-click links already assume is reachable). `getWalletBalance` is optional on AdminDeps — the
+// dashboard's health strip shows 'n/a' without it — so it's a conditional spread rather than
+// `cjAdapter ? (() => cjAdapter.getBalance()) : undefined`, keeping exactOptionalPropertyTypes
+// happy the same way `webhookDeps` above handles its own optional fields.
+const adminDeps: AdminDeps = {
+  db, settings, enqueue, alert, notify,
+  adminBaseUrl: config.adminBaseUrl!,
+  ...(cjAdapter ? { getWalletBalance: () => cjAdapter.getBalance() } : {}),
+}
+
+// Both `/a/:proposalId/approve|reject` (Plan A) and `/admin/...` (Plan B) are gated on
+// `ADMIN_BASE_URL` per spec §7 — those links/pages are only ever generated (and only ever meant
+// to be reachable) once an admin base URL is configured, same conditional-spread style as
+// `webhookDeps` above. One shared gate: either both register, or neither does.
 const app = buildServer({
   pool, isQueueReady: () => queue.ready(), webhooks: webhookDeps,
-  ...(config.adminBaseUrl ? { actions: actionDeps } : {}),
+  ...(config.adminBaseUrl ? { actions: actionDeps, admin: adminDeps } : {}),
 })
 
 // Loud on purpose: which adapter actually backs the money path is the single most important fact
@@ -172,16 +196,6 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       publishablePublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
     }
-
-// Owner-notification seam for the proposal pipeline (Task 6): Telegram when configured, else the
-// alert-and-false noop fallback (`createNoopNotifier`). Not yet consumed by any route in this
-// task — `submitProposal`'s own `notify` dependency has no call site wired into `index.ts` until a
-// future task adds a workflow-trigger entry point — but built here so that wiring is a one-line
-// addition later rather than a second pass through this file's dependency graph.
-const notify: NotifyOwner = config.telegram
-  ? createTelegramNotifier({ ...config.telegram, alert })
-  : createNoopNotifier(alert)
-void notify
 
 queue = await startQueue(config.databaseUrl, {
   adapter: supplierAdapter, settings, alert, shopify: shopifyOps, proposalShopify,
