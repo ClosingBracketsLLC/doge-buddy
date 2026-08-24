@@ -20,6 +20,8 @@ describe('guards', () => {
     it.each([
       ['<p>Good <strong>toy</strong></p><ul><li>durable</li></ul>', null],
       ['<h2>Specs</h2><p>10cm</p>', null],
+      ['<p>price < 100 dogs</p>', null],
+      ['<p>rated <3 by pups</p>', null],
     ])('accepts %s', (html, expected) => expect(validateDescriptionHtml(html)).toBe(expected))
     it.each([
       '<script>alert(1)</script>',
@@ -29,6 +31,14 @@ describe('guards', () => {
       '<p>see data:text/html;base64,x</p>',
       '<iframe src="https://x"></iframe>',
       '<P STYLE="x">shout</P>',
+      '<p>hi</p><script',
+      '<p>x</p></',
+      '<!-- hidden -->',
+      '<p>see &#106;avascript:alert(1)</p>',
+      '<p>&#x64;ata:text/html,x</p>',
+      '<p>java\nscript:alert(1)</p>',
+      '<p>java\tscript:x</p>',
+      '<ѕcript>x</ѕcript>',
     ])('rejects %s', (html) => expect(validateDescriptionHtml(html)).not.toBeNull())
   })
 })

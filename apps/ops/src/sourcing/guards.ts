@@ -10,7 +10,10 @@ export const CLAIM_TERMS = [
   'pain relief', 'antibacterial', 'antimicrobial', 'hypoallergenic',
 ] as const
 
-/** Case-insensitive substring match over the given text fields. Returns the matched term or null. */
+/**
+ * Case-insensitive substring match over the given text fields. Returns the matched term or null.
+ * Returns the first matched term in EXCLUDED_CATEGORY_TERMS array order on overlaps (e.g., text 'treats' reports 'treat' if 'treat' comes first).
+ */
 export function matchExcludedCategory(...texts: (string | null | undefined)[]): string | null {
   const combinedText = texts
     .filter((t) => t != null)
@@ -63,11 +66,66 @@ export function htmlToText(html: string): string {
   return text
 }
 
+/** Normalize HTML for scheme detection: decode entities, strip whitespace, lowercase. */
+function normalizeForSchemeDetection(html: string): string {
+  let normalized = html
+
+  // Decode numeric entities (decimal)
+  normalized = normalized.replace(/&#(\d+);/g, (_, d) => {
+    try {
+      const codePoint = Number(d)
+      // Guard against NaN or huge codepoints
+      if (isNaN(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        return ''
+      }
+      return String.fromCharCode(codePoint)
+    } catch {
+      return ''
+    }
+  })
+
+  // Decode numeric entities (hex)
+  normalized = normalized.replace(/&#x([0-9a-f]+);/gi, (_, h) => {
+    try {
+      const codePoint = parseInt(h, 16)
+      if (isNaN(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        return ''
+      }
+      return String.fromCharCode(codePoint)
+    } catch {
+      return ''
+    }
+  })
+
+  // Decode the 6 named entities
+  normalized = normalized
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+
+  // Strip all whitespace
+  normalized = normalized.replace(/\s+/g, '')
+
+  // Lowercase
+  normalized = normalized.toLowerCase()
+
+  return normalized
+}
+
 /** Allowlist validator per spec §Stage 4.3. Returns null when valid, else a human-readable reason. */
 export function validateDescriptionHtml(html: string): string | null {
-  // Check for javascript: or data: anywhere (case-insensitive)
+  // Check for javascript: or data: anywhere (case-insensitive, literal)
   if (/javascript:|data:/i.test(html)) {
     return 'HTML contains javascript: or data: URLs'
+  }
+
+  // Check for javascript: or data: via encoded entities and whitespace evasion
+  const normalized = normalizeForSchemeDetection(html)
+  if (/javascript:|data:/.test(normalized)) {
+    return 'HTML contains encoded or whitespace-obfuscated javascript: or data: URLs'
   }
 
   // Allowed tags
@@ -91,6 +149,14 @@ export function validateDescriptionHtml(html: string): string | null {
     if (trimmedAttrs !== '') {
       return `Tag <${tagName}> has attributes which are not allowed`
     }
+  }
+
+  // Check for unclosed/malformed tags in residue (after removing all well-formed tags)
+  const residue = html.replace(tagRegex, '')
+  // Reject any < in residue that is NOT followed by whitespace, digit, or another <
+  // Also reject bare < at end of string
+  if (/<(?=[^\s\d<]|$)/.test(residue)) {
+    return 'Malformed or unclosed markup'
   }
 
   return null
