@@ -1,22 +1,30 @@
 import { createDb } from '@doge-buddy/db'
 import {
+  findProductByHandle,
   fulfillmentCreate,
   fulfillmentTrackingInfoUpdate,
+  listPublications,
   orderFulfillmentOrders,
   ordersUpdatedSince,
+  productSet,
+  publishablePublish,
   ShopifyAdminClient,
   ShopifyTokenManager,
 } from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdapter } from '@doge-buddy/supplier'
-import { createAlerter } from './alerts.ts'
+import { createAlerter, type AlertSeverity } from './alerts.ts'
 import { loadConfig } from './config.ts'
 import type { ReconcileDeps } from './fulfillment/run-reconcile.ts'
 import type { ShopifyFulfillmentOps } from './fulfillment/run-sync-tracking.ts'
+import type { ActionRouteDeps } from './http/actions.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { loadDotEnv } from './load-env.ts'
+import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
+import { createTelegramNotifier } from './notify/telegram.ts'
+import type { ProposalShopifyOps } from './proposals/run-apply.ts'
 import { registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
@@ -79,7 +87,20 @@ const webhookDeps: WebhookDeps = {
     : {}),
 }
 
-const app = buildServer({ pool, isQueueReady: () => queue.ready(), webhooks: webhookDeps })
+// `actions` (ActionRouteDeps, Task 5) needs `alert`, but the real alerter needs `app.log` — which
+// only exists once `buildServer` below has already constructed `app`. Same trick as `queue`/
+// `enqueue` just above: declare a `let` for the real alerter and assign it right after `app`
+// exists (see `alertImpl = createAlerter(db, app.log)` below); `alert` here is a thin closure over
+// that binding. Safe for the same reason `enqueue`'s closure over `queue` is safe — action routes
+// only ever run at request time, which is after `app.listen()`, which is itself after `alertImpl`
+// is assigned.
+let alertImpl: ReturnType<typeof createAlerter>
+const alert = (severity: AlertSeverity, kind: string, detail: Record<string, unknown>): Promise<void> =>
+  alertImpl(severity, kind, detail)
+
+const actionDeps: ActionRouteDeps = { db, enqueue, alert }
+
+const app = buildServer({ pool, isQueueReady: () => queue.ready(), webhooks: webhookDeps, actions: actionDeps })
 
 // Loud on purpose: which adapter actually backs the money path is the single most important fact
 // about this boot, and it's driven by an env var (`FULFILLMENT_SUPPLIER`) that's easy to leave
@@ -92,7 +113,7 @@ if (supplierAdapter.key === 'mock' && config.shopify) {
   )
 }
 
-const alert = createAlerter(db, app.log)
+alertImpl = createAlerter(db, app.log)
 
 // Built here — before `startQueue` — because the `fulfillment.sync-tracking` queue it wires needs
 // a `shopifyOps` dep at registration time, not just at cron time (unlike the webhook-audit cron
@@ -127,7 +148,34 @@ const shopifyOps: ShopifyFulfillmentOps = shopifyClient
       ordersUpdatedSince: shopifyNotConfigured,
     }
 
-queue = await startQueue(config.databaseUrl, { adapter: supplierAdapter, settings, alert, shopify: shopifyOps })
+// Same shape as `shopifyOps` just above, for `proposal.apply`'s `new_listing` pipeline (Task 6).
+const proposalShopify: ProposalShopifyOps = shopifyClient
+  ? {
+      findProductByHandle: (handle) => findProductByHandle(shopifyClient, handle),
+      productSet: (input) => productSet(shopifyClient, input),
+      listPublications: () => listPublications(shopifyClient),
+      publishablePublish: (productId, publicationId) => publishablePublish(shopifyClient, productId, publicationId),
+    }
+  : {
+      findProductByHandle: shopifyNotConfigured,
+      productSet: shopifyNotConfigured,
+      listPublications: shopifyNotConfigured,
+      publishablePublish: shopifyNotConfigured,
+    }
+
+// Owner-notification seam for the proposal pipeline (Task 6): Telegram when configured, else the
+// alert-and-false noop fallback (`createNoopNotifier`). Not yet consumed by any route in this
+// task — `submitProposal`'s own `notify` dependency has no call site wired into `index.ts` until a
+// future task adds a workflow-trigger entry point — but built here so that wiring is a one-line
+// addition later rather than a second pass through this file's dependency graph.
+const notify: NotifyOwner = config.telegram
+  ? createTelegramNotifier({ ...config.telegram, alert })
+  : createNoopNotifier(alert)
+void notify
+
+queue = await startQueue(config.databaseUrl, {
+  adapter: supplierAdapter, settings, alert, shopify: shopifyOps, proposalShopify,
+})
 
 // `fulfillment.reconcile` (Task 14): the hourly four-sweep reconciliation job. Registered
 // unconditionally (unlike the `shopify.webhook-audit` cron below, which needs `adminBaseUrl` too)

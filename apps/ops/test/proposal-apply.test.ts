@@ -1,0 +1,435 @@
+import { auditLog, createDb, products, productVariants, proposals, supplierVariantMappings } from '@doge-buddy/db'
+import { eq, inArray } from 'drizzle-orm'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import {
+  deadLetterApplyProposal, executeApplyProposal, proposalHandle, type ProposalShopifyOps,
+} from '../src/proposals/run-apply.ts'
+
+const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
+
+function newListingPayload() {
+  return {
+    type: 'new_listing', title: 'Dog Snuff Pad', descriptionHtml: '<p>x</p>',
+    categoryTag: 'toys', imageUrls: ['https://cf.cjdropshipping.com/x.png'], shipsFrom: 'US',
+    deliveryMinDays: 3, deliveryMaxDays: 7,
+    variants: [{ sku: `SKU-${crypto.randomUUID()}`, priceCents: 2999, supplierCostCents: 1414,
+      supplier: 'cj', supplierProductId: 'cjp-1', supplierVariantId: 'cjv-1' }],
+  }
+}
+
+function refundPayload() {
+  return {
+    type: 'refund',
+    orderId: crypto.randomUUID(),
+    shopifyOrderGid: 'gid://shopify/Order/123',
+    amountCents: 500,
+    reason: 'damaged',
+    openCjDispute: false,
+  }
+}
+
+function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopifyOps & { calls: string[] } {
+  const calls: string[] = []
+  let n = 0
+  return {
+    calls,
+    findProductByHandle: async () => { calls.push('find'); return null },
+    productSet: async (input) => {
+      calls.push(`productSet:${String((input as { status?: string }).status)}`)
+      n += 1
+      const variants = ((input as { variants?: { sku?: string }[] }).variants ?? [{}]).map((v, i) => ({
+        id: `gid://shopify/ProductVariant/${n}00${i}`, sku: v.sku,
+      }))
+      return { productId: `gid://shopify/Product/${n}`, variants }
+    },
+    listPublications: async () => [{ id: 'pub-1', name: 'Online Store' }, { id: 'pub-2', name: 'Shop' }],
+    publishablePublish: async (_p, pub) => { calls.push(`publish:${pub}`) },
+    ...overrides,
+  }
+}
+
+// `fakeShopify`'s `productSet` mints deterministic gids from a per-instance counter that always
+// starts at 0 — every test's *own* fresh `fakeShopify()` therefore produces the exact same literal
+// first-call gids (`gid://shopify/Product/1`, `gid://shopify/ProductVariant/1000`), and test 4
+// pins a second literal (`gid://shopify/Product/9`) via its `findProductByHandle` override. Normal
+// intra-run hygiene is `afterEach` below (tracks and deletes exactly what each test created) — but
+// this shared, persistent test database can also carry a row left behind by a run that crashed or
+// was killed mid-file (before its own `afterEach` fired) on a PRIOR invocation. Because the
+// products-row insert is `onConflictDoNothing` (by design — it's the crash-resume idempotency this
+// suite exists to test), a stale row squatting one of these exact literal gids doesn't fail loudly
+// on the next run: the insert silently no-ops and the subsequent SELECT quietly reads back
+// whatever unrelated row already owns that gid, corrupting every test's assertions in a confusing
+// way (same class of bug `fulfillment-pay-order.test.ts` and friends already guard against — see
+// this repo's "test: fix dirty-DB rerun contamination" fix). Purge every row pinned to these known
+// literals once, up front, so a dirty rerun can't silently contaminate this file's very first test.
+const FIXTURE_PRODUCT_GIDS = ['gid://shopify/Product/1', 'gid://shopify/Product/9']
+const FIXTURE_VARIANT_GIDS = ['gid://shopify/ProductVariant/1000']
+
+describe('executeApplyProposal / deadLetterApplyProposal', () => {
+  const { db, pool } = createDb(url)
+  afterAll(() => pool.end())
+
+  beforeAll(async () => {
+    const staleVariants = await db
+      .select({ id: productVariants.id })
+      .from(productVariants)
+      .where(inArray(productVariants.shopifyVariantGid, FIXTURE_VARIANT_GIDS))
+    const staleProducts = await db
+      .select({ id: products.id })
+      .from(products)
+      .where(inArray(products.shopifyProductGid, FIXTURE_PRODUCT_GIDS))
+    const productIds = staleProducts.map((p) => p.id)
+    const moreVariants = productIds.length
+      ? await db.select({ id: productVariants.id }).from(productVariants).where(inArray(productVariants.productId, productIds))
+      : []
+    const variantIds = [...new Set([...staleVariants, ...moreVariants].map((v) => v.id))]
+    if (variantIds.length > 0) {
+      await db.delete(supplierVariantMappings).where(inArray(supplierVariantMappings.variantId, variantIds))
+      await db.delete(productVariants).where(inArray(productVariants.id, variantIds))
+    }
+    if (productIds.length > 0) {
+      await db.delete(products).where(inArray(products.id, productIds))
+    }
+  })
+
+  let createdProposalIds: string[] = []
+  let createdProductIds: string[] = []
+
+  afterEach(async () => {
+    if (createdProductIds.length > 0) {
+      const variantRows = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(inArray(productVariants.productId, createdProductIds))
+      const variantIds = variantRows.map((v) => v.id)
+      if (variantIds.length > 0) {
+        await db.delete(supplierVariantMappings).where(inArray(supplierVariantMappings.variantId, variantIds))
+        await db.delete(productVariants).where(inArray(productVariants.id, variantIds))
+      }
+      await db.delete(products).where(inArray(products.id, createdProductIds))
+    }
+    if (createdProposalIds.length > 0) {
+      await db.delete(auditLog).where(inArray(auditLog.entityId, createdProposalIds))
+      await db.delete(proposals).where(inArray(proposals.id, createdProposalIds))
+    }
+    createdProductIds = []
+    createdProposalIds = []
+  })
+
+  async function seedProposal(opts: {
+    status: 'approved' | 'applying' | 'applied' | 'rejected'
+    type?: 'new_listing' | 'refund'
+    payload?: unknown
+  }) {
+    const [row] = await db
+      .insert(proposals)
+      .values({
+        type: opts.type ?? 'new_listing',
+        status: opts.status,
+        summary: 'test',
+        payload: (opts.payload ?? newListingPayload()) as object,
+        sourceWorkflow: 'test',
+      })
+      .returning()
+    createdProposalIds.push(row!.id)
+    return row!
+  }
+
+  async function loadProposal(id: string) {
+    const [row] = await db.select().from(proposals).where(eq(proposals.id, id))
+    return row
+  }
+
+  async function auditRowsFor(id: string, action?: string) {
+    const rows = await db.select().from(auditLog).where(eq(auditLog.entityId, id))
+    return action ? rows.filter((r) => r.action === action) : rows
+  }
+
+  async function loadProduct(proposalId: string) {
+    const [row] = await db.select().from(products).where(eq(products.createdFromProposalId, proposalId))
+    return row
+  }
+
+  // ---------------------------------------------------------------------------
+  // 1. Happy path
+  // ---------------------------------------------------------------------------
+  it('1. happy path: new_listing goes live and fulfillable', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const payload = row.payload as ReturnType<typeof newListingPayload>
+    const shopify = fakeShopify()
+    const productSetSpy = vi.spyOn(shopify, 'productSet')
+    const alert = vi.fn(async () => {})
+
+    await executeApplyProposal({ db, alert, shopify }, row.id)
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applied')
+    expect(after!.appliedAt).toBeInstanceOf(Date)
+
+    const productRow = await loadProduct(row.id)
+    expect(productRow).toBeDefined()
+    createdProductIds.push(productRow!.id)
+    expect(productRow!.shopifyProductGid).toBe('gid://shopify/Product/1')
+    expect(productRow!.handle).toBe(proposalHandle(row.id))
+
+    const variantRows = await db.select().from(productVariants).where(eq(productVariants.productId, productRow!.id))
+    expect(variantRows).toHaveLength(1)
+    const variantRow = variantRows[0]!
+    expect(variantRow.sku).toBe(payload.variants[0]!.sku)
+    expect(variantRow.priceCents).toBe(payload.variants[0]!.priceCents)
+    expect(variantRow.supplierCostCents).toBe(payload.variants[0]!.supplierCostCents)
+    expect(variantRow.shopifyVariantGid).not.toBeNull()
+
+    const mappingRows = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantRow.id))
+    expect(mappingRows).toHaveLength(1)
+    expect(mappingRows[0]!.supplier).toBe('cj')
+    expect(mappingRows[0]!.supplierProductId).toBe(payload.variants[0]!.supplierProductId)
+    expect(mappingRows[0]!.supplierVariantId).toBe(payload.variants[0]!.supplierVariantId)
+
+    expect(shopify.calls).toEqual([
+      'find', 'productSet:DRAFT', 'productSet:ACTIVE', 'publish:pub-1', 'publish:pub-2',
+    ])
+
+    const draftCall = productSetSpy.mock.calls.find(([input]) => (input as { status?: string }).status === 'DRAFT')
+    expect(draftCall).toBeDefined()
+    const draftInput = draftCall![0] as Record<string, unknown>
+    expect(draftInput.handle).toBe(proposalHandle(row.id))
+    expect(draftInput.metafields).toEqual(
+      expect.arrayContaining([expect.objectContaining({ namespace: 'dogebuddy', key: 'ships_from' })]),
+    )
+    const draftVariants = draftInput.variants as { inventoryItem?: unknown }[]
+    expect(draftVariants.length).toBeGreaterThan(0)
+    for (const v of draftVariants) {
+      expect(v.inventoryItem).toEqual({ tracked: false })
+    }
+
+    const applied = await auditRowsFor(row.id, 'proposal.applied')
+    expect(applied).toHaveLength(1)
+    expect(applied[0]).toMatchObject({ actor: 'system', entityType: 'proposal', entityId: row.id })
+  })
+
+  // ---------------------------------------------------------------------------
+  // 2. Fulfillability proof
+  // ---------------------------------------------------------------------------
+  it('2. fulfillability proof: the mapping row joins back to a variant with cost + gid set', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const payload = row.payload as ReturnType<typeof newListingPayload>
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+
+    await executeApplyProposal({ db, alert, shopify }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    const [joined] = await db
+      .select({
+        supplierCostCents: productVariants.supplierCostCents,
+        shopifyVariantGid: productVariants.shopifyVariantGid,
+      })
+      .from(supplierVariantMappings)
+      .innerJoin(productVariants, eq(supplierVariantMappings.variantId, productVariants.id))
+      .where(eq(productVariants.sku, payload.variants[0]!.sku))
+
+    expect(joined).toBeDefined()
+    expect(joined!.supplierCostCents).not.toBeNull()
+    expect(joined!.shopifyVariantGid).not.toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------
+  // 3. Resume idempotency (crash after create)
+  // ---------------------------------------------------------------------------
+  it('3. resume after crash-after-create: local products row already has the gid, no re-create', async () => {
+    const row = await seedProposal({ status: 'applying' })
+    const [preInserted] = await db
+      .insert(products)
+      .values({
+        shopifyProductGid: `gid://shopify/Product/pre-${row.id}`,
+        handle: proposalHandle(row.id),
+        title: 'Dog Snuff Pad',
+        status: 'active',
+        categoryTag: 'toys',
+        createdFromProposalId: row.id,
+      })
+      .returning()
+    createdProductIds.push(preInserted!.id)
+
+    const shopify = fakeShopify({
+      findProductByHandle: async () => ({ id: preInserted!.shopifyProductGid! }),
+    })
+    const alert = vi.fn(async () => {})
+
+    await executeApplyProposal({ db, alert, shopify }, row.id)
+
+    expect(shopify.calls).not.toContain('productSet:DRAFT')
+    expect(shopify.calls).toContain('productSet:ACTIVE')
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applied')
+
+    const productRow = await loadProduct(row.id)
+    expect(productRow!.id).toBe(preInserted!.id)
+
+    const payload = row.payload as ReturnType<typeof newListingPayload>
+    const variantRows = await db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.sku, payload.variants[0]!.sku))
+    expect(variantRows).toHaveLength(1)
+    const mappingRows = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantRows[0]!.id))
+    expect(mappingRows).toHaveLength(1)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 4. Resume without local row
+  // ---------------------------------------------------------------------------
+  it('4. resume without a local row: finds by handle, backfills the local row, no re-create', async () => {
+    const row = await seedProposal({ status: 'applying' })
+    const shopify = fakeShopify()
+    shopify.findProductByHandle = async () => {
+      shopify.calls.push('find')
+      return { id: 'gid://shopify/Product/9' }
+    }
+    const alert = vi.fn(async () => {})
+
+    await executeApplyProposal({ db, alert, shopify }, row.id)
+
+    expect(shopify.calls).toContain('find')
+    expect(shopify.calls).not.toContain('productSet:DRAFT')
+    expect(shopify.calls).toContain('productSet:ACTIVE')
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applied')
+
+    const productRow = await loadProduct(row.id)
+    expect(productRow).toBeDefined()
+    createdProductIds.push(productRow!.id)
+    expect(productRow!.shopifyProductGid).toBe('gid://shopify/Product/9')
+  })
+
+  // ---------------------------------------------------------------------------
+  // 5. Dispatch no-ops
+  // ---------------------------------------------------------------------------
+  it.each(['applied', 'rejected'] as const)(
+    '5. dispatch no-op from %s: no ops calls, audits proposal.apply_skipped',
+    async (status) => {
+      const row = await seedProposal({ status })
+      const shopify = fakeShopify()
+      const alert = vi.fn(async () => {})
+
+      await executeApplyProposal({ db, alert, shopify }, row.id)
+
+      expect(shopify.calls).toEqual([])
+      const after = await loadProposal(row.id)
+      expect(after!.status).toBe(status)
+
+      const skipped = await auditRowsFor(row.id, 'proposal.apply_skipped')
+      expect(skipped).toHaveLength(1)
+      expect(skipped[0]).toMatchObject({ actor: 'system', entityType: 'proposal', entityId: row.id })
+    },
+  )
+
+  // ---------------------------------------------------------------------------
+  // 6. Online Store publish failure throws
+  // ---------------------------------------------------------------------------
+  it('6. Online Store publish failure throws, row stays applying', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const shopify = fakeShopify()
+    const originalPublish = shopify.publishablePublish
+    shopify.publishablePublish = async (productId, pub) => {
+      if (pub === 'pub-1') throw new Error('online store publish failed')
+      return originalPublish(productId, pub)
+    }
+    const alert = vi.fn(async () => {})
+
+    await expect(executeApplyProposal({ db, alert, shopify }, row.id)).rejects.toThrow(/online store publish failed/)
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applying')
+
+    // The throw happens mid-pipeline, AFTER the product/variant/mapping rows are already
+    // committed (step 4's publish loop runs after step 3's inserts) — track the leftover product
+    // row so `afterEach` cleans it up, same as every other test that reaches that far.
+    const productRow = await loadProduct(row.id)
+    if (productRow) createdProductIds.push(productRow.id)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 7. Non-essential publish failure -> applied, alert fired
+  // ---------------------------------------------------------------------------
+  it('7. non-essential (Shop) publish failure still lands applied, fires publish_partial_failure', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const shopify = fakeShopify()
+    const originalPublish = shopify.publishablePublish
+    shopify.publishablePublish = async (productId, pub) => {
+      if (pub === 'pub-2') throw new Error('shop publish failed')
+      return originalPublish(productId, pub)
+    }
+    const alert = vi.fn(async () => {})
+
+    await executeApplyProposal({ db, alert, shopify }, row.id)
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applied')
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'publish_partial_failure',
+      expect.objectContaining({ proposalId: row.id, publication: 'Shop' }),
+    )
+  })
+
+  // ---------------------------------------------------------------------------
+  // 8. Unimplemented type -> throws, dead-letters to failed
+  // ---------------------------------------------------------------------------
+  it('8. unimplemented proposal type throws, then dead-letters to failed', async () => {
+    const row = await seedProposal({ status: 'approved', type: 'refund', payload: refundPayload() })
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+
+    await expect(executeApplyProposal({ db, alert, shopify }, row.id)).rejects.toThrow(/unimplemented/)
+
+    const midway = await loadProposal(row.id)
+    expect(midway!.status).toBe('applying')
+
+    const err = new Error('unimplemented proposal type: refund')
+    await deadLetterApplyProposal({ db, alert, shopify }, row.id, err)
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('failed')
+    expect(after!.applyError).toMatch(/^unimplemented/)
+
+    expect(alert).toHaveBeenCalledWith(
+      'critical',
+      'proposal_apply_failed',
+      expect.objectContaining({ proposalId: row.id }),
+    )
+  })
+
+  // ---------------------------------------------------------------------------
+  // 9. deadLetter from applying / approved both work (single-step matrix transitions)
+  // ---------------------------------------------------------------------------
+  it.each(['approved', 'applying'] as const)(
+    '9. deadLetterApplyProposal from %s transitions straight to failed',
+    async (status) => {
+      const row = await seedProposal({ status })
+      const shopify = fakeShopify()
+      const alert = vi.fn(async () => {})
+
+      await deadLetterApplyProposal({ db, alert, shopify }, row.id, new Error('boom'))
+
+      const after = await loadProposal(row.id)
+      expect(after!.status).toBe('failed')
+      expect(after!.applyError).toMatch(/^boom/)
+    },
+  )
+})

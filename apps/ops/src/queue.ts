@@ -9,7 +9,9 @@ import { demoPingHandler } from './jobs/demo-ping.ts'
 import { fulfillmentPayOrderHandler } from './jobs/fulfillment-pay-order.ts'
 import { fulfillmentPlaceOrderHandler } from './jobs/fulfillment-place-order.ts'
 import { fulfillmentSyncTrackingHandler } from './jobs/fulfillment-sync-tracking.ts'
+import { proposalApplyHandler } from './jobs/proposal-apply.ts'
 import { webhookProcessHandler } from './jobs/webhook-process.ts'
+import type { ApplyProposalDeps, ProposalShopifyOps } from './proposals/run-apply.ts'
 import type { createSettings } from './settings.ts'
 
 export interface FulfillmentQueueDeps {
@@ -26,6 +28,12 @@ export interface FulfillmentQueueDeps {
    * `index.ts` (which registers that queue's worker directly), not threaded through here.
    */
   shopify?: ShopifyFulfillmentOps
+  /**
+   * Shopify operations backing `proposal.apply`'s `new_listing` pipeline (Task 6). Optional for
+   * the same reason `shopify` above is: when omitted, `startQueue` wires a stub that throws
+   * `'shopify not configured'` on any call, same as `index.ts`'s own `config.shopify`-gated stub.
+   */
+  proposalShopify?: ProposalShopifyOps
 }
 
 export interface Queue {
@@ -39,6 +47,7 @@ const PAY_ORDER_QUEUE = 'fulfillment.pay-order'
 const SYNC_TRACKING_QUEUE = 'fulfillment.sync-tracking'
 const RECONCILE_QUEUE = 'fulfillment.reconcile'
 const WALLET_MONITOR_QUEUE = 'cj.wallet-monitor'
+const PROPOSAL_APPLY_QUEUE = 'proposal.apply'
 
 /**
  * `boss.createQueue` for a brand-new queue name runs DDL (creates the queue's partition table +
@@ -109,6 +118,19 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
     },
   }
 
+  // Same no-config fallback shape as `syncTrackingDeps` just above, for the `proposal.apply`
+  // pipeline's own Shopify surface (`ProposalShopifyOps`, Task 6).
+  const applyProposalDeps: ApplyProposalDeps = {
+    db,
+    alert: deps.alert,
+    shopify: deps.proposalShopify ?? {
+      findProductByHandle: shopifyNotConfigured,
+      productSet: shopifyNotConfigured,
+      listPublications: shopifyNotConfigured,
+      publishablePublish: shopifyNotConfigured,
+    },
+  }
+
   await createQueueRetrying(boss, 'demo.ping')
   await boss.work('demo.ping', demoPingHandler(db))
 
@@ -138,6 +160,15 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
 
   await createQueueRetrying(boss, SYNC_TRACKING_QUEUE, { name: SYNC_TRACKING_QUEUE, policy: 'singleton' })
   await boss.work(SYNC_TRACKING_QUEUE, fulfillmentSyncTrackingHandler(syncTrackingDeps))
+
+  // `proposal.apply` (Task 6): `singleton` for the same reason as the three fulfillment queues
+  // above — every send sets `singletonKey: proposalId` (`submit.ts`'s `enqueueProposalApply`), so
+  // at most one ACTIVE apply job per proposal at a time. `{ includeMetadata: true }` for the same
+  // reason as `PAY_ORDER_QUEUE` above: the handler's retry-exhaustion dead-letter hook needs
+  // `job.retryCount`/`retryLimit`, which only `JobWithMetadata` carries — see
+  // jobs/proposal-apply.ts's own doc comment.
+  await createQueueRetrying(boss, PROPOSAL_APPLY_QUEUE, { name: PROPOSAL_APPLY_QUEUE, policy: 'singleton' })
+  await boss.work(PROPOSAL_APPLY_QUEUE, { includeMetadata: true }, proposalApplyHandler(applyProposalDeps))
 
   // No singletonKey producer for either queue (both are cron-driven sweeps, not per-entity jobs),
   // so the default 'standard' policy is correct — left unspecified deliberately.
