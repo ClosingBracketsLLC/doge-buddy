@@ -21,6 +21,7 @@ import type { ActionRouteDeps } from './http/actions.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
+import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { loadDotEnv } from './load-env.ts'
 import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
@@ -196,6 +197,10 @@ await registerCron(queue.boss, 'fulfillment.reconcile', '0 * * * *', fulfillment
 // deps `queue` already provides by this point.
 const walletMonitorDeps: WalletMonitorDeps = { db, adapter: supplierAdapter, settings, alert, enqueue }
 await registerCron(queue.boss, 'cj.wallet-monitor', '0 */4 * * *', cjWalletMonitorHandler(walletMonitorDeps))
+
+// `proposal.expire-sweep` (Task 7): daily proposal expiry sweep — transitions any pending
+// proposals that have expired to 'expired' status and audits each transition.
+await registerCron(queue.boss, 'proposal.expire-sweep', '30 6 * * *', proposalExpireSweepHandler(db))
 
 if (config.shopify && config.adminBaseUrl && shopifyClient) {
   const { adminBaseUrl } = config
