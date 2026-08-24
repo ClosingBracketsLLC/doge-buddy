@@ -84,6 +84,9 @@ describe('proposalExpireSweepHandler', () => {
       )
     expect(auditRow!.actor).toBe('system')
     expect(auditRow!.entityType).toBe('proposal')
+    // Audit parity with the lazy-expiry path in actions.ts (which stamps { via: 'lazy-expiry' })
+    // — the sweep's own rows must be distinguishable the same way, not left detail-less.
+    expect(auditRow!.detail).toMatchObject({ via: 'sweep' })
 
     // Check fresh pending proposal is still pending
     const [freshRow] = await db.select().from(proposals).where(eq(proposals.id, freshId))

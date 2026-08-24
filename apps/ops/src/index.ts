@@ -102,7 +102,13 @@ const alert = (severity: AlertSeverity, kind: string, detail: Record<string, unk
 
 const actionDeps: ActionRouteDeps = { db, enqueue, alert }
 
-const app = buildServer({ pool, isQueueReady: () => queue.ready(), webhooks: webhookDeps, actions: actionDeps })
+// The `/a/:proposalId/approve|reject` routes are gated on `ADMIN_BASE_URL` per spec §7 — those
+// links are only ever generated (and only ever meant to be reachable) once an admin base URL is
+// configured, same conditional-spread style as `webhookDeps` above.
+const app = buildServer({
+  pool, isQueueReady: () => queue.ready(), webhooks: webhookDeps,
+  ...(config.adminBaseUrl ? { actions: actionDeps } : {}),
+})
 
 // Loud on purpose: which adapter actually backs the money path is the single most important fact
 // about this boot, and it's driven by an env var (`FULFILLMENT_SUPPLIER`) that's easy to leave

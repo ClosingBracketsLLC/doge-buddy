@@ -87,7 +87,9 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
     async function handleGet(decision: Decision, proposalId: string, token: string | undefined): Promise<string> {
       const row = await lookup(proposalId)
       if (isValidDecision(row, token)) {
-        return confirmPage(proposalId, decision, row.summary, token!)
+        // Use the DB-verified row's own id, not the raw request path param, so the form action
+        // attribute can never be built from unvalidated user input.
+        return confirmPage(row.id, decision, row.summary, token!)
       }
       return friendlyPage()
     }

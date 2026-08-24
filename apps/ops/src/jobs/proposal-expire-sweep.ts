@@ -21,6 +21,7 @@ export function proposalExpireSweepHandler(db: Db) {
           action: 'proposal.expired',
           entityType: 'proposal',
           entityId: row.id,
+          detail: { via: 'sweep' },
         })),
       )
     }

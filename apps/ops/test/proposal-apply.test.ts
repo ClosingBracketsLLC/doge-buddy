@@ -498,4 +498,105 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     expect(variantRow!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/backfill')
     expect(variantRow!.priceCents).toBe(500) // untouched — NOT overwritten to the payload's 2999
   })
+
+  // ---------------------------------------------------------------------------
+  // 11. Sku collision guard: a duplicate sku across two DIFFERENT proposals must not silently
+  // cross-wire the second proposal's mapping onto the first proposal's variant. The coalesce-
+  // upsert in the variant loop is matched by sku alone (a global unique constraint), so applying
+  // proposal B with a sku that proposal A already owns re-selects A's variant row — the guard
+  // must detect that mismatch and throw loudly rather than let B's mapping attach to A's variant.
+  // ---------------------------------------------------------------------------
+  it('11. sku collision: duplicate sku across two proposals rejects the second, first product untouched', async () => {
+    const sharedSku = `SKU-${crypto.randomUUID()}`
+
+    const payloadA = newListingPayload()
+    payloadA.variants[0]!.sku = sharedSku
+    payloadA.variants[0]!.supplierProductId = 'cjp-a'
+    payloadA.variants[0]!.supplierVariantId = 'cjv-a'
+    const rowA = await seedProposal({ status: 'approved', payload: payloadA })
+
+    const payloadB = newListingPayload()
+    payloadB.variants[0]!.sku = sharedSku
+    payloadB.variants[0]!.supplierProductId = 'cjp-b'
+    payloadB.variants[0]!.supplierVariantId = 'cjv-b'
+    const rowB = await seedProposal({ status: 'approved', payload: payloadB })
+
+    // A applies clean first.
+    const shopifyA = fakeShopify()
+    const alertA = vi.fn(async () => {})
+    await executeApplyProposal({ db, alert: alertA, shopify: shopifyA }, rowA.id)
+
+    const afterA = await loadProposal(rowA.id)
+    expect(afterA!.status).toBe('applied')
+
+    const productA = await loadProduct(rowA.id)
+    createdProductIds.push(productA!.id)
+
+    const [variantA] = await db.select().from(productVariants).where(eq(productVariants.sku, sharedSku))
+    expect(variantA).toBeDefined()
+    expect(variantA!.productId).toBe(productA!.id)
+
+    const mappingsBefore = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantA!.id))
+    expect(mappingsBefore).toHaveLength(1)
+    expect(mappingsBefore[0]!.supplierProductId).toBe('cjp-a')
+    expect(mappingsBefore[0]!.supplierVariantId).toBe('cjv-a')
+
+    // B's apply hits the shared sku and must reject loudly instead of cross-wiring onto A's variant.
+    // `fakeShopify()`'s per-instance gid counter always starts at 0 (see the file-level doc comment
+    // above `FIXTURE_PRODUCT_GIDS`), so a fresh instance for B would mint the exact same literal
+    // product/variant gids as A's did — colliding on `products.shopifyProductGid`'s own uniqueness
+    // and masking the sku collision this test exists to exercise. Suffix every id `productSet`
+    // returns so B's product/variant gids are guaranteed distinct from A's.
+    const shopifyB = fakeShopify()
+    const originalProductSetB = shopifyB.productSet
+    shopifyB.productSet = async (input) => {
+      const result = await originalProductSetB(input)
+      const suffix = `b-${crypto.randomUUID()}`
+      return {
+        productId: `${result.productId}-${suffix}`,
+        variants: result.variants.map((v) => ({ ...v, id: `${v.id}-${suffix}` })),
+      }
+    }
+    const alertB = vi.fn(async () => {})
+    await expect(
+      executeApplyProposal({ db, alert: alertB, shopify: shopifyB }, rowB.id),
+    ).rejects.toThrow(/sku collision/)
+
+    // B's own product row was already created (step 2, before the variant loop's guard fires) —
+    // track it for cleanup, same as test 6's mid-pipeline-throw case.
+    const productB = await loadProduct(rowB.id)
+    if (productB) createdProductIds.push(productB.id)
+
+    const midwayB = await loadProposal(rowB.id)
+    expect(midwayB!.status).toBe('applying')
+
+    // Dead-letter B: the job wrapper's retry-exhaustion path, same as test 8.
+    const err = new Error(`sku collision: ${sharedSku} already belongs to another product`)
+    await deadLetterApplyProposal({ db, alert: alertB, shopify: shopifyB }, rowB.id, err)
+
+    const afterB = await loadProposal(rowB.id)
+    expect(afterB!.status).toBe('failed')
+    expect(afterB!.applyError).toMatch(/^sku collision/)
+    expect(alertB).toHaveBeenCalledWith(
+      'critical',
+      'proposal_apply_failed',
+      expect.objectContaining({ proposalId: rowB.id }),
+    )
+
+    // CRITICAL: A's variant row and mapping are completely untouched by B's rejected attempt.
+    const [variantAAfter] = await db.select().from(productVariants).where(eq(productVariants.sku, sharedSku))
+    expect(variantAAfter!.id).toBe(variantA!.id)
+    expect(variantAAfter!.productId).toBe(productA!.id)
+
+    const mappingsAfter = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantA!.id))
+    expect(mappingsAfter).toHaveLength(1)
+    expect(mappingsAfter[0]!.supplierProductId).toBe('cjp-a')
+    expect(mappingsAfter[0]!.supplierVariantId).toBe('cjv-a')
+  })
 })

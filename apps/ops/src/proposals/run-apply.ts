@@ -173,6 +173,16 @@ export async function executeApplyProposal(deps: ApplyProposalDeps, proposalId: 
       set: { shopifyVariantGid: sql`coalesce(${productVariants.shopifyVariantGid}, excluded.shopify_variant_gid)` },
     })
     const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, v.sku))
+    // Sku-keyed re-select above can cross-wire onto a DIFFERENT product's variant row if the same
+    // sku appears in two different proposals' payloads — the coalesce-upsert just above is
+    // matched by sku alone, so a duplicate sku silently attaches this proposal's mapping to some
+    // other product's variant instead of failing loudly. Guard it: the re-selected row must
+    // belong to THIS pipeline's product, or this is a real data problem that must not proceed
+    // silently — throw so the job retries and dead-letters into failed+alert via the existing
+    // `deadLetterApplyProposal` hook (loud failure, not a silent cross-wire).
+    if (variantRow!.productId !== productRow!.id) {
+      throw new Error(`sku collision: ${v.sku} already belongs to another product`)
+    }
     await db.insert(supplierVariantMappings).values({
       variantId: variantRow!.id, supplier: v.supplier,
       supplierProductId: v.supplierProductId, supplierVariantId: v.supplierVariantId,
@@ -189,7 +199,7 @@ export async function executeApplyProposal(deps: ApplyProposalDeps, proposalId: 
       await deps.alert('warning', 'publish_partial_failure', {
         proposalId, publication: pub.name,
         error: err instanceof Error ? err.message : String(err),
-      })
+      }).catch(() => {})
     }
   }
   await applyProposalTransition(db, proposalId, 'applying', 'applied', { appliedAt: new Date() })
