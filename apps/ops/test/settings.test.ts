@@ -42,4 +42,20 @@ describe('settings', () => {
     const rows = await db.select().from(settingsTable)
     expect(rows).toHaveLength(1)
   })
+
+  it('defaults every workflow mode to manual and refund.auto_max_cents to 2500', async () => {
+    const s = createSettings(db)
+    expect(await s.get('workflow.sourcing.mode')).toBe('manual')
+    expect(await s.get('workflow.support_reply.mode')).toBe('manual')
+    expect(await s.get('workflow.refund.mode')).toBe('manual')
+    expect(await s.get('workflow.deprecation.mode')).toBe('manual')
+    expect(await s.get('refund.auto_max_cents')).toBe(2500)
+  })
+
+  it('round-trips a mode value as a typed string', async () => {
+    const s = createSettings(db)
+    await s.set('workflow.sourcing.mode', 'auto')
+    expect(await s.get('workflow.sourcing.mode')).toBe('auto')
+    await s.set('workflow.sourcing.mode', 'manual') // restore for rerun safety
+  })
 })

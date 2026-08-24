@@ -1,6 +1,8 @@
 import { type createDb, settings } from '@doge-buddy/db'
 import { eq } from 'drizzle-orm'
 
+export type WorkflowMode = 'manual' | 'auto'
+
 /**
  * Code defaults for every known setting, keyed exactly as stored in the `settings` table.
  * `createSettings(db).get()` falls back to these when no row is present, so the system
@@ -14,15 +16,29 @@ export const SETTINGS_DEFAULTS = {
   'fulfillment.wallet_alert_threshold_cents': 2000,
   'fulfillment.margin_floor_bps': 6000,
   'fulfillment.promised_max_days': 7,
+  'workflow.sourcing.mode': 'manual',
+  'workflow.support_reply.mode': 'manual',
+  'workflow.refund.mode': 'manual',
+  'workflow.deprecation.mode': 'manual',
+  'refund.auto_max_cents': 2500,
 }
 // Deliberately no `as const`/`satisfies` here: either narrows the boolean properties down
 // to their literal default (e.g. `false` instead of `boolean`), which would make `set()`
 // reject the other value of that same boolean. The keys below are the source of truth for
-// which settings are booleans; everything else in SettingKey is a number (cents/bps/days).
+// which settings are booleans; modes are `WorkflowMode` strings; everything else is a number (cents/bps/days).
 
 export type SettingKey = keyof typeof SETTINGS_DEFAULTS
 type BooleanSettingKey = 'killswitch.global' | 'workflow.fulfillment.enabled' | 'fulfillment.paused_for_funds'
-export type SettingValue<K extends SettingKey> = K extends BooleanSettingKey ? boolean : number
+type ModeSettingKey =
+  | 'workflow.sourcing.mode'
+  | 'workflow.support_reply.mode'
+  | 'workflow.refund.mode'
+  | 'workflow.deprecation.mode'
+export type SettingValue<K extends SettingKey> = K extends BooleanSettingKey
+  ? boolean
+  : K extends ModeSettingKey
+    ? WorkflowMode
+    : number
 
 type Db = ReturnType<typeof createDb>['db']
 
@@ -38,8 +54,8 @@ export function createSettings(db: Db): Settings {
   return {
     async get<K extends SettingKey>(key: K): Promise<SettingValue<K>> {
       const [row] = await db.select().from(settings).where(eq(settings.key, key))
-      if (!row) return SETTINGS_DEFAULTS[key] as SettingValue<K>
-      return row.value as SettingValue<K>
+      if (!row) return SETTINGS_DEFAULTS[key] as unknown as SettingValue<K>
+      return row.value as unknown as SettingValue<K>
     },
     async set<K extends SettingKey>(key: K, value: SettingValue<K>): Promise<void> {
       await db
