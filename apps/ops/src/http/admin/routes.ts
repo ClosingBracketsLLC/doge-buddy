@@ -826,8 +826,14 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             }
             coerced = body.value
           } else {
+            // Reject BEFORE Number(): `Number(' ')` (and `Number('')`) coerce to `0`, which would
+            // otherwise sail through the isSafeInteger/>=0 checks below and silently zero out a
+            // real setting (e.g. the spend cap) from a blank/whitespace form submission.
+            if (typeof body.value !== 'string' || body.value.trim() === '') {
+              return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Invalid number.</p>`))
+            }
             const n = Number(body.value)
-            if (body.value === undefined || body.value === '' || !Number.isSafeInteger(n) || n < 0) {
+            if (!Number.isSafeInteger(n) || n < 0) {
               return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Invalid number.</p>`))
             }
             coerced = n

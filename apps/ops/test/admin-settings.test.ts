@@ -35,6 +35,7 @@ describe('settings editor + manual-signal paste box', () => {
     // this file's tests wrote, and is safe to run unconditionally every time.
     await db.delete(settingsTable).where(eq(settingsTable.key, 'killswitch.global'))
     await db.delete(settingsTable).where(eq(settingsTable.key, 'workflow.sourcing.mode'))
+    await db.delete(settingsTable).where(eq(settingsTable.key, 'fulfillment.spend_cap_per_order_cents'))
   })
 
   function makeDeps(overrides: Partial<AdminDeps> = {}): TestDeps {
@@ -227,6 +228,67 @@ describe('settings editor + manual-signal paste box', () => {
     expect(await deps.settings.get('fulfillment.spend_cap_per_order_cents')).toBe(
       SETTINGS_DEFAULTS['fulfillment.spend_cap_per_order_cents'],
     )
+
+    await app.close()
+  })
+
+  it('7b. POST a single space as a number value -> 400, setting unchanged (no silent zero write)', async () => {
+    // Regression: Number(' ') === 0, which used to sail straight through the isSafeInteger/>=0
+    // checks and silently zero out a real setting (e.g. the spend cap) from a blank/whitespace
+    // form submission.
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/admin/settings',
+      headers: { cookie, ...FORM_HEADERS },
+      payload: 'key=fulfillment.spend_cap_per_order_cents&value=%20',
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(await deps.settings.get('fulfillment.spend_cap_per_order_cents')).toBe(
+      SETTINGS_DEFAULTS['fulfillment.spend_cap_per_order_cents'],
+    )
+
+    await app.close()
+  })
+
+  it('7c. POST an empty-string number value -> 400, setting unchanged', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/admin/settings',
+      headers: { cookie, ...FORM_HEADERS },
+      payload: 'key=fulfillment.spend_cap_per_order_cents&value=',
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(await deps.settings.get('fulfillment.spend_cap_per_order_cents')).toBe(
+      SETTINGS_DEFAULTS['fulfillment.spend_cap_per_order_cents'],
+    )
+
+    await app.close()
+  })
+
+  it('7d. POST an explicit 0 for a number setting -> succeeds and writes 0 (intentional zero still allowed)', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/admin/settings',
+      headers: { cookie, ...FORM_HEADERS },
+      payload: 'key=fulfillment.spend_cap_per_order_cents&value=0',
+    })
+
+    expect(res.statusCode).toBe(303)
+    expect(await deps.settings.get('fulfillment.spend_cap_per_order_cents')).toBe(0)
 
     await app.close()
   })
