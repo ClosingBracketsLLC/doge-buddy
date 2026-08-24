@@ -5,6 +5,7 @@ import {
   orders,
   proposals,
   proposalStatus,
+  sourcingSignals,
   supplierOrders,
   supportTickets,
   type createDb,
@@ -17,7 +18,7 @@ import type { SendOpts } from '../../fulfillment/types.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
 import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts'
 import { applyProposalTransition, StaleProposalStatusError } from '../../proposals/transitions.ts'
-import type { Settings } from '../../settings.ts'
+import { SETTINGS_DEFAULTS, type Settings, type SettingKey, type WorkflowMode } from '../../settings.ts'
 import {
   consumeLoginToken,
   createLoginToken,
@@ -29,7 +30,7 @@ import {
   validateSession,
 } from './auth.ts'
 import { loadHealthStrip, type HealthStrip } from './health.ts'
-import { html, layout, type RawHtml } from './html.ts'
+import { html, layout, raw, type RawHtml } from './html.ts'
 import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
 import { renderProposalDetail, renderProposalRow } from './render-proposal.ts'
 
@@ -50,6 +51,145 @@ function renderHealthStrip(h: HealthStrip): RawHtml {
     <p>Fulfillment enabled: ${h.fulfillmentEnabled ? 'ON' : 'OFF'}</p>
     <p>Paused for funds: ${h.pausedForFunds ? 'ON' : 'OFF'}</p>
     <p>Pending proposals: ${h.pendingProposals}</p>
+  </section>`
+}
+
+type SettingKind = 'boolean' | 'mode' | 'number'
+
+/**
+ * Buckets a settings key by its runtime type, per settings.ts's own source-of-truth comment:
+ * boolean defaults are actual booleans, mode keys are the ones ending '.mode' (string default
+ * 'manual'), everything else is a cents/bps/days number.
+ */
+function settingKind(key: SettingKey): SettingKind {
+  const def = SETTINGS_DEFAULTS[key]
+  if (typeof def === 'boolean') return 'boolean'
+  if (key.endsWith('.mode')) return 'mode'
+  return 'number'
+}
+
+/**
+ * Typed write-through to `Settings.set`, contained to this one helper per the task's TypeScript
+ * note: the runtime kind is only known at request time (the POST body is untyped strings), so
+ * `Settings.set`'s per-key generic can't be satisfied statically at the call site. Each branch
+ * casts `.set` to a concrete, non-generic signature matching that branch's own value type,
+ * rather than reaching for a blanket `any` — kept local so no other file has to reason about it.
+ */
+async function setSettingValue(
+  settingsApi: Settings,
+  key: SettingKey,
+  kind: SettingKind,
+  value: boolean | WorkflowMode | number,
+): Promise<void> {
+  switch (kind) {
+    case 'boolean': {
+      const setter = settingsApi.set as (k: SettingKey, v: boolean) => Promise<void>
+      return setter(key, value as boolean)
+    }
+    case 'mode': {
+      const setter = settingsApi.set as (k: SettingKey, v: WorkflowMode) => Promise<void>
+      return setter(key, value as WorkflowMode)
+    }
+    case 'number': {
+      const setter = settingsApi.set as (k: SettingKey, v: number) => Promise<void>
+      return setter(key, value as number)
+    }
+  }
+}
+
+interface SettingRow {
+  key: SettingKey
+  kind: SettingKind
+  value: boolean | WorkflowMode | number
+}
+
+/**
+ * One <form> per setting: a hidden `key` plus the single runtime-typed control (checkbox / mode
+ * select / number input), each posting to `/admin/settings`. Per-row forms (not one big form) is
+ * deliberate — an HTML checkbox sends nothing when unchecked, so the only way to submit "flip
+ * this boolean off" unambiguously is a form scoped to that one key.
+ */
+function renderSettingRow(row: SettingRow): RawHtml {
+  const control =
+    row.kind === 'boolean'
+      ? html`<input type="checkbox" name="value"${raw(row.value ? ' checked' : '')}>`
+      : row.kind === 'mode'
+        ? html`<select name="value">
+            <option value="manual"${raw(row.value === 'manual' ? ' selected' : '')}>manual</option>
+            <option value="auto"${raw(row.value === 'auto' ? ' selected' : '')}>auto</option>
+          </select>`
+        : html`<input type="number" name="value" value="${row.value}">`
+
+  return html`<form method="post" action="/admin/settings">
+    <label>${row.key}</label>
+    <input type="hidden" name="key" value="${row.key}">
+    ${control}
+    <button type="submit">Save</button>
+  </form>`
+}
+
+function renderSettingsSection(rows: SettingRow[]): RawHtml {
+  return html`<section id="settings">
+    <h2>Settings</h2>
+    ${rows.map(renderSettingRow)}
+  </section>`
+}
+
+/** The manual-signal paste box (parent spec §admin): keyword + content, posting to /admin/signals. */
+function renderSignalPasteBox(): RawHtml {
+  return html`<section id="signal-paste">
+    <h2>Paste a sourcing signal</h2>
+    <form method="post" action="/admin/signals">
+      <label>Keyword <input name="keyword"></label>
+      <label>Content <textarea name="content" rows="8" cols="60"></textarea></label>
+      <button type="submit">Save signal</button>
+    </form>
+  </section>`
+}
+
+interface RecentSignalRow {
+  keyword: string | null
+  fetchedAt: Date
+  content: string
+}
+
+/**
+ * Every row this route writes stores `snapshot: { content: string }` — but jsonb is untyped at
+ * the DB layer, so this narrows defensively rather than trusting the shape blindly.
+ */
+function snapshotContent(snapshot: unknown): string {
+  if (snapshot && typeof snapshot === 'object' && 'content' in snapshot) {
+    const content = (snapshot as { content: unknown }).content
+    if (typeof content === 'string') return content
+  }
+  return ''
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? value.slice(0, max) : value
+}
+
+/** Last 10 owner-pasted signals: keyword + fetchedAt + content, escaped and truncated to 200 chars. */
+function renderRecentSignals(rows: RecentSignalRow[]): RawHtml {
+  if (rows.length === 0) {
+    return html`<section id="recent-signals">
+      <h2>Recently pasted signals</h2>
+      <p>None yet.</p>
+    </section>`
+  }
+  return html`<section id="recent-signals">
+    <h2>Recently pasted signals</h2>
+    <table>
+      <tbody>
+        ${rows.map(
+          (r) => html`<tr>
+            <td>${r.keyword ?? ''}</td>
+            <td>${r.fetchedAt.toISOString()}</td>
+            <td>${truncate(r.content, 200)}</td>
+          </tr>`,
+        )}
+      </tbody>
+    </table>
   </section>`
 }
 
@@ -634,8 +774,110 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         })
       })
 
-      // Placeholder so the whole authed scope is gated from day one, even for paths Tasks 4-8
-      // haven't registered yet (e.g. /admin/settings) — an unauthenticated request to any
+      // Settings editor (SETTINGS_DEFAULTS catalog, typed per key) + the manual-signal paste box
+      // (parent §admin) share this page: both write through owner-attributed audit rows, and the
+      // paste box's own POST target renders back here.
+      authed.get('/admin/settings', async (_request, reply) => {
+        return safeHandle('settings', reply, async () => {
+          const keys = Object.keys(SETTINGS_DEFAULTS) as SettingKey[]
+          const rows: SettingRow[] = await Promise.all(
+            keys.map(async (key) => ({ key, kind: settingKind(key), value: await deps.settings.get(key) })),
+          )
+
+          const signalRows = await deps.db
+            .select({ keyword: sourcingSignals.keyword, snapshot: sourcingSignals.snapshot, fetchedAt: sourcingSignals.fetchedAt })
+            .from(sourcingSignals)
+            .where(eq(sourcingSignals.source, 'owner_manual'))
+            .orderBy(desc(sourcingSignals.fetchedAt))
+            .limit(10)
+
+          const recent: RecentSignalRow[] = signalRows.map((r) => ({
+            keyword: r.keyword,
+            fetchedAt: r.fetchedAt,
+            content: snapshotContent(r.snapshot),
+          }))
+
+          const body = layout(
+            'Settings',
+            html`${renderSettingsSection(rows)}${renderSignalPasteBox()}${renderRecentSignals(recent)}`,
+          )
+          return reply.code(200).type('text/html; charset=utf-8').send(body)
+        })
+      })
+
+      authed.post('/admin/settings', async (request, reply) => {
+        return safeHandle('settings', reply, async () => {
+          const body = (request.body ?? {}) as { key?: string; value?: string }
+          const rawKey = body.key
+          if (!rawKey || !Object.prototype.hasOwnProperty.call(SETTINGS_DEFAULTS, rawKey)) {
+            return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Unknown setting.</p>`))
+          }
+          const key = rawKey as SettingKey
+          const kind = settingKind(key)
+
+          let coerced: boolean | WorkflowMode | number
+          if (kind === 'boolean') {
+            // HTML checkboxes send 'on' when checked and NOTHING when unchecked — so 'on' -> true,
+            // any other value (including absent) -> false.
+            coerced = body.value === 'on'
+          } else if (kind === 'mode') {
+            if (body.value !== 'manual' && body.value !== 'auto') {
+              return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Invalid mode.</p>`))
+            }
+            coerced = body.value
+          } else {
+            const n = Number(body.value)
+            if (body.value === undefined || body.value === '' || !Number.isSafeInteger(n) || n < 0) {
+              return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Invalid number.</p>`))
+            }
+            coerced = n
+          }
+
+          const from = await deps.settings.get(key)
+          await setSettingValue(deps.settings, key, kind, coerced)
+
+          // No entityType/entityId here (unlike signal.pasted below) — a settings key isn't a
+          // row with its own id; `detail.key` is the identifying field for this action.
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: 'setting.updated',
+            detail: { key, from, to: coerced },
+          })
+
+          return reply.code(303).header('location', '/admin/settings').send()
+        })
+      })
+
+      authed.post('/admin/signals', async (request, reply) => {
+        return safeHandle('signals', reply, async () => {
+          const body = (request.body ?? {}) as { content?: string; keyword?: string }
+          const content = body.content ?? ''
+          if (content.trim().length === 0) {
+            return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Paste some content first.</p>`))
+          }
+
+          const [inserted] = await deps.db
+            .insert(sourcingSignals)
+            .values({
+              source: 'owner_manual',
+              keyword: body.keyword || null,
+              snapshot: { content },
+            })
+            .returning({ id: sourcingSignals.id })
+
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: 'signal.pasted',
+            entityType: 'signal',
+            entityId: inserted!.id,
+          })
+
+          return reply.code(303).header('location', '/admin/settings').send()
+        })
+      })
+
+      // Placeholder so the whole authed scope is gated from day one, even for any path this
+      // plan's tasks never register — an unauthenticated request to any
       // /admin/... path must redirect to login rather than 404 (which would leak which admin
       // routes exist). `.all()`, not `.get()`: a GET-only wildcard would let an unauthenticated
       // non-GET request (POST, PUT, ...) to an unregistered path fall through to Fastify's
