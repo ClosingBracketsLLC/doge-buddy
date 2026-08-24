@@ -1,7 +1,32 @@
 {
-  "orderId": "cjo-1",
-  "shipmentOrderId": "cjso-1",
-  "productAmount": 13.30,
+  "orderNumber": "DB-abc",
+  "orderId": "SD26082400012206614001",
+  "shipmentOrderId": null,
+  "iossAmount": null,
+  "iossTaxHandlingFee": 0,
   "postageAmount": 4.99,
-  "orderAmount": 18.29
+  "productAmount": 13.3,
+  "productOriginalAmount": 13.3,
+  "productDiscountAmount": 0,
+  "postageDiscountAmount": 0,
+  "postageOriginalAmount": 4.99,
+  "totalDiscountAmount": 0,
+  "actualPayment": null,
+  "orderOriginalAmount": null,
+  "cjPayUrl": null,
+  "payId": null,
+  "orderAmount": null,
+  "logisticsMiss": false,
+  "productInfoList": [
+    {
+      "storeLineItemId": null,
+      "lineItemId": "2608240001230664505",
+      "variantId": "cjv-9",
+      "quantity": 2,
+      "subOrderProducts": [],
+      "group": false
+    }
+  ],
+  "orderStatus": null,
+  "interceptOrderReasons": null
 }

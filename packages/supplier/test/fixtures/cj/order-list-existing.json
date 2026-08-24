@@ -1,13 +1,29 @@
 {
+  "pageNum": 1,
+  "pageSize": 10,
+  "total": 1,
   "list": [
     {
-      "orderId": "cjo-1",
-      "shipmentOrderId": "cjso-1",
-      "orderNumber": "DB-abc",
-      "productAmount": 13.30,
-      "postageAmount": 4.99,
+      "orderId": "2608240001230669600",
+      "orderNum": "DB-abc",
+      "cjOrderId": "SD26082400012206614001",
+      "shippingCountryCode": "US",
+      "shippingProvince": "GA",
+      "shippingCity": "Atlanta",
+      "shippingCustomerName": "Jane Doe",
+      "orderWeight": 290,
+      "orderStatus": "CREATED",
       "orderAmount": 18.29,
-      "orderStatus": "CREATED"
+      "productAmount": 13.3,
+      "postageAmount": 4.99,
+      "logisticName": "USPS+",
+      "trackNumber": null,
+      "createDate": "2026-08-24 00:01:24",
+      "paymentDate": null,
+      "isSandbox": 1,
+      "storageId": null,
+      "shopId": "2608232339193539500",
+      "shopName": "doge-buddy"
     }
   ]
 }

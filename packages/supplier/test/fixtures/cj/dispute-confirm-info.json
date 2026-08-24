@@ -1,8 +1,24 @@
 {
-  "maxRefundAmount": 18.29,
-  "expectResultOptions": [1, 2],
-  "reasons": [
-    { "reasonId": "r-42", "reasonNameEn": "Damaged on arrival" },
-    { "reasonId": "r-43", "reasonNameEn": "Package lost" }
+  "orderId": "SD26082400012206614001",
+  "orderNumber": "DB-abc",
+  "maxProductPrice": 13.3,
+  "maxPostage": 4.99,
+  "maxIossTaxAmount": 0,
+  "maxIossHandTaxAmount": 0,
+  "maxAmount": 18.29,
+  "expectResultOptionList": ["1", "2"],
+  "productInfoList": [
+    {
+      "lineItemId": "li-1",
+      "cjProductId": "cjp-1",
+      "cjVariantId": "cjv-1",
+      "canChoose": true,
+      "price": 13.3,
+      "quantity": 1
+    }
+  ],
+  "disputeReasonList": [
+    { "disputeReasonId": 8, "reasonName": "Product Damaged" },
+    { "disputeReasonId": 10, "reasonName": "Products Not Received" }
   ]
 }

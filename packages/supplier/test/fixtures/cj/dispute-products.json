@@ -1,9 +1,18 @@
 {
-  "list": [
+  "orderId": "SD26082400012206614001",
+  "orderNumber": "DB-abc",
+  "productInfoList": [
     {
       "lineItemId": "li-1",
-      "vid": "cjv-1",
-      "maxRefundAmount": 18.29
+      "cjProductId": "cjp-1",
+      "cjVariantId": "cjv-1",
+      "canChoose": true,
+      "price": 13.3,
+      "quantity": 1,
+      "cjProductName": "Interactive Dog Rope Toy",
+      "cjImage": "https://cdn.cj.example/rope.jpg",
+      "sku": "CJJT1000001",
+      "supplierName": "dbjjjus"
     }
   ]
 }

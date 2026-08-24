@@ -14,36 +14,54 @@ import type {
 } from '../../types.ts'
 
 /**
- * Pure mappers from CJ Dropshipping API response shapes (as documented + observed in sample
- * payloads) to Doge Buddy's supplier-domain types. Fixtures under test/fixtures/cj/ pin the
- * exact field names these mappers read. Fields flagged FIXTURE-ASSUMPTION are our best-effort
- * read of the CJ docs/samples and have not been confirmed against a live CJ response — verify
- * against the sandbox before Task 6 depends on any sibling fields we have not yet mapped.
+ * Pure mappers from CJ Dropshipping API response shapes to Doge Buddy's supplier-domain types.
+ * Fixtures under test/fixtures/cj/ pin the exact field names these mappers read, and were
+ * re-recorded from real CJ responses on 2026-08-23 — CJ's docs disagree with its own wire format
+ * in several places, so the fixtures (not the docs) are authoritative here. Anything still
+ * flagged FIXTURE-ASSUMPTION has NOT been seen on a live response yet.
  */
 
-// FIXTURE-ASSUMPTION: productNameEn is CJ's English product name field on listV2 list items.
+/**
+ * CJ reports a product's list price as a RANGE string (observed live: `"15.16 -- 15.17"`) when
+ * its variants are priced differently, and as a plain number/numeric string when they aren't.
+ * `SupplierProductSummary.sellPriceCents` is a single value, so a range collapses to its low
+ * end — the conventional "from" price for a listing. Anything with no leading numeric token
+ * still falls through to `usdToCents`, which rejects it loudly rather than silently zeroing.
+ */
+function cjSellPriceToCents(value: number | string): number {
+  if (typeof value === 'number') return usdToCents(value)
+  const [firstNumber] = value.trim().match(/\d+(?:\.\d+)?/) ?? []
+  return usdToCents(firstNumber ?? value)
+}
+
+/** Verified against live CJ 2026-08-23: listV2 items use `id`/`nameEn`/`bigImage` (NOT the
+ * `pid`/`productNameEn`/`productImage` names product/query uses for the same concepts), and
+ * carry no flat `categoryName` — only the one/two/threeCategoryName hierarchy, each nullable. */
 interface CjProductListItem {
-  pid: string
-  productNameEn: string
-  productImage?: string
+  id: string
+  nameEn: string
+  bigImage?: string
   sellPrice: number | string
   listedNum?: number
-  categoryName?: string
+  oneCategoryName?: string | null
+  twoCategoryName?: string | null
+  threeCategoryName?: string | null
 }
 
 export function mapProductSummary(item: CjProductListItem): SupplierProductSummary {
   return {
-    supplierProductId: item.pid,
-    title: item.productNameEn,
-    imageUrl: item.productImage,
-    sellPriceCents: usdToCents(item.sellPrice),
+    supplierProductId: item.id,
+    title: item.nameEn,
+    imageUrl: item.bigImage,
+    sellPriceCents: cjSellPriceToCents(item.sellPrice),
     listedCount: item.listedNum,
-    categoryName: item.categoryName,
+    categoryName: item.threeCategoryName ?? item.twoCategoryName ?? item.oneCategoryName ?? undefined,
   }
 }
 
-// FIXTURE-ASSUMPTION: variantSellPrice/variantWeight(grams)/variantImage are CJ's per-variant
-// fields on product/query; variantImage is nullable when a variant has no dedicated image.
+// Verified against live CJ 2026-08-23: product/query nests variants under `variants`, priced via
+// variantSellPrice with variantWeight in grams; variantImage is nullable when a variant has no
+// dedicated image, and variantNameEn can be an empty string on single-variant products.
 interface CjVariant {
   vid: string
   variantSku?: string
@@ -84,19 +102,21 @@ export function mapProductDetail(detail: CjProductDetail): SupplierProductDetail
   }
 }
 
-// FIXTURE-ASSUMPTION: storageNum (per-warehouse quantity) and verifiedWarehouse (1/0 flag) are
-// CJ's field names on product/stock/queryByVid.
+/** Verified against live CJ 2026-08-23: stock/queryByVid returns countryCode + storageNum, and
+ * splits the same total across cjInventoryNum (held in a CJ warehouse) and factoryInventoryNum
+ * (still at the supplier). There is no `verifiedWarehouse` flag on this response — that field
+ * exists only on listV2 items — so "verified" maps to CJ physically holding the stock. */
 interface CjStockEntry {
   countryCode: string
   storageNum: number
-  verifiedWarehouse: number
+  cjInventoryNum?: number
 }
 
 export function mapStock(entry: CjStockEntry): WarehouseStock {
   return {
     countryCode: entry.countryCode,
     quantity: entry.storageNum,
-    verified: entry.verifiedWarehouse === 1,
+    verified: (entry.cjInventoryNum ?? 0) > 0,
   }
 }
 
@@ -118,11 +138,11 @@ export function mapFreightOption(opt: CjFreightOption): ShippingOption {
 
 const AGING_FALLBACK = { minDays: 1, maxDays: 30 }
 
-// FIXTURE-ASSUMPTION: logisticAging is CJ's free-text delivery estimate on
-// logistic/freightCalculate, observed as either a "min-max" day range (e.g. "3-7") or a single
-// day count (e.g. "2"), sometimes with trailing units text (e.g. "10-15 days"). There is no
-// documented fixed grammar, so this defensively strips everything but digits and dashes and
-// falls back to a wide {1, 30} range on anything it can't parse — it must never throw.
+// logisticAging is CJ's free-text delivery estimate on logistic/freightCalculate — confirmed
+// live 2026-08-23 as a "min-max" day range ("3-5"), though a single day count and trailing units
+// text ("10-15 days") are both plausible and cost nothing to accept. There is no documented fixed
+// grammar, so this defensively strips everything but digits and dashes and falls back to a wide
+// {1, 30} range on anything it can't parse — it must never throw.
 export function parseAgingDays(aging: string): { minDays: number; maxDays: number } {
   try {
     const cleaned = (aging ?? '').replace(/[^0-9-]/g, '')
@@ -144,23 +164,39 @@ export function parseAgingDays(aging: string): { minDays: number; maxDays: numbe
 
 // --- Order lifecycle (Task 6) -----------------------------------------------------------
 
-/** Shared shape of createOrderV3's response and each entry of order/list's `list` array —
- * both carry the same order-identity + amount fields, so one mapper covers both call sites. */
+/**
+ * Shared shape of createOrderV3's response and each entry of order/list's `list` array. Verified
+ * against live CJ 2026-08-23 — the two disagree in ways that matter:
+ *
+ * - `orderId` means DIFFERENT things. On createOrderV3 it is the `SD…` CJ order code; on
+ *   order/list it is an internal numeric id, and the `SD…` code lives in `cjOrderId`. Every other
+ *   endpoint (getOrderDetail, confirmOrder, simulatePay) is keyed by the `SD…` code — the numeric
+ *   id is rejected with "Order not found" — so `cjOrderId` wins whenever it is present.
+ * - `shipmentOrderId` comes back null on createOrderV3 (CJ assigns it later, at shipment).
+ * - `orderAmount` is null on createOrderV3 and populated on order/list, so the total falls back
+ *   to product + postage, which is how CJ itself computes it.
+ */
 interface CjOrderAmounts {
   orderId: string
-  shipmentOrderId: string
+  cjOrderId?: string | null
+  shipmentOrderId?: string | null
   productAmount: number | string
   postageAmount: number | string
-  orderAmount: number | string
+  orderAmount?: number | string | null
 }
 
 export function mapOrderAmounts(o: CjOrderAmounts): PlaceOrderResult {
+  const productAmountCents = usdToCents(o.productAmount)
+  const postageAmountCents = usdToCents(o.postageAmount)
   return {
-    supplierOrderId: o.orderId,
-    shipmentOrderId: o.shipmentOrderId,
-    productAmountCents: usdToCents(o.productAmount),
-    postageAmountCents: usdToCents(o.postageAmount),
-    totalAmountCents: usdToCents(o.orderAmount),
+    supplierOrderId: o.cjOrderId ?? o.orderId,
+    shipmentOrderId: o.shipmentOrderId ?? undefined,
+    productAmountCents,
+    postageAmountCents,
+    totalAmountCents:
+      o.orderAmount === null || o.orderAmount === undefined
+        ? productAmountCents + postageAmountCents
+        : usdToCents(o.orderAmount),
   }
 }
 
@@ -174,6 +210,9 @@ export function mapCjOrderStatus(raw: string): SupplierOrderStatusValue {
       return 'unpaid'
     case 'PENDING':
       return 'pending'
+    // UNSHIPPED is CJ's real post-payment/pre-shipment state (observed live); PROCESSING is not
+    // in CJ's documented enum but is kept as a defensive synonym.
+    case 'UNSHIPPED':
     case 'PROCESSING':
       return 'processing'
     case 'SHIPPED':
@@ -187,8 +226,9 @@ export function mapCjOrderStatus(raw: string): SupplierOrderStatusValue {
   }
 }
 
-// FIXTURE-ASSUMPTION: trackNumber/logisticName/lastMileTrackNumber are CJ's field names on
-// shopping/order/getOrderDetail; trackNumber is absent until the order actually ships.
+// Verified against live CJ 2026-08-23: getOrderDetail carries trackNumber (null until the order
+// actually ships) and logisticName. FIXTURE-ASSUMPTION: lastMileTrackNumber did not appear on the
+// sandbox order observed — it is presumably carrier-dependent, so it stays optional.
 interface CjOrderDetail {
   orderId: string
   orderStatus: string
@@ -212,32 +252,38 @@ export function mapOrderTracking(detail: CjOrderDetail): TrackingInfo | null {
 
 // --- Disputes (Task 6) -------------------------------------------------------------------
 
-// FIXTURE-ASSUMPTION: disputes/disputeProducts returns the order's disputable line items
-// (lineItemId/vid/maxRefundAmount); a non-empty list is our signal the order is disputable.
-interface CjDisputeProductsResponse {
-  list: { lineItemId: string; vid: string; maxRefundAmount: number | string }[]
+/** Verified against live CJ 2026-08-23: disputes/disputeProducts returns the order's line items
+ * under `productInfoList`, each carrying a `canChoose` flag for whether THAT item may be
+ * disputed right now (CJ clears it outside the dispute window). */
+export interface CjDisputeProductsResponse {
+  productInfoList?: { lineItemId: string; cjVariantId: string; canChoose?: boolean }[]
 }
 
-// FIXTURE-ASSUMPTION: disputes/disputeConfirmInfo returns the overall maxRefundAmount, the
-// numeric expectResultOptions CJ allows (1 = refund, 2 = reissue), and the reason catalog.
+/** Verified against live CJ 2026-08-23: disputeConfirmInfo returns the refund ceiling as
+ * `maxAmount`, the allowed outcomes as `expectResultOptionList` (STRING "1"/"2", not ints), and
+ * the reason catalog as `disputeReasonList` with numeric ids. */
 interface CjDisputeConfirmInfo {
-  maxRefundAmount: number | string
-  expectResultOptions: number[]
-  reasons: { reasonId: string; reasonNameEn: string }[]
+  maxAmount?: number | string
+  expectResultOptionList?: (string | number)[]
+  disputeReasonList?: { disputeReasonId: string | number; reasonName: string }[]
 }
 
-const DISPUTE_RESULT_OPTIONS: Record<number, 'refund' | 'reissue'> = { 1: 'refund', 2: 'reissue' }
+const DISPUTE_RESULT_OPTIONS: Record<string, 'refund' | 'reissue'> = { '1': 'refund', '2': 'reissue' }
 
 export function mapDisputeOptions(
   products: CjDisputeProductsResponse,
   confirm: CjDisputeConfirmInfo,
 ): DisputeOptions {
+  const items = products.productInfoList ?? []
   return {
-    disputable: products.list.length > 0,
-    maxRefundCents: usdToCents(confirm.maxRefundAmount),
-    reasons: confirm.reasons.map((r) => ({ id: r.reasonId, label: r.reasonNameEn })),
-    allowedKinds: confirm.expectResultOptions
-      .map((o) => DISPUTE_RESULT_OPTIONS[o])
+    disputable: items.some((item) => item.canChoose === true),
+    maxRefundCents: confirm.maxAmount === undefined ? undefined : usdToCents(confirm.maxAmount),
+    reasons: (confirm.disputeReasonList ?? []).map((r) => ({
+      id: String(r.disputeReasonId),
+      label: r.reasonName,
+    })),
+    allowedKinds: (confirm.expectResultOptionList ?? [])
+      .map((o) => DISPUTE_RESULT_OPTIONS[String(o)])
       .filter((k): k is 'refund' | 'reissue' => k !== undefined),
   }
 }

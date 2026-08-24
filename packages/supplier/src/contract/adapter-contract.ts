@@ -15,6 +15,14 @@ export interface AdapterContractContext {
  * mode when CJ_CONTRACT=1 (Task 6).
  */
 export function runAdapterContractTests(name: string, setup: () => Promise<AdapterContractContext>): void {
+  // Idempotency keys must be unique PER RUN. Against a real supplier the orders these tests place
+  // outlive the run, so a fixed key makes the second run reuse the first run's order — which by
+  // then has advanced past the state the test expects ("Only order in CREATED or IN_CART status
+  // can be confirmed"). Within a single run the key stays stable, which is what the idempotency
+  // case actually exercises.
+  const runId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+  const key = (purpose: string) => `contract-${name}-${purpose}-${runId}`
+
   describe(`SupplierAdapter contract: ${name}`, () => {
     it('searches products and returns well-formed summaries', async () => {
       const { adapter, searchKeyword } = await setup()
@@ -64,7 +72,7 @@ export function runAdapterContractTests(name: string, setup: () => Promise<Adapt
     it('placeOrder is idempotent on idempotencyKey', async () => {
       const { adapter, knownVariantId, address } = await setup()
       const req = {
-        idempotencyKey: `contract-${name}-idem-1`,
+        idempotencyKey: key('idem'),
         shippingAddress: address,
         items: [{ supplierVariantId: knownVariantId, quantity: 1 }],
         logisticName: 'Standard', fromCountry: 'US',
@@ -80,7 +88,7 @@ export function runAdapterContractTests(name: string, setup: () => Promise<Adapt
     it('runs the confirm → pay → status lifecycle', async () => {
       const { adapter, knownVariantId, address } = await setup()
       const placed = await adapter.placeOrder({
-        idempotencyKey: `contract-${name}-life-1`,
+        idempotencyKey: key('life'),
         shippingAddress: address,
         items: [{ supplierVariantId: knownVariantId, quantity: 1 }],
         logisticName: 'Standard', fromCountry: 'US',
@@ -96,12 +104,16 @@ export function runAdapterContractTests(name: string, setup: () => Promise<Adapt
       const ctx = await setup()
       if (!ctx.advanceToShipped) return
       const placed = await ctx.adapter.placeOrder({
-        idempotencyKey: `contract-${name}-track-1`,
+        idempotencyKey: key('track'),
         shippingAddress: ctx.address,
         items: [{ supplierVariantId: ctx.knownVariantId, quantity: 1 }],
         logisticName: 'Standard', fromCountry: 'US',
       })
       expect(await ctx.adapter.getTracking(placed.supplierOrderId)).toBeNull()
+      // A supplier will not ship what it has not been paid for: CJ rejects a status advance on an
+      // unpaid order ("current status CREATED(100) can only be updated to none").
+      await ctx.adapter.confirmOrder(placed.supplierOrderId)
+      await ctx.adapter.payOrder(placed.shipmentOrderId ?? placed.supplierOrderId)
       await ctx.advanceToShipped(placed.supplierOrderId)
       const tracking = await ctx.adapter.getTracking(placed.supplierOrderId)
       expect(tracking?.trackingNumber).toBeTruthy()
@@ -117,11 +129,15 @@ export function runAdapterContractTests(name: string, setup: () => Promise<Adapt
     it('offers dispute options for an order', async () => {
       const { adapter, knownVariantId, address } = await setup()
       const placed = await adapter.placeOrder({
-        idempotencyKey: `contract-${name}-disp-1`,
+        idempotencyKey: key('disp'),
         shippingAddress: address,
         items: [{ supplierVariantId: knownVariantId, quantity: 1 }],
         logisticName: 'Standard', fromCountry: 'US',
       })
+      // Disputes only exist against an order the supplier has actually been paid for — CJ answers
+      // "Order cannot be disputed" for one still sitting unpaid.
+      await adapter.confirmOrder(placed.supplierOrderId)
+      await adapter.payOrder(placed.shipmentOrderId ?? placed.supplierOrderId)
       const options = await adapter.getDisputeOptions(placed.supplierOrderId)
       expect(typeof options.disputable).toBe('boolean')
       expect(Array.isArray(options.reasons)).toBe(true)

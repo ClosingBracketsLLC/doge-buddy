@@ -58,6 +58,22 @@ describe('CJSupplierAdapter read methods', () => {
     expect(client.pointsSpentToday()).toBe(50)
   })
 
+  it('searchProducts collapses a variant price RANGE to its low end', async () => {
+    // Observed live: CJ reports "15.16 -- 15.17" when a product's variants differ in price.
+    const { adapter } = await makeAdapter({
+      content: [{ productList: [{ id: 'cjp-3', nameEn: 'Range Priced Toy', sellPrice: '15.16 -- 15.17' }] }],
+    })
+    const [summary] = await adapter.searchProducts({ keyword: 'x' })
+
+    expect(summary!.sellPriceCents).toBe(1516)
+  })
+
+  it('searchProducts returns an empty list when listV2 reports no matches', async () => {
+    const { adapter } = await makeAdapter({ content: [], totalRecords: 0 })
+
+    expect(await adapter.searchProducts({ keyword: 'nothing-matches-this' })).toEqual([])
+  })
+
   it('getProduct fetches product/query and maps detail + variants', async () => {
     const { adapter, client, calls } = await makeAdapter(loadFixture('product-query'))
     const detail = await adapter.getProduct('cjp-1')

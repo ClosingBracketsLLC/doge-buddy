@@ -29,6 +29,11 @@ import {
   mapStock,
 } from './mapping.ts'
 
+const countryNames = new Intl.DisplayNames(['en'], { type: 'region' })
+function countryDisplayName(isoCode: string): string {
+  return countryNames.of(isoCode) ?? isoCode
+}
+
 // FIXTURE-ASSUMPTION: CJ signs webhook payloads as base64(hmacSHA256(openId, rawBody)) and
 // delivers the signature under one of these header names; we haven't confirmed the exact
 // header against a live CJ webhook, so all three are checked in this priority order.
@@ -60,21 +65,19 @@ export interface CJSupplierAdapterOptions {
   sandbox?: boolean
 }
 
-// FIXTURE-ASSUMPTION: amount / freezeAmount are CJ's available/frozen balance fields on
-// shopping/pay/getBalance; noWithdrawalAmount is present in sample payloads but not surfaced
-// by SupplierAdapter#getBalance today.
+// Verified against live CJ 2026-08-23: shopping/pay/getBalance reports the available balance as
+// `amount` and the frozen portion as `freezeAmount`. noWithdrawalAmount is present in sample
+// payloads but not surfaced by SupplierAdapter#getBalance today.
 interface CjBalance {
   amount: number | string
   freezeAmount: number | string
 }
 
-// FIXTURE-ASSUMPTION: shopping/order/list's `list` array entries carry the same
-// orderId/shipmentOrderId/amount fields as createOrderV3's response (CjOrderAmounts in
-// mapping.ts), plus an `orderNumber` field echoing the client-supplied idempotency key. Neither
-// this shape nor the `orderNumbers` query param below (see placeOrder) has been confirmed
-// against a live CJ response, so placeOrder does not trust the server-side filter alone — it
-// re-checks `orderNumber` on each returned entry itself before treating it as a match.
-type CjOrderListEntry = Parameters<typeof mapOrderAmounts>[0] & { orderNumber: string }
+// Verified against live CJ 2026-08-23: order/list entries echo the client-supplied order number
+// as `orderNum` (NOT `orderNumber` — that name appears only on the createOrderV3 response), and
+// the `orderNumbers` query param does filter server-side. placeOrder still re-checks the field
+// itself rather than trusting the filter alone.
+type CjOrderListEntry = Parameters<typeof mapOrderAmounts>[0] & { orderNum: string }
 
 /**
  * CJ Dropshipping SupplierAdapter. Read methods (searchProducts, getProduct, getVariantStock,
@@ -106,12 +109,13 @@ export class CJSupplierAdapter implements SupplierAdapter {
       startSellPrice: q.minPriceCents !== undefined ? q.minPriceCents / 100 : undefined,
       endSellPrice: q.maxPriceCents !== undefined ? q.maxPriceCents / 100 : undefined,
     }
-    const data = await this.client.request<{ list: Parameters<typeof mapProductSummary>[0][] }>(
-      'GET',
-      '/product/listV2',
-      { query, points: 50 },
-    )
-    return data.list.map(mapProductSummary)
+    // Verified against live CJ 2026-08-23: listV2 nests its results two levels deep as
+    // { content: [{ productList: [...] }] } — not the flat { list: [...] } the other list
+    // endpoints (e.g. order/list) return.
+    const data = await this.client.request<{
+      content?: { productList?: Parameters<typeof mapProductSummary>[0][] }[]
+    }>('GET', '/product/listV2', { query, points: 50 })
+    return (data.content ?? []).flatMap((group) => group.productList ?? []).map(mapProductSummary)
   }
 
   async getProduct(supplierProductId: string): Promise<SupplierProductDetail> {
@@ -161,20 +165,18 @@ export class CJSupplierAdapter implements SupplierAdapter {
 
   // --- Order lifecycle / payment / disputes / webhooks (Task 6) -------------------------
 
-  /** Idempotent on idempotencyKey: pre-checks order/list for an existing order (by orderNumber)
-   * before ever calling createOrderV3, so a repeated call never creates a second CJ order. The
-   * match is verified client-side against each entry's `orderNumber` — CJ's `orderNumbers` query
-   * filter is not trusted on its own (see the FIXTURE-ASSUMPTION on CjOrderListEntry above). */
+  /** Idempotent on idempotencyKey: pre-checks order/list for an existing order before ever
+   * calling createOrderV3, so a repeated call never creates a second (chargeable) CJ order. The
+   * match is re-verified client-side against each entry's `orderNum` rather than trusting CJ's
+   * `orderNumbers` query filter alone. */
   async placeOrder(req: PlaceOrderRequest): Promise<PlaceOrderResult> {
     const existing = await this.client.request<{ list?: CjOrderListEntry[] }>(
       'GET',
       '/shopping/order/list',
-      // FIXTURE-ASSUMPTION: `orderNumbers` is CJ's query param name for filtering order/list by
-      // client order number — unconfirmed against live CJ docs/responses.
       { query: { orderNumbers: req.idempotencyKey }, points: 0, priority: true },
     )
     const existingList = existing.list ?? []
-    const match = existingList.find((o) => o.orderNumber === req.idempotencyKey)
+    const match = existingList.find((o) => o.orderNum === req.idempotencyKey)
     if (match) {
       return mapOrderAmounts(match)
     }
@@ -182,20 +184,35 @@ export class CJSupplierAdapter implements SupplierAdapter {
     const body = {
       orderNumber: req.idempotencyKey,
       shippingCountryCode: req.shippingAddress.country,
+      // CJ's createOrderV3 requires the country's display name (shippingCountry) in addition to
+      // its ISO code (shippingCountryCode) — derived via Intl rather than a hand-maintained table.
+      shippingCountry: countryDisplayName(req.shippingAddress.country),
       fromCountryCode: req.fromCountry,
       logisticName: req.logisticName,
-      shopLogisticsType: 1,
+      // shopLogisticsType 1 ("platform shipping mode") additionally demands a storageId, which
+      // pins the order to one specific CJ warehouse; 2 is CJ's documented default and lets CJ
+      // route it. Verified live: 1 fails with `5030 Storage ID cannot be empty`, 2 succeeds.
+      shopLogisticsType: 2,
       payType: 3,
-      consigneeName: req.shippingAddress.name,
-      phone: req.shippingAddress.phone,
+      // Docs describe `platform` as optional ("Default: Api"), but live CJ rejects both an absent
+      // one (`5027 Platform null not support`) and every casing of "api" (`Platform api not
+      // support`) — the API is not itself an accepted order-origin platform. Doge Buddy's orders
+      // genuinely originate from a Shopify store, which is the accurate value here anyway.
+      platform: 'shopify',
+      shippingCustomerName: req.shippingAddress.name,
+      shippingPhone: req.shippingAddress.phone,
       email: req.shippingAddress.email,
-      addressLine1: req.shippingAddress.line1,
-      addressLine2: req.shippingAddress.line2,
-      city: req.shippingAddress.city,
-      province: req.shippingAddress.state,
-      zip: req.shippingAddress.zip,
+      shippingAddress: req.shippingAddress.line1,
+      shippingAddress2: req.shippingAddress.line2,
+      shippingCity: req.shippingAddress.city,
+      shippingProvince: req.shippingAddress.state,
+      shippingZip: req.shippingAddress.zip,
       products: req.items.map((item) => ({ vid: item.supplierVariantId, quantity: item.quantity })),
-      ...(this.sandbox ? { sandbox: true } : {}),
+      // isSandbox: 1 is CJ's documented way to mark a test order — it simulates payment and
+      // skips real charges/logistics entirely. The previous `sandbox: true` field name/type was
+      // unverified and wrong (CJ doesn't recognize it), which would have sent real, chargeable
+      // orders to CJ even when this adapter was constructed with sandbox: true.
+      ...(this.sandbox ? { isSandbox: 1 } : {}),
     }
     const created = await this.client.request<Parameters<typeof mapOrderAmounts>[0]>(
       'POST',
@@ -215,6 +232,13 @@ export class CJSupplierAdapter implements SupplierAdapter {
 
   async payOrder(shipmentOrderId: string): Promise<{ paid: boolean; failureReason?: string }> {
     try {
+      if (this.sandbox) {
+        // Sandbox orders are not payable through the real balance rail — payBalanceV2 rejects
+        // them outright (HTTP 400). simulatePay is CJ's sandbox-only stand-in, and moves the
+        // order to UNSHIPPED exactly as a real payment would.
+        await this.client.simulatePay(shipmentOrderId)
+        return { paid: true }
+      }
       await this.client.request('POST', '/shopping/pay/payBalanceV2', {
         body: { shipmentOrderId },
         points: 10,
@@ -251,24 +275,24 @@ export class CJSupplierAdapter implements SupplierAdapter {
   // placeOrder/confirmOrder/payOrder/getOrderDetail — these respect the daily points budget
   // instead of bypassing it with priority: true.
   async getDisputeOptions(supplierOrderId: string): Promise<DisputeOptions> {
-    const products = await this.client.request<{ list?: Parameters<typeof mapDisputeOptions>[0]['list'] }>(
+    const products = await this.client.request<Parameters<typeof mapDisputeOptions>[0]>(
       'GET',
       '/disputes/disputeProducts',
       { query: { orderId: supplierOrderId }, points: 10 },
     )
-    const productList = products.list ?? []
+    const productInfoList = products.productInfoList ?? []
     const confirm = await this.client.request<Parameters<typeof mapDisputeOptions>[1]>(
       'POST',
       '/disputes/disputeConfirmInfo',
       {
-        // FIXTURE-ASSUMPTION: disputeConfirmInfo takes the order + the disputable line items
-        // returned by disputeProducts; the exact request shape is unconfirmed against a live
-        // CJ response.
-        body: { orderId: supplierOrderId, products: productList.map((p) => ({ lineItemId: p.lineItemId, vid: p.vid })) },
+        // Verified live: disputeConfirmInfo wants disputeProducts' `productInfoList` entries
+        // passed straight back through. Reshaping them into {lineItemId, vid} pairs — the shape
+        // this previously sent — is rejected with HTTP 400.
+        body: { orderId: supplierOrderId, productInfoList },
         points: 10,
       },
     )
-    return mapDisputeOptions({ list: productList }, confirm)
+    return mapDisputeOptions({ productInfoList }, confirm)
   }
 
   async openDispute(req: Parameters<SupplierAdapter['openDispute']>[0]): Promise<{ disputeId: string }> {

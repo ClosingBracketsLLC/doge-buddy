@@ -1,13 +1,29 @@
 {
+  "pageNum": 1,
+  "pageSize": 10,
+  "total": 1,
   "list": [
     {
-      "orderId": "cjo-999",
-      "shipmentOrderId": "cjso-999",
-      "orderNumber": "DB-completely-different",
-      "productAmount": 1.00,
-      "postageAmount": 1.00,
-      "orderAmount": 2.00,
-      "orderStatus": "CREATED"
+      "orderId": "2608240001230999999",
+      "orderNum": "DB-completely-different",
+      "cjOrderId": "SD26082400012209999999",
+      "shippingCountryCode": "US",
+      "shippingProvince": "GA",
+      "shippingCity": "Atlanta",
+      "shippingCustomerName": "Someone Else",
+      "orderWeight": 100,
+      "orderStatus": "CREATED",
+      "orderAmount": 2.0,
+      "productAmount": 1.0,
+      "postageAmount": 1.0,
+      "logisticName": "USPS+",
+      "trackNumber": null,
+      "createDate": "2026-08-24 00:01:24",
+      "paymentDate": null,
+      "isSandbox": 1,
+      "storageId": null,
+      "shopId": "2608232339193539500",
+      "shopName": "doge-buddy"
     }
   ]
 }

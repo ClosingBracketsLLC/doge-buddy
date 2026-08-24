@@ -17,6 +17,11 @@ function loadFixture(name: string): unknown {
   return JSON.parse(readFileSync(new URL(`./fixtures/cj/${name}.json`, import.meta.url), 'utf8'))
 }
 
+/** First `list` entry of an order/list fixture, for tests that vary a single field on it. */
+function loadFixtureEntry(name: string): Record<string, unknown> {
+  return (loadFixture(name) as { list: Record<string, unknown>[] }).list[0]!
+}
+
 function envelope(
   data: unknown,
   over: Partial<{ code: number; result: boolean; message: string; requestId: string }> = {},
@@ -79,24 +84,29 @@ const PLACE_REQ = {
 const EXPECTED_CREATE_ORDER_BODY = {
   orderNumber: 'DB-abc',
   shippingCountryCode: 'US',
+  shippingCountry: 'United States',
   fromCountryCode: 'US',
   logisticName: 'USPS+',
-  shopLogisticsType: 1,
+  shopLogisticsType: 2,
   payType: 3,
-  consigneeName: 'Jane Doe',
-  phone: '4045551234',
+  platform: 'shopify',
+  shippingCustomerName: 'Jane Doe',
+  shippingPhone: '4045551234',
   email: 'jane@example.com',
-  addressLine1: '123 Main St',
-  addressLine2: 'Apt 4',
-  city: 'Atlanta',
-  province: 'GA',
-  zip: '30301',
+  shippingAddress: '123 Main St',
+  shippingAddress2: 'Apt 4',
+  shippingCity: 'Atlanta',
+  shippingProvince: 'GA',
+  shippingZip: '30301',
   products: [{ vid: 'cjv-9', quantity: 2 }],
 }
 
+// Both call sites resolve to the same result despite differing wire shapes: createOrderV3 supplies
+// the `SD…` code as `orderId` with a null `orderAmount` (total falls back to product + postage),
+// while order/list supplies it as `cjOrderId` alongside a populated `orderAmount`.
 const EXPECTED_ORDER_RESULT = {
-  supplierOrderId: 'cjo-1',
-  shipmentOrderId: 'cjso-1',
+  supplierOrderId: 'SD26082400012206614001',
+  shipmentOrderId: undefined,
   productAmountCents: 1330,
   postageAmountCents: 499,
   totalAmountCents: 1829,
@@ -114,7 +124,7 @@ describe('CJSupplierAdapter.placeOrder', () => {
     expect(calls[0]!.url).toBe(`${BASE}/shopping/order/list?orderNumbers=DB-abc`)
     expect(calls[1]!.url).toBe(`${BASE}/shopping/order/createOrderV3`)
     expect(bodyOf(calls[1]!)).toEqual(EXPECTED_CREATE_ORDER_BODY)
-    expect(bodyOf(calls[1]!)).toMatchObject({ payType: 3, shopLogisticsType: 1 })
+    expect(bodyOf(calls[1]!)).toMatchObject({ payType: 3, shopLogisticsType: 2, platform: 'shopify' })
     expect((bodyOf(calls[1]!) as { orderNumber: string }).orderNumber).toBe(PLACE_REQ.idempotencyKey)
     expect(result).toEqual(EXPECTED_ORDER_RESULT)
   })
@@ -145,7 +155,7 @@ describe('CJSupplierAdapter.placeOrder', () => {
     expect(result).toEqual(EXPECTED_ORDER_RESULT)
   })
 
-  it('includes sandbox: true in the createOrderV3 body when constructed with sandbox: true', async () => {
+  it('includes isSandbox: 1 in the createOrderV3 body when constructed with sandbox: true', async () => {
     const { adapter, calls } = await makeAdapter(
       (url) => {
         if (url.includes('/shopping/order/list')) return ok({ list: [] })
@@ -155,7 +165,21 @@ describe('CJSupplierAdapter.placeOrder', () => {
     )
     await adapter.placeOrder(PLACE_REQ)
 
-    expect(bodyOf(calls[1]!)).toEqual({ ...EXPECTED_CREATE_ORDER_BODY, sandbox: true })
+    expect(bodyOf(calls[1]!)).toEqual({ ...EXPECTED_CREATE_ORDER_BODY, isSandbox: 1 })
+  })
+
+  it('matches an existing order on `orderNum` — CJ does not echo the key as `orderNumber`', async () => {
+    // Regression: matching on `orderNumber` (the createOrderV3 response's name for this field)
+    // never matched a real order/list entry, so every retry placed a SECOND chargeable CJ order.
+    const { adapter, calls } = await makeAdapter((url) => {
+      if (url.includes('/shopping/order/list')) {
+        return ok({ list: [{ ...loadFixtureEntry('order-list-existing'), orderNumber: undefined }] })
+      }
+      throw new Error('createOrderV3 must not be called when an order already exists')
+    })
+
+    expect(await adapter.placeOrder(PLACE_REQ)).toEqual(EXPECTED_ORDER_RESULT)
+    expect(calls).toHaveLength(1)
   })
 
   it('proceeds to createOrderV3 without crashing when the order-list response omits `list` entirely', async () => {
@@ -261,15 +285,33 @@ describe('CJSupplierAdapter.getDisputeOptions', () => {
 
     expect(calls[0]!.url).toBe(`${BASE}/disputes/disputeProducts?orderId=cjo-1`)
     expect(calls[1]!.url).toBe(`${BASE}/disputes/disputeConfirmInfo`)
+    // disputeConfirmInfo requires disputeProducts' entries passed straight back through.
+    expect(bodyOf(calls[1]!)).toMatchObject({
+      orderId: 'cjo-1',
+      productInfoList: [expect.objectContaining({ lineItemId: 'li-1', cjVariantId: 'cjv-1' })],
+    })
     expect(options).toEqual({
       disputable: true,
       maxRefundCents: 1829,
       reasons: [
-        { id: 'r-42', label: 'Damaged on arrival' },
-        { id: 'r-43', label: 'Package lost' },
+        { id: '8', label: 'Product Damaged' },
+        { id: '10', label: 'Products Not Received' },
       ],
       allowedKinds: ['refund', 'reissue'],
     })
+  })
+
+  it('reports an order outside its dispute window as not disputable', async () => {
+    // CJ keeps returning the line items after the window closes, flipping canChoose to false —
+    // item presence alone is not a disputability signal.
+    const { adapter } = await makeAdapter((url) => {
+      if (url.includes('/disputes/disputeProducts')) {
+        return ok({ productInfoList: [{ lineItemId: 'li-1', cjVariantId: 'cjv-1', canChoose: false }] })
+      }
+      return ok(loadFixture('dispute-confirm-info'))
+    })
+
+    expect((await adapter.getDisputeOptions('cjo-1')).disputable).toBe(false)
   })
 })
 

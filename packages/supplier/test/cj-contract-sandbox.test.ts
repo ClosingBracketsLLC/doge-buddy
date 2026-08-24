@@ -1,4 +1,4 @@
-import { describe, it } from 'vitest'
+import { describe, it, vi } from 'vitest'
 import { CJSupplierAdapter, CjHttpClient, InMemoryCjTokenStore } from '@doge-buddy/supplier'
 import { runAdapterContractTests } from '@doge-buddy/supplier/contract'
 
@@ -10,6 +10,9 @@ if (!enabled) {
 } else {
   const client = new CjHttpClient({ apiKey: process.env.CJ_API_KEY!, tokenStore: new InMemoryCjTokenStore() })
   const adapter = new CJSupplierAdapter({ client, openId: process.env.CJ_OPEN_ID, sandbox: true })
+  // CJ's free tier throttles to 1 rps and these cases chain several calls each (place → confirm →
+  // pay → advance → read), so they run well past vitest's 5s default.
+  vi.setConfig({ testTimeout: 60_000 })
   runAdapterContractTests('cj-sandbox', async () => ({
     adapter,
     knownVariantId: process.env.CJ_CONTRACT_VID ?? '',

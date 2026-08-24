@@ -1,7 +1,42 @@
 {
-  "pageNum": 1, "pageSize": 20, "total": 2,
-  "list": [
-    { "pid": "cjp-1", "productNameEn": "Interactive Dog Rope Toy", "productImage": "https://cdn.cj.example/rope.jpg", "sellPrice": 6.20, "listedNum": 1200, "categoryName": "Pet Toys" },
-    { "pid": "cjp-2", "productNameEn": "Slow Feeder Dog Bowl", "productImage": "https://cdn.cj.example/bowl.jpg", "sellPrice": "4.80", "listedNum": 800, "categoryName": "Pet Bowls" }
+  "pageSize": 20,
+  "pageNumber": 1,
+  "totalRecords": 2,
+  "totalPages": 1,
+  "content": [
+    {
+      "productList": [
+        {
+          "id": "cjp-1",
+          "nameEn": "Interactive Dog Rope Toy",
+          "sku": "CJJT1000001",
+          "bigImage": "https://cdn.cj.example/rope.jpg",
+          "sellPrice": "6.20",
+          "listedNum": 1200,
+          "categoryId": "87CF251F-8D11-4DE0-A154-9694D9858EB3",
+          "oneCategoryName": "Pet Supplies",
+          "twoCategoryName": "Pet Toys",
+          "threeCategoryName": null,
+          "warehouseInventoryNum": 230,
+          "totalVerifiedInventory": 230,
+          "verifiedWarehouse": 1
+        },
+        {
+          "id": "cjp-2",
+          "nameEn": "Slow Feeder Dog Bowl",
+          "sku": "CJJT1000002",
+          "bigImage": "https://cdn.cj.example/bowl.jpg",
+          "sellPrice": 4.8,
+          "listedNum": 800,
+          "categoryId": "DD918287-C279-466A-B9C6-56079DE4B37A",
+          "oneCategoryName": "Pet Supplies",
+          "twoCategoryName": null,
+          "threeCategoryName": null,
+          "warehouseInventoryNum": 12,
+          "totalVerifiedInventory": 12,
+          "verifiedWarehouse": 1
+        }
+      ]
+    }
   ]
 }

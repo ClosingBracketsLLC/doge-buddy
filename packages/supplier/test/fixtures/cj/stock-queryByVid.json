@@ -1,4 +1,24 @@
 [
-  { "countryCode": "US", "storageNum": 42, "verifiedWarehouse": 1 },
-  { "countryCode": "CN", "storageNum": 500, "verifiedWarehouse": 0 }
+  {
+    "vid": "cjv-1",
+    "areaId": "2",
+    "areaEn": "US Warehouse",
+    "countryCode": "US",
+    "storageNum": 42,
+    "totalInventoryNum": 42,
+    "cjInventoryNum": 42,
+    "factoryInventoryNum": 0,
+    "stock": [{ "stockId": "23453", "inventory": 42, "factoryInventory": 0 }]
+  },
+  {
+    "vid": "cjv-1",
+    "areaId": "1",
+    "areaEn": "China Warehouse",
+    "countryCode": "CN",
+    "storageNum": 500,
+    "totalInventoryNum": 500,
+    "cjInventoryNum": 0,
+    "factoryInventoryNum": 500,
+    "stock": [{ "stockId": "11002", "inventory": 0, "factoryInventory": 500 }]
+  }
 ]
