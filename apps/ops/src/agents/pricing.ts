@@ -45,7 +45,7 @@ export function createUsageAccumulator(): {
 
   return {
     add(message) {
-      const model = message.message.model
+      const model = message.message.model ?? 'unknown'
       const usage = message.message.usage
 
       // No-op if no usage
@@ -57,20 +57,6 @@ export function createUsageAccumulator(): {
       const outputTokens = usage.output_tokens ?? 0
       const cacheReadTokens = usage.cache_read_input_tokens ?? 0
       const cacheWriteTokens = usage.cache_creation_input_tokens ?? 0
-
-      // Only accumulate if there are any tokens
-      if (
-        inputTokens === 0 &&
-        outputTokens === 0 &&
-        cacheReadTokens === 0 &&
-        cacheWriteTokens === 0
-      ) {
-        return
-      }
-
-      if (!model) {
-        return
-      }
 
       if (!perModel[model]) {
         perModel[model] = {
