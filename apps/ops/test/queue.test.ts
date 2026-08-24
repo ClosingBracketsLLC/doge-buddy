@@ -3,7 +3,7 @@ import { MockSupplierAdapter } from '@doge-buddy/supplier'
 import { eq } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
-import { startQueue, type Queue } from '../src/queue.ts'
+import { registerCron, startQueue, type Queue } from '../src/queue.ts'
 import { createSettings } from '../src/settings.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
@@ -41,5 +41,12 @@ describe('queue', () => {
     }
     expect(rows).toHaveLength(1)
     expect(rows[0]!.actor).toBe('system')
+  })
+
+  it('registerCron with options pins retryLimit and expiration on the queue', async () => {
+    await registerCron(q.boss, 'test.cron-opts', '0 13 * * 1', async () => {}, { retryLimit: 0, expireInSeconds: 3600 })
+    const queue = await q.boss.getQueue('test.cron-opts')
+    expect(queue?.retryLimit).toBe(0)
+    expect(queue?.expireInSeconds).toBe(3600)
   })
 })

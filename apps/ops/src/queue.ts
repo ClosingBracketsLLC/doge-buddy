@@ -200,16 +200,39 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
 }
 
 /**
+ * Per-cron queue options (`registerCron`'s `opts` param). Currently just the two knobs Phase 5's
+ * `sourcing.weekly` cron needs to pin away from pg-boss defaults (retryLimit 2, a 15-minute
+ * expiry) — extend as more crons need more `PgBoss.Queue` fields.
+ */
+export interface CronJobOptions {
+  retryLimit?: number
+  expireInSeconds?: number
+}
+
+/**
  * Creates a queue (if needed), registers its worker, and schedules it on a cron. Used for
  * recurring jobs like `shopify.webhook-audit` that aren't triggered by application events.
+ *
+ * `opts` (optional) pins queue-level settings — e.g. `retryLimit`/`expireInSeconds` — that
+ * diverge from pg-boss's defaults. Omitted `opts` is today's behavior exactly: `createQueueRetrying`
+ * still creates the queue with no options, same as every existing caller. When `opts` is given,
+ * `createQueueRetrying(boss, name, { name, ...opts })` covers the *first-ever* create, but
+ * `createQueue` is idempotent — if the queue already exists (e.g. `startQueue` or an earlier
+ * `registerCron` call created it first with defaults), that create is a silent no-op and the
+ * options never apply. So follow up with `boss.updateQueue(name, { name, ...opts })`, which pg-boss
+ * always applies (update, not create-if-missing) and makes the settings stick either way.
  */
 export async function registerCron<ReqData extends object = object>(
   boss: PgBoss,
   name: string,
   cron: string,
   handler: PgBoss.WorkHandler<ReqData>,
+  opts?: CronJobOptions,
 ): Promise<void> {
-  await createQueueRetrying(boss, name)
+  await createQueueRetrying(boss, name, opts ? { name, ...opts } : undefined)
+  if (opts) {
+    await boss.updateQueue(name, { name, ...opts })
+  }
   await boss.work(name, handler)
   await boss.schedule(name, cron)
 }
