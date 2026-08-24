@@ -261,9 +261,14 @@ if (config.shopify && config.adminBaseUrl && shopifyClient) {
 // is never silently retried — `claimDailyRun`'s same-day breaker is the only thing standing between
 // this cron and a second paid run today, so a blind retry would be actively dangerous here.
 if (config.anthropic) {
-  const trends = config.serpapi ? createSerpApiTrends({ apiKey: config.serpapi.apiKey }) : null
+  // A FACTORY, not a single baked-in instance (FIX C2): `createSerpApiTrends` enforces its
+  // per-run SerpApi request cap via a closure counter that never resets, so reusing one instance
+  // across weekly runs would accumulate it and permanently trip (~week 4), silently nulling the
+  // trends stage. Constructing a fresh provider per run resets that counter every run.
+  const trendsFactory = (): ReturnType<typeof createSerpApiTrends> | null =>
+    config.serpapi ? createSerpApiTrends({ apiKey: config.serpapi.apiKey }) : null
   const sourcingDeps: SourcingPipelineDeps = {
-    db, adapter: supplierAdapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trends,
+    db, adapter: supplierAdapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trendsFactory,
   }
   await registerCron(queue.boss, 'sourcing.weekly', '0 13 * * 1', sourcingWeeklyHandler(sourcingDeps), {
     retryLimit: 0,

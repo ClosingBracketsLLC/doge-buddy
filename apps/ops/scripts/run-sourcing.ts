@@ -129,15 +129,19 @@ adapter.quoteShipping = async (q) => {
 }
 
 let serpApiRequests = 0
-const trends = config.serpapi
-  ? createSerpApiTrends({
-      apiKey: config.serpapi.apiKey,
-      fetchFn: (...args: Parameters<typeof fetch>) => {
-        serpApiRequests += 1
-        return fetch(...args)
-      },
-    })
-  : null
+// Factory (FIX C2): `runSourcingPipeline` constructs a fresh TrendsProvider per run so its per-run
+// SerpApi request counter resets each run. This script drives exactly one run, so the counting
+// `fetchFn` closure below still tallies that single run's requests for the post-run telemetry line.
+const trendsFactory = (): ReturnType<typeof createSerpApiTrends> | null =>
+  config.serpapi
+    ? createSerpApiTrends({
+        apiKey: config.serpapi.apiKey,
+        fetchFn: (...args: Parameters<typeof fetch>) => {
+          serpApiRequests += 1
+          return fetch(...args)
+        },
+      })
+    : null
 
 let failed = false
 
@@ -158,7 +162,7 @@ try {
   }
 
   const deps: SourcingPipelineDeps = {
-    db, adapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trends, force,
+    db, adapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trendsFactory, force,
   }
 
   console.log(`run-sourcing: starting${force ? ' (--force)' : ''}...`)

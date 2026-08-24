@@ -234,7 +234,7 @@ describe('runSourcingPipeline', () => {
       enqueue: noopEnqueue,
       notify: noopNotify,
       adminBaseUrl: 'http://localhost:3001',
-      trends: stubTrends(),
+      trendsFactory: () => stubTrends(),
       ...overrides,
     }
   }
@@ -347,7 +347,7 @@ describe('runSourcingPipeline', () => {
     const winners = [winnerFor(specs[0]!)]
     const alert = vi.fn(async () => {})
 
-    const result = await runSourcingPipeline(baseDeps({ adapter, alert, trends: null, force: true, queryFn: fakeQueryFn(winners) }))
+    const result = await runSourcingPipeline(baseDeps({ adapter, alert, trendsFactory: () => null, force: true, queryFn: fakeQueryFn(winners) }))
     expect(result.outcome).toBe('completed')
     expect(result.submitted).toBe(1)
     createdRunIds.push(result.runId!)
@@ -375,5 +375,63 @@ describe('runSourcingPipeline', () => {
 
     const proposalRows = await db.select().from(proposals).where(eq(proposals.agentRunId, result.runId!))
     expect(proposalRows).toHaveLength(0)
+  })
+
+  // --- (f) FIX C2: fresh trends provider per run ------------------------------------------------
+  it('(f) FIX C2: each run constructs a FRESH trends provider from the factory (per-run request budget resets)', async () => {
+    // The bug: a single TrendsProvider baked in at boot keeps one closure counter that never
+    // resets, so week-over-week it accumulates and permanently trips the SerpApi per-run cap.
+    // Proof of the fix: the factory is invoked once per run and hands out a DISTINCT instance each
+    // time, so each run gets its own fresh `requestsMade` counter.
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const providers: TrendsProvider[] = []
+    const trendsFactory = vi.fn((): TrendsProvider => {
+      const provider: TrendsProvider = {
+        key: 'stub',
+        fetchInterest: vi.fn(async (keywords: string[]) => keywords.map((keyword) => ({ keyword, score: 80, snapshot: { keyword } }))),
+      }
+      providers.push(provider)
+      return provider
+    })
+
+    const first = await runSourcingPipeline(baseDeps({ adapter, trendsFactory, force: true, queryFn: fakeQueryFn([]) }))
+    expect(first.outcome).toBe('completed')
+    createdRunIds.push(first.runId!)
+
+    const second = await runSourcingPipeline(baseDeps({ adapter, trendsFactory, force: true, queryFn: fakeQueryFn([]) }))
+    expect(second.outcome).toBe('completed')
+    createdRunIds.push(second.runId!)
+
+    expect(trendsFactory).toHaveBeenCalledTimes(2)
+    expect(providers).toHaveLength(2)
+    expect(providers[0]).not.toBe(providers[1]) // distinct instance => fresh per-run request budget
+  })
+
+  // --- (g) FIX C1/C4b: a pre-runner throw never leaves the claimed row stuck 'running' ----------
+  it('(g) FIX C1/C4b: a stage-before-runner throw flips the claimed row to a terminal status, not stuck running', async () => {
+    // A stage between the day-claim and the agent runner throws (here the trends stage; the same
+    // belt covers a harvest db.insert throwing on a transient DB error, or a SIGTERM-driven throw).
+    // The runner's own try/finally (Task 12) only covers throws INSIDE the runner — without this
+    // belt the claimed 'running' row would sit wedged for up to ~7 days with no orphan alert.
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const alert = vi.fn(async () => {})
+    const trendsFactory = () => {
+      throw new Error('transient failure in a pre-runner stage')
+    }
+
+    await expect(runSourcingPipeline(baseDeps({ adapter, alert, force: true, trendsFactory }))).rejects.toThrow(
+      'transient failure in a pre-runner stage',
+    )
+
+    // The claim created exactly one sourcing.weekly row; the belt must have flipped it OFF 'running'
+    // to a terminal 'failed' with finishedAt before the error propagated to the job's catch.
+    const rows = await db.select().from(agentRuns).where(eq(agentRuns.workflow, 'sourcing.weekly'))
+    createdRunIds.push(...rows.map((r) => r.id))
+    expect(rows.filter((r) => r.status === 'running')).toHaveLength(0)
+    const failed = rows.filter((r) => r.status === 'failed')
+    expect(failed.length).toBeGreaterThanOrEqual(1)
+    expect(failed.every((r) => r.finishedAt !== null)).toBe(true)
   })
 })
