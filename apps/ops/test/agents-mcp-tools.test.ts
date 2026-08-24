@@ -162,15 +162,18 @@ describe('agents/mcp-tools', () => {
       expect(allowance.spent()).toBe(10)
     })
 
-    it('quote_freight wraps quoteShipping with fromCountry CN, toCountry US, qty 1', async () => {
+    it('quote_freight wraps quoteShipping with fromCountry US, toCountry US, qty 1', async () => {
       const adapter = makeStubAdapter()
       const allowance = new PointsAllowance(100)
       const handlers = createSourcingToolHandlers({ adapter, allowance })
 
       const result = await handlers.quote_freight({ supplierVariantId: 'v1' }, undefined)
 
+      // FIX C5: US-origin freight, mirroring run-place-order.ts's order-time gate — these listings
+      // are shipsFrom:'US' and Stage 4.6 verifies US stock before freight, so a CN quote would
+      // return China-origin options that fail the delivery window.
       expect(adapter.quoteShipping).toHaveBeenCalledWith({
-        fromCountry: 'CN',
+        fromCountry: 'US',
         toCountry: 'US',
         items: [{ supplierVariantId: 'v1', quantity: 1 }],
       })

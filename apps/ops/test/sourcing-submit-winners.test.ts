@@ -146,6 +146,13 @@ describe('validateAndSubmitWinners', () => {
     expect((submitInput.payload as { variants: { supplierCostCents: number }[] }).variants[0]!.supplierCostCents).toBe(1000)
     // margin = floor((5000 - 1000 - 500) * 10000 / 5000) = 7000bps
     expect(submitInput.summary).toBe('New listing: Cozy Dog Bed — 1 variant(s), margin 7000bps')
+
+    // FIX C5: Stage 4.6 verified US stock, so freight MUST be quoted from US (mirroring the
+    // order-time gate in run-place-order.ts). A CN quote returns China-origin ~15-30d options that
+    // all fail the deliveryMaxDays filter, silently dropping every real winner.
+    expect(deps.adapter.quoteShipping).toHaveBeenCalledWith(
+      expect.objectContaining({ fromCountry: 'US', toCountry: 'US' }),
+    )
   })
 
   it('allowance spends 10+10+10 per fully-verified winner (getProduct + getVariantStock + quoteShipping)', async () => {

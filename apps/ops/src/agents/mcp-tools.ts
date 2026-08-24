@@ -97,7 +97,10 @@ export function createSourcingToolHandlers(deps: SourcingMcpDeps) {
       if (exhausted) return exhausted
       try {
         const result = await adapter.quoteShipping({
-          fromCountry: 'CN',
+          // US-origin freight, mirroring the order-time gate in run-place-order.ts and Stage 4.6's
+          // re-quote: these listings ship from US, so a CN quote would return China-origin options
+          // that fail the delivery window and mislead the agent's margin math (FIX C5).
+          fromCountry: 'US',
           toCountry: 'US',
           items: [{ supplierVariantId: args.supplierVariantId, quantity: 1 }],
         })

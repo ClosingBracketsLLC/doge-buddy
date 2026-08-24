@@ -166,7 +166,11 @@ async function processWinner(
     deps.allowance.spend(10, `freight:${pid}`)
     const firstVid = payload.variants[0]!.supplierVariantId
     const options = await deps.adapter.quoteShipping({
-      fromCountry: 'CN',
+      // US-origin freight, mirroring the live order-time gate in run-place-order.ts: these listings
+      // are shipsFrom:'US' and Stage 4.6 verified US stock above, so freight must be quoted from US.
+      // A CN quote returns China-origin (~15-30 day) options that all fail the deliveryMaxDays
+      // filter below, silently dropping every real winner (FIX C5).
+      fromCountry: 'US',
       toCountry: 'US',
       items: [{ supplierVariantId: firstVid, quantity: 1 }],
     })
