@@ -270,6 +270,7 @@ Behavior (exact):
 **Interfaces:**
 - Consumes: `SupplierWebhookEvent` (`cjAdapter.parseWebhook` output stored in `webhook_events.payload` by the Phase 1 receiver — verify actual stored shape in `http/webhooks.ts` and adapt), transitions.
 - Produces: `mapCjStatus(value: SupplierOrderStatusValue): SupplierOrderStatusDb | null` (pure: `shipped→shipped`, `delivered→delivered`, `cancelled→cancelled`; everything else `null` = ignore); router cases: `cj` + type `order` → look up `supplier_orders` by `supplierOrderId`, mapped status non-null and `canTransition` → apply, else audit `webhook.ignored` (hints, not truth); `cj` + type `logistics` → persist `trackingNumber`/`logisticName` (direct field update — not a status change) → enqueue `fulfillment.sync-tracking` `{supplierOrderRowId}` singletonKey=rowId.
+  > **[2026-08-23]** Superseded post-review: ignore-on-illegal let CJ-cancelled-on-active-row sit stuck; `resolveCjTransition` now parks those `needs_attention` with a `supplier_cancelled` alert (commit e6dd08e). Applies to Task 14 sweep 3 as well.
 - [ ] Steps: failing tests (ORDER shipped moves paid→shipped; backwards ORDER status ignored + audited; LOGISTICS persists tracking + enqueues sync; unknown supplierOrderId → audit ignored, no throw) → RED → implement → GREEN → Commit `feat(ops): CJ ORDER/LOGISTICS webhook routing`
 
 ---
@@ -349,3 +350,4 @@ Covers:
 ---
 
 **Tier 2 (parked on CJ key — not in this plan's execution):** re-record `order/list` fixtures, `CJ_CONTRACT=1` sandbox pipeline run. Tracked on the owner checklist.
+> **[2026-08-23]** Done — 9/9 live contract cases pass; see `docs/cj-api-notes.md`.

@@ -18,6 +18,8 @@
 - CJ webhook signature: base64 HMAC-SHA256 of the raw body keyed with the account `openId`.
 - Webhook receiver contract (design doc): verify → insert `webhook_events` `ON CONFLICT (source, external_event_id) DO NOTHING` → enqueue → ack fast. Handlers never process inline.
 - **Fixture caveat (applies to all CJ/Shopify fixtures):** request/response shapes come from the committed research digest (`docs/superpowers/specs/2026-08-09-doge-buddy-research-digest.md`), verified against docs 2026-08-09. Where a field name is best-effort (marked `FIXTURE-ASSUMPTION` in code comments), keep the mapping isolated so re-recording real fixtures (once Robert's credentials exist — see `docs/OWNER-CHECKLIST.md`) is a fixture-file swap, not a refactor. This is the sanctioned pattern; implementers must not invent additional untracked assumptions.
+
+> **[2026-08-23]** Fixtures re-recorded from live CJ (commit b5daafc) — and it was **not** a fixture-only swap: many request/response shapes written into Tasks 5–6 below (createOrderV3 body incl. `sandbox: true`, listV2 envelope/field names, `orderNumber` matching, dispute shapes, the status table missing `UNSHIPPED`) were wrong on the wire. **Do not copy CJ shapes from this plan** — `docs/cj-api-notes.md` and the re-recorded fixtures in `packages/supplier/test/fixtures/cj/` are authoritative.
 - The `@idempotent` GraphQL directive (mandatory on refund/inventory mutations since API 2026-04) is emitted by exactly one function (`withIdempotencyKey`, Task 8) so a syntax correction against live docs is a one-line change.
 - Docker test DB `postgres://doge:doge@localhost:5433/doge_buddy` (run `pnpm db:up`; migrate with `DATABASE_URL=… pnpm --filter @doge-buddy/db migrate`). Suite baseline before this plan: 24 tests green.
 
@@ -1134,3 +1136,4 @@ describe('verifyShopifyWebhookHmac', () => {
 - [ ] Shopify client + 11 typed operations fixture-tested; `@idempotent` isolated in `withIdempotencyKey` (Tasks 7–9)
 - [ ] Webhook receiver proves: verify → dedup insert → enqueue → ack, with replay demonstrating duplicate suppression (Tasks 11, 13)
 - [ ] **Deferred to Robert's credentials (🟡 in `docs/OWNER-CHECKLIST.md`, NOT build blockers):** live `verify-live` Shopify + CJ sections; CJ sandbox contract run (`CJ_CONTRACT=1`); re-recording best-effort fixtures against real responses; Railway deploy for public webhook URL
+> **[2026-08-23]** All done except the Railway deploy (still open — blocks live webhooks and the Phase 0 exit criterion): verify-live prints SHOPIFY OK + CJ OK, fixtures re-recorded, CJ_CONTRACT suite passes 9/9.

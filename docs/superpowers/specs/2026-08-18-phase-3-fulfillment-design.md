@@ -39,6 +39,7 @@ Happy path: `orders/paid` (Phase 1 receiver: HMAC, dedup, enqueue-ack — unchan
 **State machine** (pure, sole writer of status): `pending → created → confirmed → paid → shipped → delivered`; `needs_attention`/`failed` reachable from active states; `awaiting_funds` parked between `confirmed`/`paid`. Illegal transitions rejected. (Schema note: the existing `supplier_order_status` enum lacks `awaiting_funds` — one ALTER TYPE migration adds it; the enum's unused `cancelled` value stays for Phase 6 refunds.)
 
 **`fulfillment.place-order`** (singletonKey = order gid; ≤5 retries, exponential backoff): create-or-load `supplier_orders` row `pending` with deterministic `idempotency_key` from the Shopify order id **before any API call**; resume from current status on retry (crash-safe: adapter `placeOrder` is idempotent on the key — layer 1; CJ rejects duplicate `orderNumber` — layer 2). Planner gates in order, cheapest exit first:
+  > **[2026-08-23]** Layer 2 disproven live — CJ accepts duplicate `orderNumber`s. Layer 1 (the `order/list?orderNumbers=` pre-check matching `orderNum`) is load-bearing and was itself broken (matched `orderNumber`) until commit b5daafc. See `docs/cj-api-notes.md`.
 
 1. `is_test` → terminal skip, audit-logged (hard rule: Bogus orders never reach the adapter).
 2. Kill-switch / `workflow.fulfillment.enabled` off → re-queue with delay (not failed).
@@ -83,6 +84,7 @@ duplicate `orders/paid` → exactly one supplier order · crash mid-create + ret
 
 **Exit Tier 1 (no credentials — completes the phase):** everything above green in CI.
 **Exit Tier 2 (parked on Robert's CJ key):** re-record `order/list` fixtures (pre-work #7), then `CJ_CONTRACT=1` sandbox harness runs the full pipeline against CJ sandbox.
+> **[2026-08-23]** Tier 2 complete — 9/9 live CJ sandbox contract cases pass (place → confirm → pay → advance → track → dispute); findings in `docs/cj-api-notes.md`.
 
 ## Out of scope
 

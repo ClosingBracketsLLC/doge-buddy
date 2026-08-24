@@ -14,7 +14,9 @@ Requires: Robert's Railway account. One project, two services (ops + Postgres).
 
    Required to boot:
    - `DATABASE_URL` — reference the Postgres service
-   - `PORT=3001`
+
+   Also set `PORT=3001` (the app defaults to 3001 if unset — pin it and point the Railway target
+   port at it; note an explicit PORT overrides the one Railway would otherwise inject).
 
    Required for webhooks to verify (copy the values from your local `apps/ops/.env` — the same
    credentials work; `SHOPIFY_SHOP_DOMAIN` must be the `*.myshopify.com` domain, never the custom
@@ -33,8 +35,9 @@ Requires: Robert's Railway account. One project, two services (ops + Postgres).
      logs a loud warning at boot either way, stating which adapter is live.
 5. Deploy. Verify:
    - `curl https://<service-url>/healthz` → `{"status":"ok","db":"ok","queue":"ok",...}`
-   - Send a demo job from a Railway shell:
-     `pnpm --filter @doge-buddy/ops exec tsx -e "import PgBoss from 'pg-boss'; const b=new PgBoss(process.env.DATABASE_URL); await b.start(); await b.send('demo.ping',{note:'deploy-check'}); await b.stop();"`
+   - Send a demo job from a Railway shell (`tsx -e` compiles to CJS, where top-level `await` is
+     rejected — hence the async IIFE; verified locally):
+     `pnpm --filter @doge-buddy/ops exec tsx -e "import PgBoss from 'pg-boss'; (async () => { const b = new PgBoss(process.env.DATABASE_URL); await b.start(); await b.send('demo.ping', { note: 'deploy-check' }); await b.stop(); })().catch((e) => { console.error(e); process.exit(1); })"`
    - Confirm the row: `SELECT * FROM audit_log WHERE action='demo.ping' ORDER BY created_at DESC LIMIT 1;`
 6. Phase-0 exit criterion (design doc): the demo job executes on the deployed instance.
 7. Once the public URL exists, point the webhooks at it — this is what the deploy unblocks:

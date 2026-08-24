@@ -7,6 +7,7 @@ Phases: **[foundation]** = repo/schema/adapter scaffolding · **[before-first-re
 ## 1. Money movement
 
 1. **Double-placed CJ orders (retry after ambiguous failure).** A BullMQ retry after a timeout on `createOrderV3` places the same order twice; CJ dedupes on your `orderNumber` only if you send it deterministically. Mitigation: derive `orderNumber` from the Shopify order ID (never a UUID-per-attempt), persist a `supplier_orders` row in state `CREATING` *before* the API call, and on retry first query `GET /shopping/order/list?orderIds=` for that orderNumber before creating. Same pattern on the pay step: record `PAYING` before `payBalanceV2` and reconcile via `getOrderDetail` on retry. **[before-first-real-order]**
+   > **[2026-08-23]** Disproven live: CJ-side dedupe on `orderNumber` does **not** exist. The query-before-create pre-check (`order/list?orderNumbers=`, matched on `orderNum`) is the load-bearing mitigation. See `docs/cj-api-notes.md`.
 
 2. **Double-refunding the customer on Shopify.** Queue retry of an approved refund runs `refundCreate` twice. Mitigation: the `@idempotent` directive is *mandatory* on API 2026-04 — key it on the internal proposal ID; but keys expire after 24h, so also check `order.refunds` state before issuing any refund older than 24h. Same for CJ disputes: `businessDisputeId` = internal ticket ID, always. **[before-first-real-order]**
 
@@ -81,6 +82,7 @@ Phases: **[foundation]** = repo/schema/adapter scaffolding · **[before-first-re
 ## 6. Platform risk
 
 1. **Store-type trap (could invalidate the whole launch path).** The Dev Dashboard "dev store" type *cannot* be converted/transferred to a live store; the Partner Dashboard "client transfer store" is the launch-capable type. Creating the wrong one means rebuilding the store at launch. Mitigation: create a Partner Dashboard client-transfer store and confirm the transfer path with Shopify support **before writing any store-coupled code**. **[foundation]**
+   > **[2026-08-23]** Store created as a client-transfer type (`doge-buddy-1b9crsev.myshopify.com`); the recommended support confirmation was deliberately skipped — Robert waived it and accepted the residual transfer-path risk. (Applies equally to "confirm client-transfer store **now**" in Top-5 below.)
 
 2. **Shopify Payments holds/reserves on a new dropshipping store.** New stores with long fulfillment gaps and early chargebacks commonly get funds held. Mitigation: ship fast (US warehouse only, per §3.1), sync tracking to Shopify immediately on CJ SHIPPED (tracking = the primary chargeback/hold defense), keep starting volume modest, respond to every Shopify Payments info request same-day, and keep 4–6 weeks of operating cash so a reserve doesn't cascade into a CJ-wallet exhaustion (§1.5). **[launch]**
 
@@ -117,6 +119,7 @@ Phases: **[foundation]** = repo/schema/adapter scaffolding · **[before-first-re
 1. **MockSupplierAdapter first.** The SupplierAdapter interface gets a mock implementation (configurable latency, failures, 1600100, price drift, stockouts) used by all unit/integration tests and local dev — no CJ credentials in test env at all. **[foundation]**
 
 2. **CJ sandbox for end-to-end fulfillment.** Use `createOrderV3` sandbox flag + `simulatePay` + `sandbox/updateStatus` (300→400→500→600→700, no skipping) + `updateTrackNumber` to test the full paid-order→purchase→tracking→Shopify-fulfillment pipeline including webhook handling, with zero spend. Record real response fixtures and pin adapter tests against them so CJ interface drift breaks CI, not production. **[before-first-real-order]**
+   > **[2026-08-23]** The flag is exactly `isSandbox: 1` (integer) — any other spelling (e.g. `sandbox: true`) is silently ignored and spends real money (this exact bug shipped and was fixed in commit b5daafc). Sandbox orders pay via `simulatePay` only — `payBalanceV2` rejects them (HTTP 400). See `docs/cj-api-notes.md`.
 
 3. **Dev-store test orders (Bogus gateway).** End-to-end Shopify side: Bogus checkout (>$1) → `orders/paid` webhook → verify the worker *refuses* it (test flag) in real-money mode and *processes* it in sandbox mode. Note the anecdotal ~10-test-order cap on dev stores — batch test scenarios and monitor for the limit error. **[before-first-real-order]**
 

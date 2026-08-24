@@ -1,5 +1,7 @@
 # Phase 3 pre-work (carried out of the Phase 1 final review)
 
+> **[2026-08-23]** All items addressed in Phase 3. Item 7's fixture re-record proved the "client-side orderNumber matching guards mis-returns" assumption itself wrong — order/list echoes the key as `orderNum`, so that guard never matched until fixed (commit b5daafc). See `docs/cj-api-notes.md`.
+
 Deferred items the Phase 1 whole-branch review triaged as fine-to-defer but scheduled before/during Phase 3 (the fulfillment money path). None block the Phase 1 merge.
 
 1. **Stranded-webhook sweep (must land before real webhook traffic).** If `enqueue` fails after the dedup insert, the event row stays `processed_at IS NULL` and the sender's retry is classified duplicate (never re-enqueued). The Phase 3 reconciliation job must sweep `processed_at IS NULL` rows older than N minutes.

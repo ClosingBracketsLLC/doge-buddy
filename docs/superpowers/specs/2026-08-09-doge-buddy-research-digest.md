@@ -1,4 +1,6 @@
 ## cj-api
+
+> **[2026-08-23]** "VERIFIED" in this section means *verified against CJ's docs* — the live wire format diverges in several places (required `platform`, `shipping*` address names, null `shipmentOrderId`/`orderAmount` on createOrderV3, `orderNum` vs `orderNumber`, dispute shapes, `isSandbox: 1` as the only honored sandbox flag, API-key UI moved behind Apps → Install App, `openId` only via `GET /setting/get`). The webhook signature scheme remains doc-only — no live CJ webhook observed yet. **`docs/cj-api-notes.md` supersedes this section wherever they disagree.**
 CJ Dropshipping's API 2.0 (base https://developers.cjdropshipping.com/api2.0/v1, JSON over HTTPS, CJ-Access-Token header) covers everything the ops service needs: token auth with 15-day access / 180-day refresh tokens, product search with US-warehouse and trending filters, full variant/stock/freight data, programmatic order creation and wallet-balance payment, tracking retrieval, webhooks for order/logistics/stock/product events, a sourcing-request flow, and a dispute (refund/reissue) API. Rate limiting is tier-based QPS (1 req/s on a Free account) plus a 50,000-points/day quota; product list calls cost 50 points, most others 10 or 0. The main operational gaps: wallet top-up itself is not exposed via API (manual recharge required), and account-tier QPS makes bulk catalog syncing slow on the free tier.
 
 Key facts:
@@ -44,6 +46,8 @@ Recommendations:
 - Re-verify the docs monthly as CJ itself recommends (a scheduled job or manual check of developers.cjdropshipping.com changelog), and pin adapter tests against recorded fixtures of real responses so interface drift is caught in CI rather than production.
 
 ## shopify-admin
+
+> **[2026-08-23]** Client-transfer store created (`doge-buddy-1b9crsev.myshopify.com`); the recommended support confirmation was deliberately skipped, risk accepted.
 Researched Shopify platform pieces for the Doge Buddy ops service against the current Admin GraphQL API (latest version 2026-07). Major 2025/2026 platform shifts affect the plan: custom apps can no longer be created in the store admin (new apps are created in the Dev Dashboard and authenticate via a client-credentials grant issuing 24-hour tokens), the new Dev Dashboard "dev store" type cannot be transferred/converted to a live store (the Partner Dashboard "client transfer store" type is the one built for launch handoff), and webhook retries were cut to 8 attempts over ~4 hours with subscription removal on persistent failure. All required mutations, scopes, and webhook topics were confirmed by name, including the 2026-04 mandatory @idempotent directive on refund and inventory mutations.
 
 Key facts:
