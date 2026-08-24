@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import type pg from 'pg'
 import { actionRoutes, type ActionRouteDeps } from './http/actions.ts'
+import { adminRoutes, type AdminDeps } from './http/admin/routes.ts'
 import { webhookRoutes, type WebhookDeps } from './http/webhooks.ts'
 
 export interface ServerDeps {
@@ -8,6 +9,7 @@ export interface ServerDeps {
   isQueueReady: () => boolean
   webhooks?: WebhookDeps
   actions?: ActionRouteDeps
+  admin?: AdminDeps
 }
 
 export function buildServer(deps: ServerDeps): FastifyInstance {
@@ -41,6 +43,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   if (deps.actions) {
     // No prefix: the one-click links in notify() emails are literally /a/:proposalId/approve|reject.
     app.register(actionRoutes(deps.actions))
+  }
+
+  if (deps.admin) {
+    // No prefix: route paths carry /admin/... literally, matching the actions.ts style above.
+    app.register(adminRoutes(deps.admin))
   }
 
   return app
