@@ -25,6 +25,8 @@ const EnvSchema = z
     SHOPIFY_WEBHOOK_SECRET: z.string().optional(),
     CJ_API_KEY: z.string().optional(),
     CJ_OPEN_ID: z.string().optional(),
+    TELEGRAM_BOT_TOKEN: z.string().optional(),
+    TELEGRAM_CHAT_ID: z.string().optional(),
   })
   .superRefine((data, ctx) => {
     const shopifyVars = {
@@ -65,6 +67,19 @@ const EnvSchema = z
         message: 'FULFILLMENT_SUPPLIER=cj requires CJ_API_KEY and CJ_OPEN_ID to be set',
       })
     }
+
+    const telegramVars = { TELEGRAM_BOT_TOKEN: data.TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID: data.TELEGRAM_CHAT_ID }
+    const telegramSetCount = Object.values(telegramVars).filter((v) => v !== undefined).length
+    if (telegramSetCount > 0 && telegramSetCount < 2) {
+      const missing = Object.entries(telegramVars)
+        .filter(([, v]) => v === undefined)
+        .map(([k]) => k)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['telegram'],
+        message: `Telegram config requires both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID when either is set; missing: ${missing.join(', ')}`,
+      })
+    }
   })
 
 export interface Config {
@@ -75,6 +90,7 @@ export interface Config {
   adminBaseUrl?: string
   shopify?: { shopDomain: string; clientId: string; clientSecret: string; webhookSecret: string }
   cj?: { apiKey: string; openId: string }
+  telegram?: { botToken: string; chatId: string }
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
@@ -112,6 +128,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
 
   if (data.CJ_API_KEY !== undefined && data.CJ_OPEN_ID !== undefined) {
     config.cj = { apiKey: data.CJ_API_KEY, openId: data.CJ_OPEN_ID }
+  }
+
+  if (data.TELEGRAM_BOT_TOKEN !== undefined && data.TELEGRAM_CHAT_ID !== undefined) {
+    config.telegram = { botToken: data.TELEGRAM_BOT_TOKEN, chatId: data.TELEGRAM_CHAT_ID }
   }
 
   return config

@@ -124,4 +124,18 @@ describe('loadConfig', () => {
     })
     expect(c.adminBaseUrl).toBe('https://admin.example.com')
   })
+
+  it('assembles the telegram block when both TELEGRAM_* vars are set', () => {
+    const c = loadConfig({
+      DATABASE_URL: 'postgres://u:p@h:5432/d',
+      TELEGRAM_BOT_TOKEN: 'tok', TELEGRAM_CHAT_ID: '42',
+    })
+    expect(c.telegram).toEqual({ botToken: 'tok', chatId: '42' })
+  })
+
+  it('throws naming the missing var when only one TELEGRAM_* var is set', () => {
+    expect(() =>
+      loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', TELEGRAM_BOT_TOKEN: 'tok' }),
+    ).toThrow(/TELEGRAM_CHAT_ID/)
+  })
 })
