@@ -1,7 +1,18 @@
 import { formatCents, PROPOSAL_TYPES, type ProposalType } from '@doge-buddy/core'
-import { agentRuns, auditLog, proposals, proposalStatus, supportTickets, type createDb } from '@doge-buddy/db'
-import { and, desc, eq, lt } from 'drizzle-orm'
+import {
+  agentRuns,
+  auditLog,
+  orders,
+  proposals,
+  proposalStatus,
+  supplierOrders,
+  supportTickets,
+  type createDb,
+} from '@doge-buddy/db'
+import { and, desc, eq, lt, ne } from 'drizzle-orm'
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
+import { FULFILLMENT_RETRY_OPTS } from '../../fulfillment/run-place-order.ts'
+import { applyTransition, IllegalTransitionError, StaleStatusError } from '../../fulfillment/transitions.ts'
 import type { SendOpts } from '../../fulfillment/types.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
 import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts'
@@ -19,6 +30,7 @@ import {
 } from './auth.ts'
 import { loadHealthStrip, type HealthStrip } from './health.ts'
 import { html, layout, type RawHtml } from './html.ts'
+import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
 import { renderProposalDetail, renderProposalRow } from './render-proposal.ts'
 
 const PROPOSAL_STATUSES = proposalStatus.enumValues
@@ -456,6 +468,103 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           })
         })
       }
+
+      // Retires the operations runbook's raw SQL: the full orders ⋈ supplier_orders view, with
+      // needs_attention rows pinned on top (their lastError + a recovery form each) and every
+      // other row below, both capped at 100 and ordered by the supplier_orders row's own
+      // createdAt desc. `pinnedRows` is passed to `renderNeedsAttentionSection` as an explicit
+      // list rather than that function reading the DB itself — see that function's doc comment
+      // for why (Phase 7's canary-hold seam).
+      authed.get('/admin/orders', async (_request, reply) => {
+        return safeHandle('orders-list', reply, async () => {
+          const columns = {
+            id: supplierOrders.id,
+            shopifyOrderGid: orders.shopifyOrderGid,
+            shopifyOrderNumber: orders.shopifyOrderNumber,
+            customerName: orders.customerName,
+            supplier: supplierOrders.supplier,
+            status: supplierOrders.status,
+            lastError: supplierOrders.lastError,
+            createdAt: supplierOrders.createdAt,
+          }
+
+          const pinnedRows = await deps.db
+            .select(columns)
+            .from(supplierOrders)
+            .innerJoin(orders, eq(supplierOrders.orderId, orders.id))
+            .where(eq(supplierOrders.status, 'needs_attention'))
+            .orderBy(desc(supplierOrders.createdAt))
+            .limit(100)
+
+          const otherRows = await deps.db
+            .select(columns)
+            .from(supplierOrders)
+            .innerJoin(orders, eq(supplierOrders.orderId, orders.id))
+            .where(ne(supplierOrders.status, 'needs_attention'))
+            .orderBy(desc(supplierOrders.createdAt))
+            .limit(100)
+
+          const body = layout(
+            'Orders',
+            html`${renderNeedsAttentionSection(pinnedRows)}${renderOtherOrdersSection(otherRows)}`,
+          )
+          return reply.code(200).type('text/html; charset=utf-8').send(body)
+        })
+      })
+
+      // The runbook's mandatory recovery action, as a POST instead of raw SQL: guarded transition
+      // needs_attention -> {pending, confirmed, cancelled} via the sole legal writer
+      // (applyTransition), an audit row on success, and — for every target except cancelled — an
+      // ALWAYS re-send of the place-order job (the runbook step operators used to forget) with the
+      // exact same singletonKey + retry shape the pipeline itself uses, so a duplicate recovery
+      // click collapses via pg-boss's own singleton dedup rather than double-placing an order.
+      authed.post('/admin/orders/:id/recover', async (request, reply) => {
+        const { id } = request.params as { id: string }
+        return safeHandle(id, reply, async () => {
+          const { target } = (request.body ?? {}) as { target?: string }
+          if (!target || !(RECOVERY_TARGETS as readonly string[]).includes(target)) {
+            return reply.code(400).type('text/html; charset=utf-8').send(layout('Orders', html`<p>Invalid target.</p>`))
+          }
+          const recoveryTarget = target as (typeof RECOVERY_TARGETS)[number]
+
+          try {
+            await applyTransition(deps.db, id, 'needs_attention', recoveryTarget)
+          } catch (err) {
+            if (err instanceof IllegalTransitionError || err instanceof StaleStatusError) {
+              return reply
+                .code(200)
+                .type('text/html; charset=utf-8')
+                .send(layout('Orders', html`<p>Row was not recoverable (state changed?)</p>`))
+            }
+            throw err
+          }
+
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: 'supplier_order.recovered',
+            entityType: 'supplier_order',
+            entityId: id,
+            detail: { from: 'needs_attention', to: recoveryTarget },
+          })
+
+          if (recoveryTarget !== 'cancelled') {
+            const [joined] = await deps.db
+              .select({ shopifyOrderGid: orders.shopifyOrderGid })
+              .from(supplierOrders)
+              .innerJoin(orders, eq(supplierOrders.orderId, orders.id))
+              .where(eq(supplierOrders.id, id))
+            if (joined) {
+              await deps.enqueue(
+                'fulfillment.place-order',
+                { orderGid: joined.shopifyOrderGid },
+                { singletonKey: joined.shopifyOrderGid, ...FULFILLMENT_RETRY_OPTS },
+              )
+            }
+          }
+
+          return reply.code(303).header('location', '/admin/orders').send()
+        })
+      })
 
       // Placeholder so the whole authed scope is gated from day one, even for paths Tasks 4-8
       // haven't registered yet (e.g. /admin/settings) — an unauthenticated request to any
