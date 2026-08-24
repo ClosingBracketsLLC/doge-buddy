@@ -138,10 +138,11 @@ describe('executePayOrder', () => {
         // The mock adapter's own order counter restarts at 0 for every fresh instance — many
         // tests below deliberately construct their own adapter (e.g. for a distinct
         // failPayInsufficientBalance option), so `placed.supplierOrderId` is the same literal
-        // ('mock-order-1') across most of them. `executePayOrder` only ever looks the order up in
-        // the adapter by `shipmentOrderId` (never by this column — see its own call site), so
-        // it's safe to make the DB value unique without touching what's actually passed to the
-        // adapter. Avoids colliding with the partial unique index on (supplier, supplier_order_id).
+        // ('mock-order-1') across most of them. Making the DB value unique avoids colliding with
+        // the partial unique index on (supplier, supplier_order_id). Tests that exercise the
+        // null-shipment_order_id fallback (where executePayOrder passes THIS column to the
+        // adapter) assert against the suffixed row value and stub payOrder, so the suffix stays
+        // harmless there too.
         supplierOrderId: opts.supplierOrderId == null ? null : `${opts.supplierOrderId}-${nextId()}`,
       })
       .returning()
@@ -188,9 +189,37 @@ describe('executePayOrder', () => {
     },
   )
 
-  it('missing shipment_order_id on an otherwise-payable row throws', async () => {
+  it('null shipment_order_id falls back to supplier_order_id (CJ createOrderV3 never returns a shipment id)', async () => {
+    // Regression: CJ's createOrderV3 response carries shipmentOrderId: null (verified live,
+    // docs/cj-api-notes.md), and nothing in the pipeline backfills it — so throwing on a null
+    // shipment_order_id dead-lettered every real CJ order at the payment step. The adapter
+    // contract already blessed the fallback (payOrder(shipmentOrderId ?? supplierOrderId)).
     const { orderRowId } = await seedOrder()
-    const supplierOrderRow = await seedSupplierOrder({ orderRowId, status: 'confirmed', shipmentOrderId: null })
+    const supplierOrderRow = await seedSupplierOrder({
+      orderRowId,
+      status: 'confirmed',
+      shipmentOrderId: null,
+      supplierOrderId: 'SD26082400012206614001',
+    })
+    const adapter = new MockSupplierAdapter()
+    const payOrderSpy = vi.spyOn(adapter, 'payOrder').mockResolvedValue({ paid: true })
+    const { deps } = makeDeps(adapter)
+
+    await executePayOrder(deps, supplierOrderRow.id)
+
+    expect(payOrderSpy).toHaveBeenCalledWith(supplierOrderRow.supplierOrderId)
+    const row = await loadSupplierOrder(supplierOrderRow.id)
+    expect(row?.status).toBe('paid')
+  })
+
+  it('missing BOTH shipment_order_id and supplier_order_id on a payable row throws', async () => {
+    const { orderRowId } = await seedOrder()
+    const supplierOrderRow = await seedSupplierOrder({
+      orderRowId,
+      status: 'confirmed',
+      shipmentOrderId: null,
+      supplierOrderId: null,
+    })
     const { deps } = makeDeps(new MockSupplierAdapter())
 
     await expect(executePayOrder(deps, supplierOrderRow.id)).rejects.toThrow(/shipment_order_id/)

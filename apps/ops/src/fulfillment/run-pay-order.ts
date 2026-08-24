@@ -109,12 +109,18 @@ export async function executePayOrder(deps: PlaceOrderDeps, supplierOrderRowId: 
     return
   }
 
-  if (!supplierOrderRow.shipmentOrderId) {
-    throw new Error(`supplier_orders row ${supplierOrderRowId} is missing shipment_order_id`)
+  // CJ's createOrderV3 returns shipmentOrderId: null (verified live — docs/cj-api-notes.md) and
+  // nothing in the pipeline ever backfills it, so a null here is the NORMAL case for a CJ-placed
+  // row, not a broken one: fall back to the supplier order id (the SD… code every other CJ call
+  // is keyed by), exactly as the adapter contract suite does. Only a row with neither id is
+  // genuinely unpayable — that still throws into pg-boss retries.
+  const payId = supplierOrderRow.shipmentOrderId ?? supplierOrderRow.supplierOrderId
+  if (!payId) {
+    throw new Error(`supplier_orders row ${supplierOrderRowId} is missing shipment_order_id and supplier_order_id`)
   }
 
   // Step 3: the actual spend.
-  const result = await deps.adapter.payOrder(supplierOrderRow.shipmentOrderId)
+  const result = await deps.adapter.payOrder(payId)
 
   if (result.paid) {
     await applyTransition(deps.db, supplierOrderRowId, fromStatus, 'paid', { paidAt: new Date() })
