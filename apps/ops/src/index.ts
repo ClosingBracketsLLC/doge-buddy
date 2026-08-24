@@ -13,6 +13,7 @@ import {
   ShopifyTokenManager,
 } from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdapter } from '@doge-buddy/supplier'
+import { sweepOrphanRuns } from './agents/lifecycle.ts'
 import { createAlerter, type AlertSeverity } from './alerts.ts'
 import { loadConfig } from './config.ts'
 import type { ReconcileDeps } from './fulfillment/run-reconcile.ts'
@@ -205,6 +206,15 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
 queue = await startQueue(config.databaseUrl, {
   adapter: supplierAdapter, settings, alert, shopify: shopifyOps, proposalShopify,
 })
+
+// Task 11's day-claim breaker self-heal: flip any `agent_runs` row left stuck in 'running' past
+// `ORPHAN_AFTER_MINUTES` (a crashed process that never reached a terminal status) to 'aborted' once
+// at boot, on top of the sweep `claimDailyRun` already runs before every claim — so a stale row
+// left over from before this process last restarted doesn't sit around looking in-progress until
+// the next claim attempt happens to come along. Non-fatal: a sweep failure here must not block the
+// rest of boot (queue/cron registration, `app.listen`), since `claimDailyRun` will simply retry the
+// sweep on its own next call regardless.
+sweepOrphanRuns(db, alert).catch(() => app.log.warn('orphan sweep failed at boot'))
 
 // `fulfillment.reconcile` (Task 14): the hourly four-sweep reconciliation job. Registered
 // unconditionally (unlike the `shopify.webhook-audit` cron below, which needs `adminBaseUrl` too)
