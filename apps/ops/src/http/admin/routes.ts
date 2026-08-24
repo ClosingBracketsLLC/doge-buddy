@@ -512,6 +512,53 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         })
       })
 
+      const NOT_RECOVERABLE_COPY = 'Row was not recoverable (state changed?)'
+
+      /**
+       * Joins to the order's `shopifyOrderGid` and re-sends the place-order job, for the given
+       * `supplier_orders` row. Returns `true` on success. On ANY failure — the join coming back
+       * empty (should be impossible given the FK, but treated as a send failure rather than a
+       * silent no-op) or `enqueue` itself throwing — alerts `recovery_enqueue_failed` (best-effort:
+       * `.catch(() => {})`, matching every other alert call site in this file) and returns `false`
+       * so the caller can render the explicit retry page instead of a false-success 303. This is
+       * the fix for the review finding: a `supplier_orders` row could otherwise commit to
+       * pending/confirmed while the mandatory re-send silently never happened, leaving the order
+       * "sits inert until overdue" with no operator-visible signal.
+       */
+      async function reSendPlaceOrder(rowId: string, target: string): Promise<boolean> {
+        try {
+          const [joined] = await deps.db
+            .select({ shopifyOrderGid: orders.shopifyOrderGid })
+            .from(supplierOrders)
+            .innerJoin(orders, eq(supplierOrders.orderId, orders.id))
+            .where(eq(supplierOrders.id, rowId))
+          if (!joined) {
+            throw new Error(`orders join missing for supplier_orders row ${rowId}`)
+          }
+          await deps.enqueue(
+            'fulfillment.place-order',
+            { orderGid: joined.shopifyOrderGid },
+            { singletonKey: joined.shopifyOrderGid, ...FULFILLMENT_RETRY_OPTS },
+          )
+          return true
+        } catch {
+          await deps.alert('critical', 'recovery_enqueue_failed', { supplierOrderRowId: rowId, target }).catch(() => {})
+          return false
+        }
+      }
+
+      function reSendFailedPage(reply: FastifyReply, target: string): FastifyReply {
+        return reply
+          .code(200)
+          .type('text/html; charset=utf-8')
+          .send(
+            layout(
+              'Orders',
+              html`<p>Recovered to ${target}, but the re-send FAILED — submit this form again to retry the re-send.</p>`,
+            ),
+          )
+      }
+
       // The runbook's mandatory recovery action, as a POST instead of raw SQL: guarded transition
       // needs_attention -> {pending, confirmed, cancelled} via the sole legal writer
       // (applyTransition), an audit row on success, and — for every target except cancelled — an
@@ -527,14 +574,43 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           }
           const recoveryTarget = target as (typeof RECOVERY_TARGETS)[number]
 
+          // Idempotent re-send path. An operator who just saw `reSendFailedPage` naturally
+          // resubmits the SAME form — by then the transition already committed (only the enqueue
+          // failed), so a second `applyTransition(needs_attention -> target)` would 0-row-match
+          // and throw StaleStatusError, rendering the generic not-recoverable page: indistinguishable
+          // from a stale double-click on an already-handled row. Detecting "already AT target"
+          // up front and re-sending directly (no transition attempted) turns that resubmit into a
+          // real retry. Repeating it is safe: pg-boss's `singletonKey` dedupes an already-active
+          // place-order job for this orderGid, and `executePlaceOrder`'s resume switch
+          // (run-place-order.ts) is idempotent per `supplier_orders.status` — re-entering it via a
+          // duplicate send just resumes from wherever the row currently is, never double-places.
+          // Only pending/confirmed are eligible: 'cancelled' never re-sends (by design, same as
+          // the fresh-recovery path below), and any OTHER current status (e.g. already 'paid')
+          // falls through to the normal transition attempt, which correctly renders
+          // not-recoverable since the row is no longer 'needs_attention'.
+          const [current] = await deps.db.select({ status: supplierOrders.status }).from(supplierOrders).where(eq(supplierOrders.id, id))
+          if (current && current.status === recoveryTarget && (recoveryTarget === 'pending' || recoveryTarget === 'confirmed')) {
+            const sent = await reSendPlaceOrder(id, recoveryTarget)
+            if (!sent) {
+              return reSendFailedPage(reply, recoveryTarget)
+            }
+
+            await deps.db.insert(auditLog).values({
+              actor: 'owner',
+              action: 'supplier_order.resent',
+              entityType: 'supplier_order',
+              entityId: id,
+              detail: { status: recoveryTarget },
+            })
+
+            return reply.code(303).header('location', '/admin/orders').send()
+          }
+
           try {
             await applyTransition(deps.db, id, 'needs_attention', recoveryTarget)
           } catch (err) {
             if (err instanceof IllegalTransitionError || err instanceof StaleStatusError) {
-              return reply
-                .code(200)
-                .type('text/html; charset=utf-8')
-                .send(layout('Orders', html`<p>Row was not recoverable (state changed?)</p>`))
+              return reply.code(200).type('text/html; charset=utf-8').send(layout('Orders', html`<p>${NOT_RECOVERABLE_COPY}</p>`))
             }
             throw err
           }
@@ -548,17 +624,9 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           })
 
           if (recoveryTarget !== 'cancelled') {
-            const [joined] = await deps.db
-              .select({ shopifyOrderGid: orders.shopifyOrderGid })
-              .from(supplierOrders)
-              .innerJoin(orders, eq(supplierOrders.orderId, orders.id))
-              .where(eq(supplierOrders.id, id))
-            if (joined) {
-              await deps.enqueue(
-                'fulfillment.place-order',
-                { orderGid: joined.shopifyOrderGid },
-                { singletonKey: joined.shopifyOrderGid, ...FULFILLMENT_RETRY_OPTS },
-              )
+            const sent = await reSendPlaceOrder(id, recoveryTarget)
+            if (!sent) {
+              return reSendFailedPage(reply, recoveryTarget)
             }
           }
 

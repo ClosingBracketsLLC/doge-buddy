@@ -242,7 +242,14 @@ describe('orders view + recovery actions', () => {
     await app.close()
   })
 
-  it('6. recovering an already-recovered row -> 200 not-recoverable page, no second enqueue', async () => {
+  it('6. recovering an already-recovered row (plain double-submit, first send succeeded) -> idempotent re-send, not the not-recoverable page', async () => {
+    // A resubmit of the exact same form, once the row is already AT the requested target, is
+    // indistinguishable at the DB layer from "the first send's enqueue failed" (tests 8/9 below)
+    // — both look like "row already at target, operator submitted again". The ruled fix treats
+    // both the same way: re-send rather than render not-recoverable, relying on pg-boss's
+    // singletonKey to dedupe the now-doubled place-order job. See the idempotent re-send path's
+    // comment in routes.ts for why repeating the send is safe even when the first one already
+    // succeeded.
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
     const order = await seedOrder()
@@ -266,12 +273,24 @@ describe('orders view + recovery actions', () => {
       payload: 'target=pending',
     })
 
-    expect(second.statusCode).toBe(200)
-    expect(second.body).toContain('Row was not recoverable (state changed?)')
-    expect(deps.enqueue).not.toHaveBeenCalled()
+    expect(second.statusCode).toBe(303)
+    expect(second.headers.location).toBe('/admin/orders')
+    expect(second.body).not.toContain('Row was not recoverable')
+    expect(deps.enqueue).toHaveBeenCalledTimes(1)
+    expect(deps.enqueue).toHaveBeenCalledWith(
+      'fulfillment.place-order',
+      { orderGid: order.shopifyOrderGid },
+      { singletonKey: order.shopifyOrderGid, ...FULFILLMENT_RETRY_OPTS },
+    )
+
+    const auditRows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.entityType, 'supplier_order'), eq(auditLog.entityId, parked.id)))
+    expect(auditRows.some((r) => r.action === 'supplier_order.resent')).toBe(true)
 
     const [after] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, parked.id))
-    expect(after!.status).toBe('pending') // unchanged by the second attempt
+    expect(after!.status).toBe('pending') // unchanged by the second attempt — only re-sent, not re-transitioned
 
     await app.close()
   })
@@ -296,6 +315,116 @@ describe('orders view + recovery actions', () => {
     expect(after!.status).toBe('needs_attention') // untouched
 
     expect(deps.enqueue).not.toHaveBeenCalled()
+
+    await app.close()
+  })
+
+  it('8. enqueue failure on fresh recovery -> 200 explicit re-send-FAILED page, transition still committed, alerts recovery_enqueue_failed', async () => {
+    const deps = makeDeps({ enqueue: vi.fn(async () => { throw new Error('boom') }) })
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const order = await seedOrder()
+    const parked = await seedSupplierOrder({ orderId: order.id, status: 'needs_attention' })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/orders/${parked.id}/recover`,
+      headers: { cookie, ...FORM_HEADERS },
+      payload: 'target=pending',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Recovered to pending, but the re-send FAILED — submit this form again to retry the re-send.')
+    expect(res.body).not.toContain('Row was not recoverable')
+
+    const [after] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, parked.id))
+    expect(after!.status).toBe('pending') // transition committed even though the re-send failed
+
+    expect(deps.alert).toHaveBeenCalledWith('critical', 'recovery_enqueue_failed', {
+      supplierOrderRowId: parked.id,
+      target: 'pending',
+    })
+
+    await app.close()
+  })
+
+  it('9. resubmitting the same form after an enqueue failure re-sends without a second transition attempt', async () => {
+    const enqueue = vi.fn(async () => {})
+    enqueue.mockRejectedValueOnce(new Error('boom'))
+    enqueue.mockResolvedValue(undefined)
+    const deps = makeDeps({ enqueue })
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const order = await seedOrder()
+    const parked = await seedSupplierOrder({ orderId: order.id, status: 'needs_attention' })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const first = await app.inject({
+      method: 'POST',
+      url: `/admin/orders/${parked.id}/recover`,
+      headers: { cookie, ...FORM_HEADERS },
+      payload: 'target=pending',
+    })
+    expect(first.statusCode).toBe(200)
+    expect(first.body).toContain('the re-send FAILED')
+
+    const second = await app.inject({
+      method: 'POST',
+      url: `/admin/orders/${parked.id}/recover`,
+      headers: { cookie, ...FORM_HEADERS },
+      payload: 'target=pending',
+    })
+
+    expect(second.statusCode).toBe(303)
+    expect(second.headers.location).toBe('/admin/orders')
+
+    expect(enqueue).toHaveBeenCalledTimes(2)
+    expect(enqueue).toHaveBeenNthCalledWith(
+      2,
+      'fulfillment.place-order',
+      { orderGid: order.shopifyOrderGid },
+      { singletonKey: order.shopifyOrderGid, ...FULFILLMENT_RETRY_OPTS },
+    )
+
+    const auditRows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.entityType, 'supplier_order'), eq(auditLog.entityId, parked.id)))
+    const resentRow = auditRows.find((r) => r.action === 'supplier_order.resent')
+    expect(resentRow).toBeDefined()
+    expect(resentRow!.actor).toBe('owner')
+    expect(resentRow!.detail).toMatchObject({ status: 'pending' })
+
+    // Only one 'recovered' audit row (from the first, transition-attempting call) — the resubmit
+    // took the idempotent re-send path and never attempted a second transition.
+    const recoveredRows = auditRows.filter((r) => r.action === 'supplier_order.recovered')
+    expect(recoveredRows).toHaveLength(1)
+
+    const [after] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, parked.id))
+    expect(after!.status).toBe('pending')
+
+    await app.close()
+  })
+
+  it('10. recovering a row whose current status is neither needs_attention nor the target -> not-recoverable page, no enqueue', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const order = await seedOrder()
+    const paidRow = await seedSupplierOrder({ orderId: order.id, status: 'paid' })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/orders/${paidRow.id}/recover`,
+      headers: { cookie, ...FORM_HEADERS },
+      payload: 'target=pending',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Row was not recoverable (state changed?)')
+    expect(deps.enqueue).not.toHaveBeenCalled()
+
+    const [after] = await db.select().from(supplierOrders).where(eq(supplierOrders.id, paidRow.id))
+    expect(after!.status).toBe('paid') // untouched
 
     await app.close()
   })
