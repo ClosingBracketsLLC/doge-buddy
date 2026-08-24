@@ -128,6 +128,7 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
       productSet: shopifyNotConfigured,
       listPublications: shopifyNotConfigured,
       publishablePublish: shopifyNotConfigured,
+      productVariantsByProductId: shopifyNotConfigured,
     },
   }
 

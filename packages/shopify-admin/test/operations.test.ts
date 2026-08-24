@@ -4,7 +4,8 @@ import {
   collectionCreate, findProductByHandle, fulfillmentCreate, fulfillmentTrackingInfoUpdate,
   inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
   listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, ordersUpdatedSince, productDelete,
-  productSet, publishablePublish, refundCreate, webhookSubscriptionCreate, webhookSubscriptionDelete,
+  productSet, productVariantsByProductId, publishablePublish, refundCreate, webhookSubscriptionCreate,
+  webhookSubscriptionDelete,
 } from '@doge-buddy/shopify-admin'
 
 const tokenOk = () => new Response(JSON.stringify({ access_token: 'tok', expires_in: 86399 }), { status: 200 })
@@ -314,6 +315,30 @@ describe('findProductByHandle', () => {
     const { client } = makeClient(() => gql({ products: { nodes: [] } }))
     const result = await findProductByHandle(client, 'missing-handle')
     expect(result).toBeNull()
+  })
+})
+
+describe('productVariantsByProductId', () => {
+  it('sends the product gid, maps variant id + sku', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({
+        product: {
+          variants: {
+            nodes: [
+              { id: 'gid://shopify/ProductVariant/91', sku: 'DB-1' },
+              { id: 'gid://shopify/ProductVariant/92', sku: null },
+            ],
+          },
+        },
+      }))
+    const result = await productVariantsByProductId(client, 'gid://shopify/Product/9')
+    expect(result).toEqual([
+      { id: 'gid://shopify/ProductVariant/91', sku: 'DB-1' },
+      { id: 'gid://shopify/ProductVariant/92', sku: undefined },
+    ])
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*variants/)
+    expect(variables).toEqual({ id: 'gid://shopify/Product/9' })
   })
 })
 

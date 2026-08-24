@@ -44,6 +44,12 @@ function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopi
     },
     listPublications: async () => [{ id: 'pub-1', name: 'Online Store' }, { id: 'pub-2', name: 'Shop' }],
     publishablePublish: async (_p, pub) => { calls.push(`publish:${pub}`) },
+    // Default: "Shopify has no known variants for this product" — same conservative-empty stance
+    // as `findProductByHandle`'s default `null`. The resume-path tests (3, 4) and the gid-backfill
+    // test below override this to return sku-matched gids, proving the executor's resume branch
+    // (`ProposalShopifyOps.productVariantsByProductId`) actually populates `variantGids` instead of
+    // silently leaving every resumed variant's `shopifyVariantGid` null.
+    productVariantsByProductId: async () => { calls.push('variantsByProductId'); return [] },
     ...overrides,
   }
 }
@@ -257,8 +263,12 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       .returning()
     createdProductIds.push(preInserted!.id)
 
+    const payload = row.payload as ReturnType<typeof newListingPayload>
     const shopify = fakeShopify({
       findProductByHandle: async () => ({ id: preInserted!.shopifyProductGid! }),
+      productVariantsByProductId: async () => [
+        { id: 'gid://shopify/ProductVariant/resume-3', sku: payload.variants[0]!.sku },
+      ],
     })
     const alert = vi.fn(async () => {})
 
@@ -273,12 +283,14 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const productRow = await loadProduct(row.id)
     expect(productRow!.id).toBe(preInserted!.id)
 
-    const payload = row.payload as ReturnType<typeof newListingPayload>
     const variantRows = await db
       .select()
       .from(productVariants)
       .where(eq(productVariants.sku, payload.variants[0]!.sku))
     expect(variantRows).toHaveLength(1)
+    // The Critical fix: resume paths must recover the real gid via `productVariantsByProductId`
+    // instead of leaving it permanently null (fulfillment's `loadMappings` filters on this column).
+    expect(variantRows[0]!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/resume-3')
     const mappingRows = await db
       .select()
       .from(supplierVariantMappings)
@@ -291,11 +303,15 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
   // ---------------------------------------------------------------------------
   it('4. resume without a local row: finds by handle, backfills the local row, no re-create', async () => {
     const row = await seedProposal({ status: 'applying' })
+    const payload = row.payload as ReturnType<typeof newListingPayload>
     const shopify = fakeShopify()
     shopify.findProductByHandle = async () => {
       shopify.calls.push('find')
       return { id: 'gid://shopify/Product/9' }
     }
+    shopify.productVariantsByProductId = async () => [
+      { id: 'gid://shopify/ProductVariant/resume-4', sku: payload.variants[0]!.sku },
+    ]
     const alert = vi.fn(async () => {})
 
     await executeApplyProposal({ db, alert, shopify }, row.id)
@@ -311,6 +327,13 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     expect(productRow).toBeDefined()
     createdProductIds.push(productRow!.id)
     expect(productRow!.shopifyProductGid).toBe('gid://shopify/Product/9')
+
+    const variantRows = await db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.sku, payload.variants[0]!.sku))
+    expect(variantRows).toHaveLength(1)
+    expect(variantRows[0]!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/resume-4')
   })
 
   // ---------------------------------------------------------------------------
@@ -432,4 +455,47 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       expect(after!.applyError).toMatch(/^boom/)
     },
   )
+
+  // ---------------------------------------------------------------------------
+  // Critical fix regression: a pre-existing null-gid variant row (left over from an earlier
+  // partial apply, before this fix existed) self-heals on a later resumed run — but ONLY the gid
+  // column backfills; every other column (price, cost, ...) keeps first-write-wins semantics.
+  // ---------------------------------------------------------------------------
+  it('backfill: a pre-existing null-gid variant row for the payload sku is backfilled by a resumed run, without overwriting priceCents', async () => {
+    const sku = `SKU-${crypto.randomUUID()}`
+    const payload = newListingPayload()
+    payload.variants[0]!.sku = sku
+    payload.variants[0]!.priceCents = 2999
+    const row = await seedProposal({ status: 'applying', payload })
+
+    // Pre-existing product + variant row simulating an earlier partial apply (pre-fix): null gid,
+    // and a DIFFERENT priceCents (500) than the payload's (2999) — proves the upsert backfills
+    // only the gid, not price/cost/productId.
+    const [preProduct] = await db
+      .insert(products)
+      .values({
+        shopifyProductGid: `gid://shopify/Product/pre-${row.id}`,
+        handle: proposalHandle(row.id), title: 'Dog Snuff Pad', status: 'active',
+        categoryTag: 'toys', createdFromProposalId: row.id,
+      })
+      .returning()
+    createdProductIds.push(preProduct!.id)
+    await db.insert(productVariants).values({
+      productId: preProduct!.id, shopifyVariantGid: null, sku,
+      priceCents: 500, supplierCostCents: 200,
+    })
+
+    const shopify = fakeShopify({
+      findProductByHandle: async () => ({ id: preProduct!.shopifyProductGid! }),
+      productVariantsByProductId: async () => [{ id: 'gid://shopify/ProductVariant/backfill', sku }],
+    })
+    const alert = vi.fn(async () => {})
+
+    await executeApplyProposal({ db, alert, shopify }, row.id)
+
+    const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, sku))
+    expect(variantRow).toBeDefined()
+    expect(variantRow!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/backfill')
+    expect(variantRow!.priceCents).toBe(500) // untouched — NOT overwritten to the payload's 2999
+  })
 })

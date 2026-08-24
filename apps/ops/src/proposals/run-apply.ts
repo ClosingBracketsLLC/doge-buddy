@@ -1,6 +1,6 @@
 import { centsToUsd, NewListingPayloadSchema } from '@doge-buddy/core'
 import { auditLog, products, productVariants, proposals, supplierVariantMappings, type createDb } from '@doge-buddy/db'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { applyProposalTransition, StaleProposalStatusError } from './transitions.ts'
 
 type Db = ReturnType<typeof createDb>['db']
@@ -18,6 +18,16 @@ export interface ProposalShopifyOps {
   productSet(input: Record<string, unknown>): Promise<{ productId: string; variants: { id: string; sku?: string }[] }>
   listPublications(): Promise<{ id: string; name: string }[]>
   publishablePublish(productId: string, publicationId: string): Promise<void>
+  /**
+   * Looks up a product's current variants (id + sku) directly from Shopify. Needed on every
+   * *resume* path — local row already exists, or `findProductByHandle` found it — where the
+   * pipeline never called `productSet` this run and so never got a fresh `variants` array back:
+   * without this, `variantGids` stays empty and every `product_variants` row lands with a
+   * permanently-null `shopifyVariantGid` (permanent because the insert below is a conflict-tolerant
+   * upsert matched by sku, not a hard failure) — which breaks fulfillment's `loadMappings`, which
+   * filters on that column being non-null. See `executeApplyProposal`'s resume branch.
+   */
+  productVariantsByProductId(productGid: string): Promise<{ id: string; sku?: string }[]>
 }
 
 export interface ApplyProposalDeps {
@@ -132,6 +142,13 @@ export async function executeApplyProposal(deps: ApplyProposalDeps, proposalId: 
     })
     productGid = created.productId
     variantGids = created.variants
+  } else {
+    // Resume path: the product already existed (local row, or the handle probe found it), so
+    // `productSet` was never called this run and there's no fresh `variants` array to read gids
+    // from. Fetch them directly so the insert loop below still populates `shopifyVariantGid`
+    // instead of leaving it permanently null — see `ProposalShopifyOps.productVariantsByProductId`'s
+    // own doc comment for why "permanently" is the actual failure mode without this.
+    variantGids = await deps.shopify.productVariantsByProductId(productGid)
   }
   // 2. Local products row — gid lands before anything else can crash.
   await db.insert(products).values({
@@ -139,14 +156,22 @@ export async function executeApplyProposal(deps: ApplyProposalDeps, proposalId: 
     categoryTag: payload.categoryTag, createdFromProposalId: proposalId,
   }).onConflictDoNothing({ target: products.shopifyProductGid })
   const [productRow] = await db.select().from(products).where(eq(products.shopifyProductGid, productGid))
-  // 3. product_variants + supplier_variant_mappings (idempotent; matched by sku).
+  // 3. product_variants + supplier_variant_mappings (idempotent; matched by sku). The gid column
+  // is a coalesce-backfill on conflict — not a plain onConflictDoNothing — specifically so a row
+  // that landed with a null `shopifyVariantGid` on an earlier run (the exact resume scenario this
+  // just guarded against getting introduced going forward) can still self-heal on a later re-apply
+  // that DOES have the real gid, rather than that null being permanent. Every other column keeps
+  // first-write-wins semantics (price/cost are never overwritten on conflict).
   for (const v of payload.variants) {
     const gid = variantGids.find((g) => g.sku === v.sku)?.id ?? null
     await db.insert(productVariants).values({
       productId: productRow!.id, shopifyVariantGid: gid, sku: v.sku,
       priceCents: v.priceCents, compareAtCents: v.compareAtCents ?? null,
       supplierCostCents: v.supplierCostCents,
-    }).onConflictDoNothing({ target: productVariants.sku })
+    }).onConflictDoUpdate({
+      target: productVariants.sku,
+      set: { shopifyVariantGid: sql`coalesce(${productVariants.shopifyVariantGid}, excluded.shopify_variant_gid)` },
+    })
     const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, v.sku))
     await db.insert(supplierVariantMappings).values({
       variantId: variantRow!.id, supplier: v.supplier,

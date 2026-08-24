@@ -454,6 +454,32 @@ export async function findProductByHandle(client: ShopifyAdminClient, handle: st
 }
 
 // ---------------------------------------------------------------------------
+// productVariantsByProductId
+// ---------------------------------------------------------------------------
+
+const PRODUCT_VARIANTS_BY_PRODUCT_ID_QUERY = `#graphql
+  query ProductVariantsByProductId($id: ID!) {
+    product(id: $id) {
+      variants(first: 100) {
+        nodes { id sku }
+      }
+    }
+  }
+`
+
+interface ProductVariantsByProductIdData {
+  product: { variants: { nodes: { id: string; sku?: string | null }[] } }
+}
+
+export async function productVariantsByProductId(
+  client: ShopifyAdminClient,
+  productGid: string,
+): Promise<{ id: string; sku?: string }[]> {
+  const data = await client.graphql<ProductVariantsByProductIdData>(PRODUCT_VARIANTS_BY_PRODUCT_ID_QUERY, { id: productGid })
+  return data.product.variants.nodes.map((n) => ({ id: n.id, sku: n.sku ?? undefined }))
+}
+
+// ---------------------------------------------------------------------------
 // ordersUpdatedSince
 // ---------------------------------------------------------------------------
 

@@ -7,6 +7,7 @@ import {
   orderFulfillmentOrders,
   ordersUpdatedSince,
   productSet,
+  productVariantsByProductId,
   publishablePublish,
   ShopifyAdminClient,
   ShopifyTokenManager,
@@ -155,12 +156,14 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       productSet: (input) => productSet(shopifyClient, input),
       listPublications: () => listPublications(shopifyClient),
       publishablePublish: (productId, publicationId) => publishablePublish(shopifyClient, productId, publicationId),
+      productVariantsByProductId: (productGid) => productVariantsByProductId(shopifyClient, productGid),
     }
   : {
       findProductByHandle: shopifyNotConfigured,
       productSet: shopifyNotConfigured,
       listPublications: shopifyNotConfigured,
       publishablePublish: shopifyNotConfigured,
+      productVariantsByProductId: shopifyNotConfigured,
     }
 
 // Owner-notification seam for the proposal pipeline (Task 6): Telegram when configured, else the
