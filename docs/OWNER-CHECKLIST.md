@@ -22,8 +22,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ## Phase 1–3 window
 
-- [ ] 🟡 **Railway account + deploy ops** following `docs/deploy-railway.md` (~30–45 min).
-  *Blocks:* 🔴 **receiving real webhooks from Shopify/CJ** (they need a public HTTPS URL) and the Phase 0 "demo job on deployed instance" exit criterion. Local webhook testing uses replay scripts, so building proceeds. Alternative for a quick test: a `cloudflared` tunnel to your machine.
+- [x] ~~Railway account + deploy ops.~~ **Done (2026-08-23):** ops + Postgres live at `https://doge-buddyops-production.up.railway.app` — healthz green (`db:ok, queue:ok`), demo job processed on the deployed instance (**Phase 0 exit criterion closed**), and the webhook-audit cron self-registered all three Shopify webhook topics (ORDERS_PAID, ORDERS_CANCELLED, REFUNDS_CREATE) at the Railway URL. *Still open from this item:* CJ webhook registration — CJ's `/webhook/set` probes the callback URL and requires a 200, but our endpoint correctly 401s unverifiable requests; first live proof the assumed CJ signature scheme doesn't match reality. Diagnostic capture shipped (1ad6fb5) — after the next push+redeploy, re-attempting registration records exactly what CJ sends.
 
 - [ ] 🟡 **Hydrogen channel + Oxygen for the test store.** Using your test Shopify store:
   1. Install the Hydrogen sales channel on the test store.
