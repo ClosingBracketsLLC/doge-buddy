@@ -52,6 +52,13 @@ export function runAdapterContractTests(name: string, setup: () => Promise<Adapt
       expect(Array.isArray(reviews)).toBe(true)
     })
 
+    it('subscribes a product to webhooks without throwing (CJ_CONTRACT only; wire shape unverified)', async () => {
+      if (process.env.CJ_CONTRACT !== '1') return
+      const { adapter } = await setup()
+      const pid = process.env.CJ_CONTRACT_PID ?? '1952308304475578369'
+      await expect(adapter.subscribeProductWebhook(pid)).resolves.toBeUndefined()
+    })
+
     it('reports per-warehouse stock for a known variant', async () => {
       const { adapter, knownVariantId } = await setup()
       const stock = await adapter.getVariantStock(knownVariantId)

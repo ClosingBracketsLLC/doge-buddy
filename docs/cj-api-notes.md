@@ -118,3 +118,4 @@ Both dispute endpoints require an order that has actually been **paid** — an u
 - `openDispute` / `getDispute` request bodies — not exercised by the contract suite.
 - STOCK / PRODUCT webhook event shapes (never subscribed or observed).
 - `product/productComments` request/response shape + points cost — contract case exists, run live in Phase 5 Tier 2.
+- `webhook/product/subscribe` endpoint/body/points — could be account-level via `/webhook/set`; verify in Phase 5 Tier 2.

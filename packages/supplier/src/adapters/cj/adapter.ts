@@ -372,4 +372,17 @@ export class CJSupplierAdapter implements SupplierAdapter {
       payload: body,
     }
   }
+
+  // UNVERIFIED (from the Phase 4A deferral name): endpoint/body guessed as
+  // POST /webhook/product/subscribe { productIdList: [pid] }. Modeled on webhook config calls
+  // elsewhere in this file (simulatePay, sandboxUpdateStatus) as points: 0 — config/subscription
+  // calls are not expected to draw from the daily points budget. If Tier 2 verification shows
+  // product webhooks are actually account-level (registered once via /webhook/set rather than
+  // per-product), this becomes a documented no-op; see docs/cj-api-notes.md §Still unverified.
+  async subscribeProductWebhook(supplierProductId: string): Promise<void> {
+    await this.client.request('POST', '/webhook/product/subscribe', {
+      body: { productIdList: [supplierProductId] },
+      points: 0,
+    })
+  }
 }

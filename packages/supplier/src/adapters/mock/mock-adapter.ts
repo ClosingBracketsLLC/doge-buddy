@@ -85,6 +85,9 @@ function findVariant(supplierVariantId: string): MockVariant | undefined {
 export class MockSupplierAdapter implements SupplierAdapter {
   readonly key: SupplierKey = 'mock'
   readonly placedOrders: PlaceOrderResult[] = []
+  /** Records every supplierProductId passed to subscribeProductWebhook, in call order
+   * (duplicates included) — read by Task 16's tests to assert the post-listing subscribe call. */
+  readonly subscribedProductIds: string[] = []
 
   private readonly opts: MockAdapterOptions
   private readonly priceMultiplier: number
@@ -299,6 +302,10 @@ export class MockSupplierAdapter implements SupplierAdapter {
 
   async getDispute(disputeId: string): Promise<DisputeStatus> {
     return { value: this.disputesById.has(disputeId) ? 'pending' : 'unknown' }
+  }
+
+  async subscribeProductWebhook(supplierProductId: string): Promise<void> {
+    this.subscribedProductIds.push(supplierProductId)
   }
 
   verifyWebhook(_rawBody: Buffer, _headers: Record<string, string | string[] | undefined>): boolean {

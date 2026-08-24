@@ -363,6 +363,26 @@ describe('CJSupplierAdapter.openDispute / getDispute', () => {
   })
 })
 
+describe('CJSupplierAdapter.subscribeProductWebhook', () => {
+  it('posts the pid list', async () => {
+    const { adapter, calls } = await makeAdapter(() => ok({}))
+    await adapter.subscribeProductWebhook('1952308304475578369')
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe(`${BASE}/webhook/product/subscribe`)
+    expect(bodyOf(calls[0]!)).toEqual({ productIdList: ['1952308304475578369'] })
+  })
+
+  it('propagates CjApiError on envelope failure', async () => {
+    const { adapter } = await makeAdapter(() =>
+      new Response(envelope(null, { code: 500, result: false, message: 'server error' }), { status: 200 }),
+    )
+    const err = await adapter.subscribeProductWebhook('pid-1').catch((e) => e)
+    expect(err).toBeInstanceOf(CjApiError)
+    expect(err.code).toBe(500)
+  })
+})
+
 describe('CJSupplierAdapter.verifyWebhook', () => {
   const openId = 'cj-open-id-123'
   const rawBody = Buffer.from(JSON.stringify({ type: 'ORDER', orderId: 'cjo-1' }))

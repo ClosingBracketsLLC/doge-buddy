@@ -155,4 +155,8 @@ export interface SupplierAdapter {
 
   verifyWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): boolean
   parseWebhook(rawBody: Buffer): SupplierWebhookEvent
+
+  /** Best-effort semantics (skip-and-log on failure) are the CALLER's job — this method throws on
+   * wire failure like every other method here. */
+  subscribeProductWebhook(supplierProductId: string): Promise<void>
 }
