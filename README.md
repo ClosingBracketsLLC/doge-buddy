@@ -3,10 +3,13 @@
 AI-managed dog supply dropshipping store. Hydrogen storefront + an autonomous
 ops service (sourcing, fulfillment, support, scoring agents).
 
-Design docs: `docs/superpowers/specs/`. Current phase: 3 (fulfillment) — built and live-verified
-against the CJ sandbox (see `docs/cj-api-notes.md`). Remaining before Phase 4: the Railway deploy
-(Phase 0 exit criterion, `docs/deploy-railway.md`) and Hydrogen/Oxygen storefront hosting
-(Phase 2 Tier-2). Owner tasks live in `docs/OWNER-CHECKLIST.md`.
+Design docs: `docs/superpowers/specs/`. Current phase: 4 (proposals + admin). **Plan A (the
+proposal pipeline) is merged and live-verified** — a seeded proposal was approved by one-click
+link and became a real, fulfillable, published product on the store. Plan B (admin surface:
+magic-link login + dashboard pages) is next; its approved spec is
+`docs/superpowers/specs/2026-08-23-phase-4-proposals-design.md` §§4-5. Ops runs deployed on
+Railway with Shopify+CJ webhooks live end-to-end; storefront deploys to Oxygen on push. Owner
+tasks + the next-session pointer live in `docs/OWNER-CHECKLIST.md`.
 
 ## Development
 

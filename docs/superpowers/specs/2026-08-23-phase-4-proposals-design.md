@@ -200,6 +200,14 @@ existing `.env` credentials.
 with working buttons through the Railway URL; product visible on the actual storefront once
 the Hydrogen channel exists (Phase 2 Tier-2 item).
 
+> **[2026-08-24 — Plan A shipped; Tier status]** Tier 1 passed live (seeded proposal →
+> one-click approve → real product `gid://shopify/Product/8947799064664` ACTIVE, published, and
+> rendering on the storefront). Tier 2: storefront visibility ✅ (Hydrogen channel + Oxygen
+> live); Telegram-through-Railway seeded and delivered to Robert's phone (proposal `263e41a3`)
+> — closes on his tap. Live findings: Telegram rejects `localhost` inline-button URLs
+> ("Wrong HTTP URL") — the console fallback covers local walkthroughs; the notify
+> never-throws contract held under that real failure.
+
 ## Out of scope (locked by parent design)
 
 `support_reply`/`refund` apply execution (Phase 6 — schemas + generic detail view only),
