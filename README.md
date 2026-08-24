@@ -35,7 +35,7 @@ detection; the explicit `--path` works around it.
 
 ## Manual live-integration scripts
 
-Three manual, credential-gated scripts in `apps/ops` back up the live Shopify/CJ integrations —
+Four manual, credential-gated scripts in `apps/ops` back up the live Shopify/CJ integrations —
 none is part of `pnpm test` (no mocked network); all are run by hand. Each reads
 `apps/ops/.env` (real environment variables take precedence).
 
@@ -66,3 +66,16 @@ SHOPIFY_WEBHOOK_SECRET=testsecret pnpm --filter @doge-buddy/ops replay-webhook
 **`seed-store`** — idempotently seeds the test Shopify store with the dogebuddy metafield
 definitions, sample collections, and sample products; safe to rerun (only creates what's
 missing). Uses the same `SHOPIFY_*` credentials as `verify-live`.
+
+**`seed-proposal`** — seeds a single handcrafted `new_listing` proposal (a live-verified CJ
+dog-toy product) through the real `submitProposal` pipeline, then prints the Approve/Reject
+action URLs so you can exercise the walkthrough by hand: run this, then
+`pnpm --filter @doge-buddy/ops dev` in a second terminal and click Approve. Idempotent on its
+seed summary — rerunning while that proposal is still unresolved (or already applied) prints its
+id/status instead of creating a duplicate. Needs `DATABASE_URL`; optionally `TELEGRAM_BOT_TOKEN` /
+`TELEGRAM_CHAT_ID` (falls back to printing the notification to the console) and `ADMIN_BASE_URL`
+(defaults to `http://localhost:3001`).
+
+```bash
+pnpm --filter @doge-buddy/ops seed-proposal
+```

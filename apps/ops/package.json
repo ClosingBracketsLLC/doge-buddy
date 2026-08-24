@@ -11,7 +11,8 @@
     "preverify-live": "tsx scripts/dev-setup.ts",
     "verify-live": "tsx scripts/verify-live.ts",
     "replay-webhook": "tsx scripts/replay-webhook.ts",
-    "seed-store": "tsx scripts/seed-store.ts"
+    "seed-store": "tsx scripts/seed-store.ts",
+    "seed-proposal": "tsx scripts/seed-proposal.ts"
   },
   "dependencies": {
     "@doge-buddy/core": "workspace:*",

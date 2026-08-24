@@ -32,6 +32,10 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
   5. Enable **Bogus Gateway** (test store → Settings → Payments → third-party → Bogus).
   *Blocks:* 🔴 **Tier-2 verification of Phase 2** (real-store browse, Bogus checkout, Oxygen deploy) — Tier-1/mock.shop build proceeds without it.
 
+- [ ] 🟡 **Phase 4 Tier-2 verification.** Tier-1 (`seed-proposal` script + local `dev` + click Approve, against the real DB/Shopify/CJ) needs no owner action beyond credentials already on file. Two things stay parked on owner items for the full live loop:
+  1. **Real Telegram buttons through the deployed Railway URL** — needs `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` added to Railway's env and a redeploy; today `seed-proposal` prints the action URLs to the console instead.
+  2. **Storefront visibility of an applied product** — parked on the Hydrogen-channel item above. Robert completed the Hydrogen env dump (2026-08-23), so only `PUBLIC_CHECKOUT_DOMAIN` + the Oxygen deploy remain there before an applied `new_listing` proposal can be confirmed visible on the live storefront.
+
 ## Later phases (no action yet — listed so nothing surprises you)
 
 - [ ] ⚪ **Anthropic API key** (Phase 5 — sourcing agent). 🔴 blocks agent runs when we get there.
