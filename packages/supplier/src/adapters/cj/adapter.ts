@@ -34,10 +34,11 @@ function countryDisplayName(isoCode: string): string {
   return countryNames.of(isoCode) ?? isoCode
 }
 
-// FIXTURE-ASSUMPTION: CJ signs webhook payloads as base64(hmacSHA256(openId, rawBody)) and
-// delivers the signature under one of these header names; we haven't confirmed the exact
-// header against a live CJ webhook, so all three are checked in this priority order.
-const CJ_SIGNATURE_HEADERS = ['cj-signature', 'x-cj-signature', 'signature'] as const
+// Observed live 2026-08-23: CJ's /webhook/set registration probe delivers its signature under
+// the plain `sign` header (base64, 32 bytes decoded — consistent with the documented
+// base64(hmacSHA256(openId, rawBody)) scheme). The original three guessed names are kept as
+// fallbacks; `sign` leads because it is the one CJ actually sends.
+const CJ_SIGNATURE_HEADERS = ['sign', 'cj-signature', 'x-cj-signature', 'signature'] as const
 
 const CJ_WEBHOOK_TYPES: Record<string, SupplierWebhookEvent['type']> = {
   ORDER: 'order',

@@ -371,6 +371,13 @@ describe('CJSupplierAdapter.verifyWebhook', () => {
     return createHmac('sha256', openId).update(body).digest('base64')
   }
 
+  it('returns true for a correct signature under the sign header (observed live 2026-08-23)', async () => {
+    // CJ's /webhook/set registration probe delivered its signature under plain `sign` — the
+    // header the original three-candidate guess list didn't include, which 401'd the probe.
+    const { adapter } = await makeAdapter(() => ok({}), { openId })
+    expect(adapter.verifyWebhook(rawBody, { sign: sign(rawBody) })).toBe(true)
+  })
+
   it('returns true for a correct signature under the cj-signature header', async () => {
     const { adapter } = await makeAdapter(() => ok({}), { openId })
     expect(adapter.verifyWebhook(rawBody, { 'cj-signature': sign(rawBody) })).toBe(true)
