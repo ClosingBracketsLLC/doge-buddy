@@ -145,6 +145,11 @@ if (supplierAdapter.key === 'mock' && config.shopify) {
   )
 }
 
+if (config.anthropic) app.log.info('sourcing agent: ANTHROPIC_API_KEY configured')
+else app.log.warn('sourcing agent DISABLED: ANTHROPIC_API_KEY not set — sourcing.weekly cron will not register')
+if (config.serpapi) app.log.info('sourcing agent: SERPAPI_KEY configured (trends stage armed)')
+else app.log.warn('sourcing trends stage disabled: SERPAPI_KEY not set — runs proceed without google_trends signals')
+
 alertImpl = createAlerter(db, app.log)
 
 // Built here — before `startQueue` — because the `fulfillment.sync-tracking` queue it wires needs

@@ -27,6 +27,8 @@ const EnvSchema = z
     CJ_OPEN_ID: z.string().optional(),
     TELEGRAM_BOT_TOKEN: z.string().optional(),
     TELEGRAM_CHAT_ID: z.string().optional(),
+    ANTHROPIC_API_KEY: z.string().min(1).optional(),
+    SERPAPI_KEY: z.string().min(1).optional(),
   })
   .superRefine((data, ctx) => {
     const shopifyVars = {
@@ -91,6 +93,8 @@ export interface Config {
   shopify?: { shopDomain: string; clientId: string; clientSecret: string; webhookSecret: string }
   cj?: { apiKey: string; openId: string }
   telegram?: { botToken: string; chatId: string }
+  anthropic?: { apiKey: string }
+  serpapi?: { apiKey: string }
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
@@ -132,6 +136,14 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
 
   if (data.TELEGRAM_BOT_TOKEN !== undefined && data.TELEGRAM_CHAT_ID !== undefined) {
     config.telegram = { botToken: data.TELEGRAM_BOT_TOKEN, chatId: data.TELEGRAM_CHAT_ID }
+  }
+
+  if (data.ANTHROPIC_API_KEY !== undefined) {
+    config.anthropic = { apiKey: data.ANTHROPIC_API_KEY }
+  }
+
+  if (data.SERPAPI_KEY !== undefined) {
+    config.serpapi = { apiKey: data.SERPAPI_KEY }
   }
 
   return config

@@ -138,4 +138,14 @@ describe('loadConfig', () => {
       loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', TELEGRAM_BOT_TOKEN: 'tok' }),
     ).toThrow(/TELEGRAM_CHAT_ID/)
   })
+
+  it('anthropic block present iff ANTHROPIC_API_KEY set', () => {
+    expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' }).anthropic).toBeUndefined()
+    expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', ANTHROPIC_API_KEY: 'sk-ant-x' }).anthropic).toEqual({ apiKey: 'sk-ant-x' })
+  })
+
+  it('serpapi block present iff SERPAPI_KEY set', () => {
+    expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' }).serpapi).toBeUndefined()
+    expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', SERPAPI_KEY: 'serp-x' }).serpapi).toEqual({ apiKey: 'serp-x' })
+  })
 })
