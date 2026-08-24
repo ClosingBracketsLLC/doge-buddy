@@ -251,19 +251,27 @@ export async function runSourcingAgent(deps: SourcingRunDeps, input: SourcingRun
     }
   }
 
-  // --- Fallback path: no result message (throw / watchdog abort / DB failure above) -----------
+  // --- Fallback path: no authoritative record was written ------------------------------------
+  // Two ways in: (1) no result message at all — a true throw / watchdog abort before any result —
+  // so the streaming accumulator ESTIMATE is the best cost we have; or (2) a result message DID
+  // arrive but its authoritative UPDATE above threw — in which case resultMsg.total_cost_usd /
+  // modelUsage are still in scope and known-accurate, so prefer them over the estimate. Both
+  // branches stay .catch-guarded so this path never throws.
   const tally = accumulator.tally()
   const status: AgentRunResult['status'] = watchdogAborted ? 'aborted' : 'failed'
+  const costUsd = resultMsg ? (resultMsg.total_cost_usd ?? null) : tally.estimatedCostUsd
+  const costEstimated = resultMsg === undefined
+  const modelUsage = resultMsg ? (resultMsg.modelUsage ?? null) : { ...tally.perModel, estimated: true }
   await db
     .update(agentRuns)
     .set({
       status,
-      totalCostUsd: toNumericString(tally.estimatedCostUsd),
-      modelUsage: { ...tally.perModel, estimated: true },
+      totalCostUsd: toNumericString(costUsd),
+      modelUsage,
       finishedAt: new Date(),
     })
     .where(eq(agentRuns.id, runId))
     .catch(() => {})
   await alert('critical', 'sourcing_run_failed', { runId, error: errorToDetail(thrownError) }).catch(() => {})
-  return { status, output: null, costUsd: tally.estimatedCostUsd, costEstimated: true }
+  return { status, output: null, costUsd, costEstimated }
 }

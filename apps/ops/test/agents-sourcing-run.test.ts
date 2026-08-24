@@ -203,6 +203,85 @@ describe('runSourcingAgent (fake SDK stream)', () => {
 
     expect(d.alert).toHaveBeenCalledWith('critical', 'sourcing_output_invalid', expect.objectContaining({ runId }))
   })
+
+  it('every-5-events branch: an intermediate streaming estimate lands on the row mid-run, then the terminal authoritative cost overwrites it', async () => {
+    const runId = await claimRow('every5')
+    let intermediateCost: string | null | undefined
+    // init + 5 assistant + result = 7 messages. The `seq % 5 === 0` intermediate cost-persist fires
+    // after the 5th message (seq reaches 5). Because the runner awaits its DB writes before pulling
+    // the next stream value, reading the row between yielding the 5th and 6th message observes
+    // exactly that intermediate write.
+    async function* stream(): AsyncGenerator<Record<string, unknown>> {
+      yield { type: 'system', subtype: 'init', session_id: 's5' } // seq 0
+      yield { type: 'assistant', message: { model: 'claude-sonnet-5', usage: { input_tokens: 1000, output_tokens: 500 } } } // seq 1
+      yield { type: 'assistant', message: { model: 'claude-sonnet-5', usage: { input_tokens: 1000, output_tokens: 500 } } } // seq 2
+      yield { type: 'assistant', message: { model: 'claude-sonnet-5', usage: { input_tokens: 1000, output_tokens: 500 } } } // seq 3
+      yield { type: 'assistant', message: { model: 'claude-sonnet-5', usage: { input_tokens: 1000, output_tokens: 500 } } } // seq 4 -> triggers intermediate update
+      const [mid] = await db.select({ c: agentRuns.totalCostUsd }).from(agentRuns).where(eq(agentRuns.id, runId))
+      intermediateCost = mid?.c
+      yield { type: 'assistant', message: { model: 'claude-sonnet-5', usage: { input_tokens: 1000, output_tokens: 500 } } } // seq 5
+      yield { type: 'result', subtype: 'success', total_cost_usd: 9.99, modelUsage: {}, num_turns: 6, session_id: 's5', structured_output: { winners: [validWinner()] } } // seq 6
+    }
+    const d = deps(() => stream())
+
+    const result = await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: trendSignals() })
+
+    // The intermediate write is the accumulator estimate over the 4 assistant messages processed
+    // before seq hit 5.
+    const acc = createUsageAccumulator()
+    for (let i = 0; i < 4; i += 1) acc.add({ message: { model: 'claude-sonnet-5', usage: { input_tokens: 1000, output_tokens: 500 } } })
+    const expectedIntermediate = acc.tally().estimatedCostUsd
+
+    expect(expectedIntermediate).toBeGreaterThan(0)
+    expect(intermediateCost).not.toBeNull()
+    expect(intermediateCost).not.toBeUndefined()
+    expect(Number(intermediateCost)).toBeCloseTo(expectedIntermediate, 10)
+
+    // The terminal authoritative update overwrote the intermediate estimate with the result cost.
+    expect(result.status).toBe('succeeded')
+    const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, runId))
+    expect(Number(row!.totalCostUsd)).toBe(9.99)
+  })
+
+  it('watchdog: a hanging run is aborted after SOURCING_WATCHDOG_MS -> abortController fires, row aborted, cost estimated', async () => {
+    const runId = await claimRow('watchdog')
+    let capturedAc: AbortController | undefined
+    // A stream that yields nothing and hangs until its abort signal fires — the runner's watchdog
+    // AbortController. No events are written during the hang, so the only async work under fake
+    // timers is the watchdog timer itself.
+    const queryFn: SourcingRunDeps['queryFn'] = (args) => {
+      const ac = args.options.abortController as AbortController
+      capturedAc = ac
+      async function* gen(): AsyncGenerator<Record<string, unknown>> {
+        await new Promise<void>((resolve) => {
+          if (ac.signal.aborted) resolve()
+          else ac.signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+        // Stream ends after the abort — no result message ever arrived.
+      }
+      return gen()
+    }
+    const d = deps(queryFn)
+
+    vi.useFakeTimers()
+    try {
+      const runPromise = runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: trendSignals() })
+      // Advance past the watchdog deadline: fires the setTimeout that calls abortController.abort().
+      await vi.advanceTimersByTimeAsync(SOURCING_WATCHDOG_MS + 1)
+      const result = await runPromise
+
+      expect(capturedAc?.signal.aborted).toBe(true)
+      expect(result.status).toBe('aborted')
+      expect(result.costEstimated).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, runId))
+    expect(row!.status).toBe('aborted')
+    expect(row!.finishedAt).not.toBeNull()
+    expect(d.alert).toHaveBeenCalledWith('critical', 'sourcing_run_failed', expect.objectContaining({ runId }))
+  })
 })
 
 describe('output-schema', () => {
