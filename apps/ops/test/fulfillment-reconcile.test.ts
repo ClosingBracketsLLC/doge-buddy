@@ -1,10 +1,12 @@
-import { auditLog, createDb, orders, supplierOrders, webhookEvents } from '@doge-buddy/db'
+import { agentRuns, auditLog, createDb, orders, supplierOrders, webhookEvents } from '@doge-buddy/db'
 import { MockSupplierAdapter } from '@doge-buddy/supplier'
-import { and, eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
+import type PgBoss from 'pg-boss'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
 import { upsertOrderFromPaidPayload } from '../src/fulfillment/order-upsert.ts'
 import { FULFILLMENT_RETRY_OPTS } from '../src/fulfillment/run-place-order.ts'
+import { fulfillmentReconcileHandler } from '../src/jobs/fulfillment-reconcile.ts'
 import {
   executeReconcile,
   type ReconcileDeps,
@@ -819,6 +821,41 @@ describe('run-reconcile', () => {
       const failureAudits = await rowFailureAuditsFor(failingRow.id)
       expect(failureAudits.length).toBeGreaterThan(0)
       expect(failureAudits[0]!.detail).toMatchObject({ sweep: 'status_drift', message: 'CJ API unreachable' })
+    })
+  })
+
+  // FIX C1: the hourly reconcile cron must also run the agent_runs orphan sweep (spec §Stage 3:
+  // "at ops boot AND in the hourly reconcile cron"). Previously only boot + claimDailyRun wired it,
+  // so an agent_runs row wedged 'running' younger than the boot sweep could sit for up to ~7 days.
+  describe('fulfillmentReconcileHandler — orphan sweep (FIX C1)', () => {
+    const createdRunIds: string[] = []
+    afterEach(async () => {
+      if (createdRunIds.length > 0) {
+        await db.delete(auditLog).where(and(eq(auditLog.entityType, 'agent_run'), inArray(auditLog.entityId, createdRunIds)))
+        await db.delete(agentRuns).where(inArray(agentRuns.id, createdRunIds))
+        createdRunIds.length = 0
+      }
+    })
+
+    it('heals a stale "running" agent_runs row within the hourly cron', async () => {
+      const { deps } = makeDeps() // ordersUpdatedSince defaults to [] so executeReconcile won't throw
+      const [stale] = await db
+        .insert(agentRuns)
+        .values({
+          workflow: `reconcile-orphan-test-${nextId()}`,
+          status: 'running',
+          model: 'm',
+          startedAt: sql`now() - interval '30 minutes'`, // older than ORPHAN_AFTER_MINUTES (20)
+        })
+        .returning({ id: agentRuns.id })
+      createdRunIds.push(stale!.id)
+
+      const handler = fulfillmentReconcileHandler(deps)
+      await handler([{ id: nextId() } as unknown as PgBoss.Job<object>])
+
+      const [after] = await db.select().from(agentRuns).where(eq(agentRuns.id, stale!.id))
+      expect(after?.status).toBe('aborted')
+      expect(after?.finishedAt).not.toBeNull()
     })
   })
 })
