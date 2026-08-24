@@ -24,13 +24,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 - [x] ~~Railway account + deploy ops.~~ **Done (2026-08-23):** ops + Postgres live at `https://doge-buddyops-production.up.railway.app` — healthz green (`db:ok, queue:ok`), demo job processed on the deployed instance (**Phase 0 exit criterion closed**), and the webhook-audit cron self-registered all three Shopify webhook topics (ORDERS_PAID, ORDERS_CANCELLED, REFUNDS_CREATE) at the Railway URL. *Follow-up closed same day:* CJ webhooks are registered and **proven end-to-end live** — the diagnostic capture revealed the signature rides in the `sign` header (fixed in 2a2e0e5), registration then succeeded, and real sandbox-order events flowed CJ → HMAC verified → recorded → processed on the deployed instance. Nothing on the CJ adapter remains unverified except dispute-write bodies and STOCK/PRODUCT event shapes.
 
-- [ ] 🟡 **Hydrogen channel + Oxygen for the test store.** Using your test Shopify store:
-  1. Install the Hydrogen sales channel on the test store.
-  2. Create a storefront named `doge-buddy`.
-  3. Connect the GitHub repo `ClosingBracketsLLC/doge-buddy` for Oxygen auto-deploys (dev-store deploys are password-protected — expected).
-  4. Copy the storefront env vars it issues into `apps/storefront/.env` (see `.env.example`).
-  5. Enable **Bogus Gateway** (test store → Settings → Payments → third-party → Bogus).
-  *Blocks:* 🔴 **Tier-2 verification of Phase 2** (real-store browse, Bogus checkout, Oxygen deploy) — Tier-1/mock.shop build proceeds without it.
+- [x] ~~Hydrogen channel + Oxygen for the test store.~~ **Done (2026-08-24):** channel installed, storefront `doge-buddy` (id 1000173017) created, GitHub connected (Shopify auto-PR'd its Oxygen workflow — which assumed a single-repo npm project and was adapted to the pnpm monorepo in 8a0734d), env vars in gitignored `apps/storefront/.env`. **Verified live:** local storefront serves the real store, and the Phase-4-pipeline product (Dog Snuff Pad, `DB-SNUFFPAD-01`, $29.99) renders on its product page with Shopify-CDN images — closing Phase 4's storefront-visibility check in its local form. *Still open from this item:* `PUBLIC_CHECKOUT_DOMAIN` (grab from the channel's env list → `.env`), Bogus Gateway enablement unconfirmed (Settings → Payments — needed for the Phase 2 test-checkout drill), and the first real Oxygen deploy (fires on your next `git push`; expect a password-protected preview URL).
 
 - [ ] 🟡 **Phase 4 Tier-2 verification.** Tier-1 (`seed-proposal` script + local `dev` + click Approve, against the real DB/Shopify/CJ) needs no owner action beyond credentials already on file. Two things stay parked on owner items for the full live loop:
   1. **Real Telegram buttons through the deployed Railway URL** — needs `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` added to Railway's env and a redeploy; today `seed-proposal` prints the action URLs to the console instead.
