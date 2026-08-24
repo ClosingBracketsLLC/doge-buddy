@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto'
-import { loadDotEnv } from './lib/load-env.ts'
+import { loadDotEnv } from '../src/load-env.ts'
 
 /**
  * One-command manual proof of the webhook dedup path: signs a sample `orders/paid` payload and

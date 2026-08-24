@@ -5,8 +5,10 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "predev": "tsx scripts/dev-setup.ts",
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "preverify-live": "tsx scripts/dev-setup.ts",
     "verify-live": "tsx scripts/verify-live.ts",
     "replay-webhook": "tsx scripts/replay-webhook.ts",
     "seed-store": "tsx scripts/seed-store.ts"

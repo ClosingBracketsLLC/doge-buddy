@@ -1,6 +1,6 @@
 import { ShopifyAdminClient, ShopifyTokenManager } from '@doge-buddy/shopify-admin'
 import { runSeed } from '../src/seed/run.ts'
-import { loadDotEnv } from './lib/load-env.ts'
+import { loadDotEnv } from '../src/load-env.ts'
 
 /**
  * Idempotently seeds Robert's test Shopify store with the dogebuddy metafield definitions,

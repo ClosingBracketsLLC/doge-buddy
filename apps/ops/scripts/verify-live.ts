@@ -10,7 +10,7 @@ import {
 import { CJSupplierAdapter, CjHttpClient, InMemoryCjTokenStore, type CjTokenStore } from '@doge-buddy/supplier'
 import { loadConfig } from '../src/config.ts'
 import { DrizzleCjTokenStore } from '../src/stores/cj-token-store.ts'
-import { loadDotEnv } from './lib/load-env.ts'
+import { loadDotEnv } from '../src/load-env.ts'
 
 /**
  * Manual, credential-gated smoke test against the real Shopify Admin API and CJ Dropshipping

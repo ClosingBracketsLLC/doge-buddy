@@ -16,10 +16,13 @@ import type { WebhookDeps } from './http/webhooks.ts'
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
+import { loadDotEnv } from './load-env.ts'
 import { registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
 import { DrizzleCjTokenStore } from './stores/cj-token-store.ts'
+
+loadDotEnv(import.meta.url)
 
 const config = loadConfig(process.env)
 const { db, pool } = createDb(config.databaseUrl, { connectionTimeoutMillis: 5000 })
