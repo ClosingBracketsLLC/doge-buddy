@@ -38,9 +38,18 @@ Four `run-sourcing --force` runs against the Railway DB (real CJ / Anthropic / S
    description, OR rationale; re-read before output), after run #3's winner was dropped for
    "therapeutic".
 
-## Remaining work (diagnosed + validated; NOT yet implemented)
+## Remaining work — BOTH FIXES IMPLEMENTED + LIVE-PROBED (2026-08-24 session, commit `da48341`)
 
-### 1. Harvest must filter to dog products (the reason no proposal has flowed) — HIGH PRIORITY
+Both fixes below landed with TDD coverage (7 rewritten harvest tests, new pipeline test (d2);
+full ops suite 601/601 green, repo typecheck clean) and were then **proven against the real
+services** with a harvest+trends-only probe (no agent, no Anthropic spend): 10 pages harvested,
+**15/15 candidates were real dog products** (leashes $0.46–, toys, grooming brushes, beds; each
+candidate now carries its `keyword`), and SerpApi returned real scores for all 4 distinct
+keywords (dog bed 37.5, dog grooming 27.3, dog toy 19.4, dog leash 15.8) — **no more 400s**.
+What remains for Tier-2 is ONLY the full run against the Railway DB (owner push + the command
+below; the Railway Postgres URL lives in the owner's deploy chat log, not in the repo).
+
+### 1. ~~Harvest must filter to dog products~~ — DONE (the reason no proposal has flowed) — HIGH PRIORITY
 
 `apps/ops/src/sourcing/harvest.ts` calls `searchProducts({ flag: 'trending' })` and
 `{ flag: 'new' }` with **no keyword/category**, so it pulls CJ's *global* trending feed — mostly
@@ -57,7 +66,7 @@ to the store's category tags (toys/walks/beds/grooming) — e.g. `['dog toy', 'd
 structure intact; update `sourcing-harvest.test.ts`. The CJ adapter already supports `keyword`
 (maps to `keyWord`) — no adapter change needed.
 
-### 2. Trends stage 400s on full product titles — MEDIUM (non-blocking; degrades gracefully)
+### 2. ~~Trends stage 400s on full product titles~~ — DONE — MEDIUM (non-blocking; degrades gracefully)
 
 `apps/ops/src/sourcing/pipeline.ts` passes `candidates.map(c => c.title)` to `fetchInterest`. CJ
 titles are long/messy; Google Trends returns HTTP 400 (all 3 requests failed every run). Probed:
@@ -87,10 +96,10 @@ pnpm --filter @doge-buddy/ops run-sourcing --force
 
 ## Gotchas found (also in memory)
 
-- **`apps/ops/.env` has `ADMIN_BASE_URL=doge-buddyops-production.up.railway.app` with NO scheme** —
-  `loadConfig` rejects it ("must be a valid http(s) URL"), which crashes any script that loads full
-  config (this is why the owner's first plain `run-sourcing` did nothing). Either add `https://`
-  in `.env` or override inline (the command above does). Owner should fix `.env`.
+- ~~`apps/ops/.env` has `ADMIN_BASE_URL` with NO scheme~~ — **FIXED in `.env` (verified
+  2026-08-24 follow-up session: it now reads `https://doge-buddyops-production.up.railway.app`)**.
+  Historical: the scheme-less value crashed `loadConfig` ("must be a valid http(s) URL"), which is
+  why the owner's first plain `run-sourcing` did nothing.
 - A plain LOCAL run (local DB) cannot put working buttons on the phone — the proposal must live in
   the DB the deployed Railway admin serves. Hence targeting the Railway DB above.
 - tsx scratchpad scripts hit the top-level-await-in-CJS error → wrap in an async IIFE; and
@@ -99,10 +108,10 @@ pnpm --filter @doge-buddy/ops run-sourcing --force
 
 ## Push note
 
-`main` is 3 commits ahead of origin: the three fixes above (`558434a`, `c011a81`, `6a422ad`) are
-UNPUSHED. Railway builds from origin, so its deployed code + the armed Monday cron still have the
-schema bug until these (and the coming harvest/trends fixes) are pushed. **Push before relying on
-the cron.**
+`main` is now **5 commits ahead** of origin: the three hotfixes (`558434a`, `c011a81`,
+`6a422ad`) plus the harvest/trends fix (`da48341`) and its docs commit. Railway builds from
+origin, so its deployed code + the armed Monday cron still have the schema bug AND the
+global-trending harvest until these are pushed. **Push before relying on the cron.**
 
 ## Spend so far
 
