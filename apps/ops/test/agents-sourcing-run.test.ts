@@ -289,6 +289,15 @@ describe('output-schema', () => {
     expect((SOURCING_OUTPUT_JSON_SCHEMA as { type?: string }).type).toBe('object')
   })
 
+  it('targets draft-07 — the SDK validator (ajv) rejects the zod-default draft-2020-12', () => {
+    // Regression: the first live Tier-2 run failed with "no schema with key or ref
+    // https://json-schema.org/draft/2020-12/schema" because zod v4's default target is
+    // draft-2020-12, which the Agent SDK subprocess validator does not ship. Must stay draft-07.
+    const schema = SOURCING_OUTPUT_JSON_SCHEMA as { $schema?: string }
+    expect(schema.$schema).toBe('http://json-schema.org/draft-07/schema#')
+    expect(JSON.stringify(schema)).not.toContain('draft/2020-12')
+  })
+
   it('rejects more than 3 winners', () => {
     const w = validWinner()
     const parsed = SourcingOutputSchema.safeParse({ winners: [w, w, w, w] })
