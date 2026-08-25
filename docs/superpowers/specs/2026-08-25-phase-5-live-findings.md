@@ -6,6 +6,21 @@ are fixed (committed, unpushed); two remain (diagnosed precisely, fix validated,
 implemented). This doc is the complete state so the next session can finish without re-deriving
 anything.
 
+## FINAL UPDATE (2026-08-25): Tier-2 CLOSED on the pipeline side — 2 proposals on the phone
+
+Two more live runs against the Railway DB finished the job. Run #1 (`e3728718`, post-keyword-fix)
+completed but submitted 0 — **every variant in the whole candidate pool was CN-warehouse-only**
+(verified from `agent_run_events`: all 12 get_stock results returned CN rows only), so Stage 4's
+US-stock gate correctly dropped all 3 winners. Root cause: harvest didn't filter by warehouse
+country. Bonus trap discovered: **CJ's quote_freight returns cheap US options (USPS 3–7d) even for
+CN-only variants — a freight quote is NOT evidence of US stock**, which is what misled the agent.
+Fixed in `9affbc6`: harvest passes `countryCode: 'US'` (arms CJ's `verifiedWarehouse: 1`;
+live-probed full pages of US-stocked dog products first), plus a US-stock HARD RULE block in the
+agent prompt. Run #2 (`9bb475d9`): **completed, submitted 2, dropped 0** — Plush Round Dog Bed
+(3 variants) + Low Noise Pet Hair Clipper, both $54.99 shipsFrom US, pending in the Railway DB,
+Telegram notifications sent with working buttons (46 turns, $0.61). Remaining: owner taps
+approve (closes the tier), owner pushes `9affbc6`+docs so the Monday cron gets the US filter.
+
 ## Status in one line
 
 The pipeline runs for real (config → claim → harvest → agent research with CJ tools → all 8
