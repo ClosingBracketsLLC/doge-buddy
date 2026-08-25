@@ -71,8 +71,14 @@ const SYSTEM_PROMPT =
   'You are the sourcing researcher for a US dog-products store. You research demand and competition ' +
   'for a fixed set of candidate products and return up to three ready-to-approve new_listing ' +
   'proposals as structured output. You never take side-effecting actions; plain code validates, ' +
-  'prices, and submits everything you return. Use the read-only mcp__sourcing__* tools and web ' +
-  'search/fetch to gather evidence. Obey the category-exclusion and disallowed-claims lists absolutely.'
+  'prices, and submits everything you return, and re-verifies every number against the supplier — ' +
+  'so propose real candidates confidently; the downstream gate catches anything that does not hold up. ' +
+  'You MUST use the read-only mcp__sourcing__* tools before you output: the candidate list gives you ' +
+  'only a title, a rough price, and a category — you cannot build a complete new_listing payload ' +
+  '(real variants, SKUs, supplier costs, description, image URLs, US stock, freight) without calling ' +
+  'get_product_detail, get_stock, and quote_freight on the candidates you are evaluating. Calling the ' +
+  'StructuredOutput tool ENDS your run, so never call it until you have actually researched. Obey the ' +
+  'category-exclusion and disallowed-claims lists absolutely.'
 
 /** numeric columns take a string in drizzle's default mode; keep null as null. */
 function toNumericString(n: number | null | undefined): string | null {
@@ -111,10 +117,23 @@ function buildPrompt(input: SourcingRunInput): string {
     CLAIM_TERMS.join(', '),
     '',
     '## Task',
-    'Research demand and competition for the candidates using the available tools, then return up to',
-    'THREE winners in the required structured output. Each winner is a complete new_listing payload',
-    'draft plus rationale, marginPct, and freightEstimateCents (from your quote_freight calls).',
-    'Return zero winners rather than a weak or non-compliant one.',
+    'Work the candidates in this order — do NOT skip straight to output:',
+    '1. Pick your ~3-5 most promising candidates from the list above (best demand signal, price band',
+    '   that can clear the margin floor, not in an excluded category).',
+    '2. For EACH, call get_product_detail (variants, supplier costs, description, images), get_stock',
+    '   (confirm real US warehouse stock), and quote_freight (US shipping cost + days). Use get_reviews',
+    '   and web search to judge demand and competition. You cannot fill in a valid payload without this.',
+    '3. Build a complete new_listing payload for each candidate that clears the margin floor: one',
+    '   categoryTag, real variants with SKUs/priceCents/supplierCostCents from the detail call, an',
+    "   http(s) image URL, US-appropriate delivery days, and clean marketing copy (no disallowed claims).",
+    '4. Return up to THREE winners in the required structured output, each with rationale, marginPct,',
+    '   and freightEstimateCents (from your quote_freight call).',
+    '',
+    'Do NOT return zero winners without first calling get_product_detail on at least your top three',
+    'candidates — an empty result is only acceptable AFTER genuine investigation shows none can clear',
+    'the margin floor or all fall in an excluded category. Prefer proposing a real, verified candidate:',
+    'plain code re-verifies every number against the supplier and drops anything that does not hold up,',
+    'so a borderline-but-real winner is far better than an empty result.',
   ].join('\n')
 }
 
