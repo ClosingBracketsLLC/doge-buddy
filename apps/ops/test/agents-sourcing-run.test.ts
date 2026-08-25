@@ -88,6 +88,24 @@ describe('runSourcingAgent (fake SDK stream)', () => {
     return { db, alert: vi.fn().mockResolvedValue(undefined), mcpServer: mcpServer(), queryFn }
   }
 
+  it('prompt pins the US-stock hard rule: CN-only variants are disqualified, freight is not stock evidence', async () => {
+    const runId = await claimRow('us-stock-rule')
+    let capturedPrompt: string | undefined
+    async function* stream(): AsyncGenerator<Record<string, unknown>> {
+      yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
+    }
+    const d = deps((args) => { capturedPrompt = args.prompt; return stream() })
+
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: trendSignals() })
+
+    // First live Tier-2 run (2026-08-24): the agent saw CN-only get_stock results and proposed the
+    // variants anyway, trusting quote_freight's US options — every winner then died on Stage 4's US
+    // stock gate. The prompt must make both halves explicit.
+    expect(capturedPrompt).toContain('US stock — HARD RULE')
+    expect(capturedPrompt).toContain('DISQUALIFIED')
+    expect(capturedPrompt).toContain('NOT evidence of US stock')
+  })
+
   it('constants match the spec Global Constraints', () => {
     expect(SOURCING_MODEL).toBe('claude-sonnet-5')
     expect(SOURCING_MAX_TURNS).toBe(25)

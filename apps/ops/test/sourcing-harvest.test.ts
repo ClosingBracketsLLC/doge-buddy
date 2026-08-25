@@ -25,7 +25,7 @@ function summary(pid: string, opts: Partial<SupplierProductSummary> = {}): Suppl
   }
 }
 
-type SearchCall = { keyword?: string; flag?: 'trending' | 'new'; page?: number; pageSize?: number }
+type SearchCall = { keyword?: string; countryCode?: string; flag?: 'trending' | 'new'; page?: number; pageSize?: number }
 
 /** Stub adapter: `pages` maps a harvest keyword to an array of pages (1-indexed by position), each
  * page an array of summaries (or an Error to throw for that page). Missing keywords/pages return []. */
@@ -123,6 +123,22 @@ describe('runHarvest', () => {
     // Every configured keyword got at least one pass.
     const queried = new Set(calls.map((q) => q.keyword))
     expect([...queried].sort()).toEqual([...HARVEST_KEYWORDS].sort())
+  })
+
+  it('every searchProducts call requests US-warehouse products (countryCode US)', async () => {
+    const p = `h${uid()}`
+    seededPids = [`${p}-a`]
+
+    const adapter = makeAdapter({ 'dog toy': [[summary(`${p}-a`, { title: 'Squeaky Bone Toy' })], []] })
+    const alert = vi.fn(async () => {})
+
+    await runHarvest({ db, adapter, alert })
+
+    const calls = adapter.searchProducts.mock.calls.map(([q]) => q)
+    expect(calls.length).toBeGreaterThan(0)
+    for (const q of calls) {
+      expect(q.countryCode).toBe('US')
+    }
   })
 
   it('candidates carry the keyword whose pass fetched them', async () => {

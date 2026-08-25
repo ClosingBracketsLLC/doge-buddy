@@ -77,7 +77,10 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
 
     let pageSummaries: SupplierProductSummary[]
     try {
-      pageSummaries = await deps.adapter.searchProducts({ keyword: pass.keyword, page: pass.page, pageSize: PAGE_SIZE })
+      // countryCode US: the store ships from US only, and Stage 4 drops any winner without a US
+      // stock row — first live Tier-2 run (2026-08-24) proved an unfiltered harvest pool is 100%
+      // CN-warehoused, so without this filter every winner is doomed before the agent ever runs.
+      pageSummaries = await deps.adapter.searchProducts({ keyword: pass.keyword, countryCode: 'US', page: pass.page, pageSize: PAGE_SIZE })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       await deps.alert('warning', 'sourcing_harvest_page_failed', { pass: pass.keyword, page: pass.page, error: message })
