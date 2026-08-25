@@ -110,7 +110,10 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
       await alert('warning', 'trends_stage_skipped', {}).catch(() => {})
     } else {
       try {
-        trendSignals = await trends.fetchInterest(candidates.map((c) => c.title))
+        // Distinct harvest keywords, NEVER full product titles — CJ titles are long/messy and
+        // Google Trends 400s on them (live-probed 2026-08-25: `q=dog bowl` works, a title doesn't).
+        // The agent maps scores back to candidates via the `keyword` each candidate carries.
+        trendSignals = await trends.fetchInterest([...new Set(candidates.map((c) => c.keyword))])
         if (trendSignals.length > 0) {
           await db.insert(sourcingSignals).values(
             trendSignals.map((s) => ({

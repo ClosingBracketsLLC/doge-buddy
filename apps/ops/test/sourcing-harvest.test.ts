@@ -2,7 +2,7 @@ import { createDb, products, productVariants, proposals, sourcingSignals, suppli
 import type { SupplierProductSummary } from '@doge-buddy/supplier'
 import { inArray } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { CANDIDATE_TARGET, HARVEST_MAX_PAGES_TOTAL, runHarvest } from '../src/sourcing/harvest.ts'
+import { CANDIDATE_TARGET, HARVEST_KEYWORDS, HARVEST_MAX_PAGES_TOTAL, runHarvest } from '../src/sourcing/harvest.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -25,19 +25,14 @@ function summary(pid: string, opts: Partial<SupplierProductSummary> = {}): Suppl
   }
 }
 
-type SearchCall = { flag?: 'trending' | 'new'; page?: number; pageSize?: number }
+type SearchCall = { keyword?: string; flag?: 'trending' | 'new'; page?: number; pageSize?: number }
 
-/** Stub adapter: `pages.trending`/`pages.new` are arrays of pages (1-indexed by position), each
- * page an array of summaries (or an Error to throw for that page). Missing pages return []. */
-function makeAdapter(pages: {
-  trending?: (SupplierProductSummary[] | Error)[]
-  new?: (SupplierProductSummary[] | Error)[]
-}) {
+/** Stub adapter: `pages` maps a harvest keyword to an array of pages (1-indexed by position), each
+ * page an array of summaries (or an Error to throw for that page). Missing keywords/pages return []. */
+function makeAdapter(pages: Record<string, (SupplierProductSummary[] | Error)[]>) {
   const searchProducts = vi.fn(async (q: SearchCall): Promise<SupplierProductSummary[]> => {
-    const flag = q.flag!
-    const page = q.page ?? 1
-    const list = pages[flag] ?? []
-    const entry = list[page - 1]
+    const list = pages[q.keyword ?? ''] ?? []
+    const entry = list[(q.page ?? 1) - 1]
     if (entry instanceof Error) throw entry
     return entry ?? []
   })
@@ -110,6 +105,45 @@ describe('runHarvest', () => {
     createdProposalIds.push(row!.id)
   }
 
+  it('searches by dog keywords only: every call carries a HARVEST_KEYWORDS keyword, no flag; all keywords get a pass', async () => {
+    const p = `h${uid()}`
+    seededPids = [`${p}-a`]
+
+    const adapter = makeAdapter({ 'dog toy': [[summary(`${p}-a`, { title: 'Squeaky Bone Toy' })], []] })
+    const alert = vi.fn(async () => {})
+
+    await runHarvest({ db, adapter, alert })
+
+    const calls = adapter.searchProducts.mock.calls.map(([q]) => q)
+    expect(calls.length).toBeGreaterThan(0)
+    for (const q of calls) {
+      expect(q.flag).toBeUndefined()
+      expect(HARVEST_KEYWORDS).toContain(q.keyword)
+    }
+    // Every configured keyword got at least one pass.
+    const queried = new Set(calls.map((q) => q.keyword))
+    expect([...queried].sort()).toEqual([...HARVEST_KEYWORDS].sort())
+  })
+
+  it('candidates carry the keyword whose pass fetched them', async () => {
+    const p = `h${uid()}`
+    const toyPid = `${p}-toy`
+    const bedPid = `${p}-bed`
+    seededPids = [toyPid, bedPid]
+
+    const adapter = makeAdapter({
+      'dog toy': [[summary(toyPid, { title: 'Squeaky Bone Toy' })], []],
+      'dog bed': [[summary(bedPid, { title: 'Plush Donut Bed' })], []],
+    })
+    const alert = vi.fn(async () => {})
+
+    const result = await runHarvest({ db, adapter, alert })
+
+    const byPid = new Map(result.candidates.map((c) => [c.supplierProductId, c]))
+    expect(byPid.get(toyPid)?.keyword).toBe('dog toy')
+    expect(byPid.get(bedPid)?.keyword).toBe('dog bed')
+  })
+
   it('dedupe matrix: mapped, pending, 30d-rejected drop; 100d-rejected and clean survive; calming/flea guards drop', async () => {
     const p = `h${uid()}`
     const mappedPid = `${p}-mapped`
@@ -138,7 +172,7 @@ describe('runHarvest', () => {
       summary(cleanPid, { title: 'Durable Rope Tug Toy' }),
     ]
 
-    const adapter = makeAdapter({ trending: [summaries, []], new: [[]] })
+    const adapter = makeAdapter({ 'dog toy': [summaries, []] })
     const alert = vi.fn(async () => {})
 
     const result = await runHarvest({ db, adapter, alert })
@@ -154,16 +188,17 @@ describe('runHarvest', () => {
     expect(candidatePids).toHaveLength(2)
   })
 
-  it('writes one sourcing_signals row per unique supplierProductId fetched this run, source cj_trending', async () => {
+  it('writes one sourcing_signals row per unique pid, source cj_trending, keyword = first pass that fetched it', async () => {
     const p = `h${uid()}`
     const pidA = `${p}-a`
     const pidB = `${p}-b`
     seededPids = [pidA, pidB]
 
-    // pidA appears on BOTH passes (dedupe within run); pidB only on the 'new' pass.
+    // pidA appears under BOTH 'dog toy' and 'dog' (dedupe within run; 'dog toy' runs first);
+    // pidB only under 'dog'.
     const adapter = makeAdapter({
-      trending: [[summary(pidA, { listedCount: 10 })], []],
-      new: [[summary(pidA, { listedCount: 10 }), summary(pidB, { listedCount: 5 })], []],
+      'dog toy': [[summary(pidA, { listedCount: 10 })], []],
+      dog: [[summary(pidA, { listedCount: 10 }), summary(pidB, { listedCount: 5 })], []],
     })
     const alert = vi.fn(async () => {})
 
@@ -173,13 +208,15 @@ describe('runHarvest', () => {
     expect(rows).toHaveLength(2)
     for (const row of rows) {
       expect(row.source).toBe('cj_trending')
-      expect(row.keyword).toBeNull()
     }
     const rowA = rows.find((r) => r.supplierProductId === pidA)!
     expect(Number(rowA.score)).toBe(10)
+    expect(rowA.keyword).toBe('dog toy')
+    const rowB = rows.find((r) => r.supplierProductId === pidB)!
+    expect(rowB.keyword).toBe('dog')
   })
 
-  it('page failure: pass A throws on page 2 -> alerts and ends that pass only; pass B keeps fetching; candidates still returned', async () => {
+  it('page failure: one keyword pass throws on page 2 -> alerts and ends that pass only; other passes keep fetching; candidates still returned', async () => {
     const p = `h${uid()}`
     const pidX1 = `${p}-x1`
     const pidY1 = `${p}-y1`
@@ -188,22 +225,22 @@ describe('runHarvest', () => {
 
     const boom = new Error('CJ 429: rate limited')
     const adapter = makeAdapter({
-      trending: [[summary(pidX1)], boom],
-      new: [[summary(pidY1)], [summary(pidY2)], []],
+      'dog toy': [[summary(pidX1)], boom],
+      dog: [[summary(pidY1)], [summary(pidY2)], []],
     })
     const alert = vi.fn(async () => {})
 
     const result = await runHarvest({ db, adapter, alert })
 
     expect(alert).toHaveBeenCalledWith('warning', 'sourcing_harvest_page_failed', {
-      pass: 'trending',
+      pass: 'dog toy',
       page: 2,
       error: expect.stringContaining('CJ 429'),
     })
 
-    // Pass B's third page call (which returns []) proves it kept going despite A's failure.
-    const newCalls = adapter.searchProducts.mock.calls.filter(([q]) => q.flag === 'new')
-    expect(newCalls.map(([q]) => q.page)).toEqual([1, 2, 3])
+    // The 'dog' pass's third page call (which returns []) proves it kept going despite the failure.
+    const dogCalls = adapter.searchProducts.mock.calls.filter(([q]) => q.keyword === 'dog')
+    expect(dogCalls.map(([q]) => q.page)).toEqual([1, 2, 3])
 
     const candidatePids = result.candidates.map((c) => c.supplierProductId)
     expect(candidatePids).toEqual(expect.arrayContaining([pidX1, pidY1, pidY2]))
@@ -242,7 +279,7 @@ describe('runHarvest', () => {
       }),
     )
 
-    const adapter = makeAdapter({ trending: [summaries, []], new: [[]] })
+    const adapter = makeAdapter({ 'dog toy': [summaries, []] })
     const alert = vi.fn(async () => {})
 
     const result = await runHarvest({ db, adapter, alert })
@@ -257,19 +294,19 @@ describe('runHarvest', () => {
     expect(result.candidates.some((c) => c.listedNum === null)).toBe(false)
   })
 
-  it('respects HARVEST_MAX_PAGES_TOTAL as a hard cap on total pages fetched across both passes', async () => {
+  it('respects HARVEST_MAX_PAGES_TOTAL as a hard cap on total pages fetched across all keyword passes', async () => {
     const p = `h${uid()}`
-    // Every page (both passes) returns exactly one non-empty item, so the ONLY way the loop ends
-    // is the total-pages cap -- never the "both passes empty" condition.
-    const makePage = (tag: string, page: number) => [summary(`${p}-${tag}${page}`, { listedCount: page })]
-    const trendingPages = Array.from({ length: 20 }, (_, i) => makePage('t', i + 1))
-    const newPages = Array.from({ length: 20 }, (_, i) => makePage('n', i + 1))
-    seededPids = [
-      ...trendingPages.flat().map((s) => s.supplierProductId),
-      ...newPages.flat().map((s) => s.supplierProductId),
-    ]
+    // Every page of every keyword pass returns exactly one non-empty item, so the ONLY way the
+    // loop ends is the total-pages cap -- never the "all passes empty" condition.
+    const pages: Record<string, SupplierProductSummary[][]> = {}
+    for (const [ki, keyword] of HARVEST_KEYWORDS.entries()) {
+      pages[keyword] = Array.from({ length: 20 }, (_, i) => [summary(`${p}-k${ki}p${i + 1}`, { listedCount: i + 1 })])
+    }
+    seededPids = Object.values(pages)
+      .flat(2)
+      .map((s) => s.supplierProductId)
 
-    const adapter = makeAdapter({ trending: trendingPages, new: newPages })
+    const adapter = makeAdapter(pages)
     const alert = vi.fn(async () => {})
 
     const result = await runHarvest({ db, adapter, alert })

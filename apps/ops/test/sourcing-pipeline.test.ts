@@ -13,6 +13,7 @@ import { and, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { SOURCING_MODEL, type SourcingRunDeps } from '../src/agents/sourcing-run.ts'
 import { createSettings } from '../src/settings.ts'
+import { HARVEST_KEYWORDS } from '../src/sourcing/harvest.ts'
 import { runSourcingPipeline, type SourcingPipelineDeps } from '../src/sourcing/pipeline.ts'
 import type { TrendsProvider } from '../src/sourcing/trends.ts'
 import type { NotifyOwner } from '../src/notify/notify.ts'
@@ -34,9 +35,9 @@ interface ProductSpec {
   liveCostCents: number
 }
 
-/** Full SupplierAdapter fake: `searchProducts` (trending page 1 only, everything else ends the
- * pass immediately), `getProduct`/`getVariantStock`/`quoteShipping`/`getProductReviews` wired to
- * `specs`; every other method throws (never called by the pipeline). */
+/** Full SupplierAdapter fake: `searchProducts` (first harvest keyword's page 1 only, everything
+ * else ends the pass immediately), `getProduct`/`getVariantStock`/`quoteShipping`/
+ * `getProductReviews` wired to `specs`; every other method throws (never called by the pipeline). */
 function makeAdapter(specs: ProductSpec[]): SupplierAdapter {
   const byPid = new Map(specs.map((s) => [s.pid, s]))
   const notImplemented = (): never => {
@@ -45,7 +46,7 @@ function makeAdapter(specs: ProductSpec[]): SupplierAdapter {
   return {
     key: 'mock',
     async searchProducts(q): Promise<SupplierProductSummary[]> {
-      if (q.flag === 'trending' && q.page === 1) {
+      if (q.keyword === HARVEST_KEYWORDS[0] && q.page === 1) {
         return specs.map((s) => ({
           supplierProductId: s.pid,
           title: s.title,
@@ -240,9 +241,10 @@ describe('runSourcingPipeline', () => {
   }
 
   /** Three harvestable candidates (>= MIN_CANDIDATES), fresh pids per call. Registers the pids
-   * AND titles (harvest's `cj_trending` rows key on the former; the trends stage's
-   * `google_trends` rows key on the latter, per `candidates.map(c => c.title)` in pipeline.ts) for
-   * `sourcing_signals` cleanup so callers don't have to remember to. */
+   * AND the serving harvest keyword (harvest's `cj_trending` rows key on the former; the trends
+   * stage's `google_trends` rows key on the latter, per the distinct candidate keywords passed to
+   * `fetchInterest` in pipeline.ts) for `sourcing_signals` cleanup so callers don't have to
+   * remember to. */
   function candidateSpecs(): ProductSpec[] {
     const specs: ProductSpec[] = [
       { pid: uid(), title: 'Rope Pull Toy', categoryName: 'Toys', sellPriceCents: 2999, listedNum: 500, liveCostCents: 1000 },
@@ -250,7 +252,7 @@ describe('runSourcingPipeline', () => {
       { pid: uid(), title: 'Interactive Puzzle Toy', categoryName: 'Toys', sellPriceCents: 2499, listedNum: 300, liveCostCents: 950 },
     ]
     createdPids.push(...specs.map((s) => s.pid))
-    createdKeywords.push(...specs.map((s) => s.title))
+    createdKeywords.push(HARVEST_KEYWORDS[0])
     return specs
   }
 
@@ -338,6 +340,25 @@ describe('runSourcingPipeline', () => {
 
     const proposalRows = await db.select().from(proposals).where(eq(proposals.agentRunId, result.runId!))
     expect(proposalRows).toHaveLength(0)
+  })
+
+  // --- (d2) trends queries keywords, not titles ------------------------------------------------
+  it('(d2) trends stage queries the distinct harvest keywords, never product titles (full CJ titles 400 on SerpApi)', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const trends = stubTrends()
+    const alert = vi.fn(async () => {})
+
+    const result = await runSourcingPipeline(
+      baseDeps({ adapter, alert, trendsFactory: () => trends, force: true, queryFn: fakeQueryFn([]) }),
+    )
+    expect(result.outcome).toBe('completed')
+    createdRunIds.push(result.runId!)
+
+    // All three candidates come from the same keyword pass, so the distinct-keyword list is
+    // exactly one entry — deduped, and never the three titles.
+    expect(trends.fetchInterest).toHaveBeenCalledTimes(1)
+    expect(trends.fetchInterest).toHaveBeenCalledWith([HARVEST_KEYWORDS[0]])
   })
 
   // --- (d) trends null -------------------------------------------------------------------------

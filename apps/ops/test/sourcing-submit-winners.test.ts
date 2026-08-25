@@ -21,6 +21,7 @@ function candidate(pid: string, overrides: Partial<HarvestCandidate> = {}): Harv
     sellPriceCents: 1800,
     listedNum: 100,
     imageUrl: null,
+    keyword: 'dog bed',
     ...overrides,
   }
 }

@@ -13,9 +13,19 @@ export interface HarvestCandidate {
   sellPriceCents: number | null
   listedNum: number | null
   imageUrl: string | null
+  /** The HARVEST_KEYWORDS entry whose pass first fetched this product. */
+  keyword: string
 }
 
-/** Hard ceiling on total CJ searchProducts pages fetched (both passes combined) in one run. */
+/**
+ * The niche-scoped search terms, mapped to the store's category tags (toys/walks/beds/grooming)
+ * plus a general catch-all. CJ's `flag: 'trending'` is GLOBAL across all categories — live-probed
+ * 2026-08-25: it feeds random gadgets, while `keyword: 'dog'` returns real dog supplies — so the
+ * harvest searches by keyword only, never by flag.
+ */
+export const HARVEST_KEYWORDS = ['dog toy', 'dog leash', 'dog bed', 'dog grooming', 'dog'] as const
+
+/** Hard ceiling on total CJ searchProducts pages fetched (all keyword passes combined) in one run. */
 export const HARVEST_MAX_PAGES_TOTAL = 10
 /** How many ranked candidates a full harvest run aims to hand off to the next stage. */
 export const CANDIDATE_TARGET = 15
@@ -39,39 +49,38 @@ const LIVE_PROPOSAL_STATUSES = ['pending', 'approved', 'failed'] as const
 const STALE_PROPOSAL_STATUSES = ['rejected', 'expired'] as const
 
 interface PassState {
-  flag: 'trending' | 'new'
+  keyword: string
   page: number
   ended: boolean
 }
 
 /**
- * Runs both CJ searchProducts passes (trending + new), records every fetched summary as an
- * append-only sourcing_signals row, then filters (Stage 1: supplier_variant_mappings dedupe,
- * recent/live new_listing proposal dedupe, category exclusion guard) and ranks survivors down to
- * ~CANDIDATE_TARGET. Plain code, no LLM.
+ * Runs one CJ searchProducts pass per HARVEST_KEYWORDS entry (round-robin, keyword search only —
+ * never the global trending/new flags), records every fetched summary as an append-only
+ * sourcing_signals row tagged with the keyword that fetched it, then filters (Stage 1:
+ * supplier_variant_mappings dedupe, recent/live new_listing proposal dedupe, category exclusion
+ * guard) and ranks survivors down to ~CANDIDATE_TARGET. Plain code, no LLM.
  */
 export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: HarvestCandidate[]; pagesFetched: number }> {
   const now = deps.now ?? (() => new Date())
 
-  const passA: PassState = { flag: 'trending', page: 1, ended: false }
-  const passB: PassState = { flag: 'new', page: 1, ended: false }
-  const order: PassState[] = [passA, passB]
+  const order: PassState[] = HARVEST_KEYWORDS.map((keyword) => ({ keyword, page: 1, ended: false }))
 
   let pagesFetched = 0
   let turn = 0
-  const fetchedByPid = new Map<string, SupplierProductSummary>()
+  const fetchedByPid = new Map<string, { summary: SupplierProductSummary; keyword: string }>()
 
-  while (pagesFetched < HARVEST_MAX_PAGES_TOTAL && (!passA.ended || !passB.ended)) {
-    const pass = order[turn % 2]!
+  while (pagesFetched < HARVEST_MAX_PAGES_TOTAL && order.some((p) => !p.ended)) {
+    const pass = order[turn % order.length]!
     turn += 1
     if (pass.ended) continue
 
     let pageSummaries: SupplierProductSummary[]
     try {
-      pageSummaries = await deps.adapter.searchProducts({ flag: pass.flag, page: pass.page, pageSize: PAGE_SIZE })
+      pageSummaries = await deps.adapter.searchProducts({ keyword: pass.keyword, page: pass.page, pageSize: PAGE_SIZE })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      await deps.alert('warning', 'sourcing_harvest_page_failed', { pass: pass.flag, page: pass.page, error: message })
+      await deps.alert('warning', 'sourcing_harvest_page_failed', { pass: pass.keyword, page: pass.page, error: message })
       pass.ended = true
       continue
     }
@@ -85,28 +94,28 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
 
     for (const s of pageSummaries) {
       if (!fetchedByPid.has(s.supplierProductId)) {
-        fetchedByPid.set(s.supplierProductId, s)
+        fetchedByPid.set(s.supplierProductId, { summary: s, keyword: pass.keyword })
       }
     }
     pass.page += 1
   }
 
-  const summaries = [...fetchedByPid.values()]
+  const fetched = [...fetchedByPid.values()]
 
   // Step 2: every unique summary fetched this run gets an append-only sourcing_signals row.
-  if (summaries.length > 0) {
+  if (fetched.length > 0) {
     await deps.db.insert(sourcingSignals).values(
-      summaries.map((s) => ({
+      fetched.map(({ summary: s, keyword }) => ({
         source: 'cj_trending' as const,
         supplierProductId: s.supplierProductId,
-        keyword: null,
+        keyword,
         score: s.listedCount != null ? String(s.listedCount) : null,
         snapshot: s,
       })),
     )
   }
 
-  if (summaries.length === 0) {
+  if (fetched.length === 0) {
     return { candidates: [], pagesFetched }
   }
 
@@ -137,7 +146,7 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
 
   // Step 3c + candidate shaping.
   const survivors: HarvestCandidate[] = []
-  for (const s of summaries) {
+  for (const { summary: s, keyword } of fetched) {
     if (mappedPids.has(s.supplierProductId)) continue
     if (excludedProposalPids.has(s.supplierProductId)) continue
     if (matchExcludedCategory(s.title, s.categoryName ?? null)) continue
@@ -149,6 +158,7 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
       sellPriceCents: s.sellPriceCents ?? null,
       listedNum: s.listedCount ?? null,
       imageUrl: s.imageUrl ?? null,
+      keyword,
     })
   }
 
