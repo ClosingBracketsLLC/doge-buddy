@@ -9,10 +9,11 @@ import {
   proposalStatus,
   sourcingSignals,
   supplierOrders,
+  supportMessages,
   supportTickets,
   type createDb,
 } from '@doge-buddy/db'
-import { and, asc, desc, eq, lt, ne } from 'drizzle-orm'
+import { and, asc, desc, eq, lt, ne, sql } from 'drizzle-orm'
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { FULFILLMENT_RETRY_OPTS } from '../../fulfillment/run-place-order.ts'
 import { applyTransition, IllegalTransitionError, StaleStatusError } from '../../fulfillment/transitions.ts'
@@ -38,6 +39,13 @@ import { html, layout, raw, type RawHtml } from './html.ts'
 import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
 import { renderProposalDetail, renderProposalRow } from './render-proposal.ts'
 import { renderRunDetail, renderRunRow } from './render-run.ts'
+import {
+  renderTicketDetail,
+  renderTicketsList,
+  TICKET_STATUSES,
+  type LinkedOrderSummary,
+  type TicketListRow,
+} from './render-tickets.ts'
 
 const PROPOSAL_STATUSES = proposalStatus.enumValues
 
@@ -63,6 +71,7 @@ function renderHealthStrip(h: HealthStrip): RawHtml {
     <p>Fulfillment enabled: ${h.fulfillmentEnabled ? 'ON' : 'OFF'}</p>
     <p>Paused for funds: ${h.pausedForFunds ? 'ON' : 'OFF'}</p>
     <p>Pending proposals: ${h.pendingProposals}</p>
+    <p>support poll: last ok ${h.supportPollLastSuccessAt ? h.supportPollLastSuccessAt.toISOString() : 'never'} (${h.supportPollConsecutiveFailures} consecutive failures)</p>
   </section>`
 }
 
@@ -363,36 +372,133 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         })
       })
 
-      // Tickets and runs are Phase 5/6 features (agent-run support workflow, agent execution
-      // history) — this task only wires the pages' read side against the tables schema.ts
-      // already defines, so they render a real table the moment those phases start writing rows,
-      // and a plain "not yet" line until then.
-      authed.get('/admin/tickets', async (_request, reply) => {
-        return safeHandle('tickets', reply, async () => {
-          const rows = await deps.db
-            .select({ id: supportTickets.id, status: supportTickets.status, createdAt: supportTickets.createdAt })
+      // /admin/tickets (spec §4): list (escalated pinned first, then last_inbound_at desc; a
+      // `?status=` filter incl. a `spam` chip mapping to is_spam=true), a thread view, and two
+      // guarded-transition POST actions. `orders` is left-joined for the list's order column so a
+      // ticket with no linked order still renders (its `linkedOrderNumber` comes back null and
+      // render-tickets.ts falls back to the claimed/unverified number, per triage.ts's
+      // ownership-checked linking).
+      authed.get('/admin/tickets', async (request, reply) => {
+        return safeHandle('tickets-list', reply, async () => {
+          const { status } = request.query as { status?: string }
+          const conditions = []
+          if (status === 'spam') {
+            conditions.push(eq(supportTickets.isSpam, true))
+          } else if (status && (TICKET_STATUSES as readonly string[]).includes(status)) {
+            conditions.push(eq(supportTickets.status, status as (typeof TICKET_STATUSES)[number]))
+          }
+
+          const rows: TicketListRow[] = await deps.db
+            .select({
+              id: supportTickets.id,
+              status: supportTickets.status,
+              category: supportTickets.category,
+              sentiment: supportTickets.sentiment,
+              customerEmail: supportTickets.customerEmail,
+              subject: supportTickets.subject,
+              orderId: supportTickets.orderId,
+              linkedOrderNumber: orders.shopifyOrderNumber,
+              claimedOrderNumber: supportTickets.claimedOrderNumber,
+              lastInboundAt: supportTickets.lastInboundAt,
+              createdAt: supportTickets.createdAt,
+            })
             .from(supportTickets)
-            .orderBy(desc(supportTickets.createdAt))
+            .leftJoin(orders, eq(supportTickets.orderId, orders.id))
+            .where(conditions.length > 0 ? and(...conditions) : undefined)
+            .orderBy(
+              sql`case when ${supportTickets.status} = 'escalated' then 0 else 1 end`,
+              desc(supportTickets.lastInboundAt),
+            )
             .limit(100)
 
-          const body =
-            rows.length === 0
-              ? html`<p>No tickets yet — Phase 6.</p>`
-              : html`<table>
-                  <tbody>
-                    ${rows.map(
-                      (t) => html`<tr>
-                        <td>${t.id}</td>
-                        <td>${t.status}</td>
-                        <td>${t.createdAt.toISOString()}</td>
-                      </tr>`,
-                    )}
-                  </tbody>
-                </table>`
-
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Tickets', body))
+          const body = layout('Tickets', renderTicketsList(rows, status))
+          return reply.code(200).type('text/html; charset=utf-8').send(body)
         })
       })
+
+      authed.get('/admin/tickets/:id', async (request, reply) => {
+        const { id } = request.params as { id: string }
+        return safeHandle(id, reply, async () => {
+          const [ticket] = await deps.db.select().from(supportTickets).where(eq(supportTickets.id, id))
+          if (!ticket) {
+            return reply.code(200).type('text/html; charset=utf-8').send(layout('Ticket', html`<p>Not found.</p>`))
+          }
+
+          const messages = await deps.db
+            .select()
+            .from(supportMessages)
+            .where(eq(supportMessages.ticketId, id))
+            .orderBy(asc(supportMessages.sentAt))
+
+          let linkedOrder: LinkedOrderSummary | null = null
+          if (ticket.orderId) {
+            const [orderRow] = await deps.db
+              .select({
+                shopifyOrderGid: orders.shopifyOrderGid,
+                shopifyOrderNumber: orders.shopifyOrderNumber,
+                customerName: orders.customerName,
+                email: orders.email,
+                financialStatus: orders.financialStatus,
+                fulfillmentStatus: orders.fulfillmentStatus,
+                totalCents: orders.totalCents,
+              })
+              .from(orders)
+              .where(eq(orders.id, ticket.orderId))
+            linkedOrder = orderRow ?? null
+          }
+
+          return reply
+            .code(200)
+            .type('text/html; charset=utf-8')
+            .send(layout('Ticket', renderTicketDetail(ticket, messages, linkedOrder)))
+        })
+      })
+
+      // Escalate / Resolve (spec §4): guarded transitions on the form's own `expectedStatus`
+      // field (the status the thread view rendered) — `WHERE id = ? AND status = expectedStatus`
+      // 0-row-matches (no-op) when another writer (triage, a concurrent admin tab) already moved
+      // the ticket off that status, rather than clobbering it. `expectedStatus` is validated
+      // against the real enum BEFORE it reaches the query: an invalid/absent value would
+      // otherwise make Postgres reject the whole UPDATE (invalid input for enum ticket_status)
+      // instead of the intended silent no-op. Every outcome — flipped or stale — redirects back
+      // to the same thread view; an audit row is written only on an actual flip.
+      const TICKET_TRANSITIONS = [
+        { path: 'escalate', to: 'escalated', action: 'support.ticket_escalated' },
+        { path: 'resolve', to: 'resolved', action: 'support.ticket_resolved' },
+      ] as const
+
+      for (const transition of TICKET_TRANSITIONS) {
+        authed.post(`/admin/tickets/:id/${transition.path}`, async (request, reply) => {
+          const { id } = request.params as { id: string }
+          return safeHandle(id, reply, async () => {
+            const { expectedStatus } = (request.body ?? {}) as { expectedStatus?: string }
+
+            if (expectedStatus && (TICKET_STATUSES as readonly string[]).includes(expectedStatus)) {
+              const [updated] = await deps.db
+                .update(supportTickets)
+                .set({ status: transition.to })
+                .where(
+                  and(
+                    eq(supportTickets.id, id),
+                    eq(supportTickets.status, expectedStatus as (typeof TICKET_STATUSES)[number]),
+                  ),
+                )
+                .returning({ id: supportTickets.id })
+
+              if (updated) {
+                await deps.db.insert(auditLog).values({
+                  actor: 'owner',
+                  action: transition.action,
+                  entityType: 'support_ticket',
+                  entityId: id,
+                })
+              }
+            }
+
+            return reply.code(303).header('location', `/admin/tickets/${id}`).send()
+          })
+        })
+      }
 
       authed.get('/admin/runs', async (_request, reply) => {
         return safeHandle('runs', reply, async () => {

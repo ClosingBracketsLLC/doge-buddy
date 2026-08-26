@@ -1,4 +1,4 @@
-import { agentRuns, auditLog, createDb, proposals, settings, supportTickets } from '@doge-buddy/db'
+import { agentRuns, auditLog, createDb, gmailSyncState, proposals, settings, supportTickets } from '@doge-buddy/db'
 import { and, count, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
@@ -57,6 +57,9 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     // Restore the killswitch setting to its code default so later tests (in this file or any
     // other) never observe a row this file left behind.
     await db.delete(settings).where(eq(settings.key, 'killswitch.global'))
+    // gmail_sync_state is a singleton row (id=1) shared with support-poll-gmail.ts's own tests —
+    // clean up whatever this file seeded so no row leaks into another suite's expectations.
+    await db.delete(gmailSyncState).where(eq(gmailSyncState.id, 1))
   })
 
   function makeDeps(overrides: Partial<AdminDeps> = {}): TestDeps {
@@ -255,7 +258,35 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     await app.close()
   })
 
-  it('8. tickets page with no rows shows the Phase 6 empty state', async () => {
+  it('7b. dashboard shows "never" for the support poll line when gmail_sync_state has no row', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('support poll: last ok never (0 consecutive failures)')
+
+    await app.close()
+  })
+
+  it('7c. dashboard shows the real last-success timestamp and failure count once gmail_sync_state is seeded', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+    const lastSuccessAt = new Date('2026-08-20T12:00:00.000Z')
+    await db.insert(gmailSyncState).values({ id: 1, consecutiveFailures: 3, lastSuccessAt })
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain(`support poll: last ok ${lastSuccessAt.toISOString()} (3 consecutive failures)`)
+
+    await app.close()
+  })
+
+  it('8. tickets page with no rows shows the empty state', async () => {
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
     const cookie = await loginAndGetCookie(app, deps)
@@ -263,7 +294,7 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     const res = await app.inject({ method: 'GET', url: '/admin/tickets', headers: { cookie } })
 
     expect(res.statusCode).toBe(200)
-    expect(res.body).toContain('No tickets yet — Phase 6.')
+    expect(res.body).toContain('No tickets.')
 
     await app.close()
   })

@@ -1,6 +1,10 @@
-import { proposals, webhookEvents } from '@doge-buddy/db'
+import { gmailSyncState, proposals, webhookEvents } from '@doge-buddy/db'
 import { count, desc, eq, sql } from 'drizzle-orm'
 import type { AdminDeps } from './routes.ts'
+
+/** The single-row primary key of `gmail_sync_state` (same convention as ingest.ts's and
+ * support-poll-gmail.ts's own local copies of this constant — no shared export exists yet). */
+const GMAIL_SYNC_STATE_ID = 1
 
 export interface HealthStrip {
   /** null => 'n/a' on the page: no getWalletBalance dep wired, or the live call threw. */
@@ -15,6 +19,11 @@ export interface HealthStrip {
   fulfillmentEnabled: boolean
   pausedForFunds: boolean
   pendingProposals: number
+  /** `gmail_sync_state.last_success_at` — null when the poll has never once succeeded (including
+   * when the row doesn't exist yet, e.g. a fresh database before the first poll cycle). */
+  supportPollLastSuccessAt: Date | null
+  /** `gmail_sync_state.consecutive_failures` — 0 when the row doesn't exist yet. */
+  supportPollConsecutiveFailures: number
 }
 
 /**
@@ -53,6 +62,21 @@ async function loadQueueDepth(db: AdminDeps['db']): Promise<number> {
   }
 }
 
+/**
+ * `gmail_sync_state` is a singleton row (id=1) written by support-poll-gmail.ts's `recordSuccess`
+ * / `recordFailure` — before the first poll cycle ever runs (fresh database) the row doesn't
+ * exist at all, so this degrades to `{ null, 0 }` rather than throwing.
+ */
+async function loadSupportPollState(
+  db: AdminDeps['db'],
+): Promise<{ lastSuccessAt: Date | null; consecutiveFailures: number }> {
+  const [row] = await db
+    .select({ lastSuccessAt: gmailSyncState.lastSuccessAt, consecutiveFailures: gmailSyncState.consecutiveFailures })
+    .from(gmailSyncState)
+    .where(eq(gmailSyncState.id, GMAIL_SYNC_STATE_ID))
+  return { lastSuccessAt: row?.lastSuccessAt ?? null, consecutiveFailures: row?.consecutiveFailures ?? 0 }
+}
+
 /** The dashboard's top-of-page health strip: wallet, queue depth, last webhook, the three kill switches, pending proposals. */
 export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
   const [
@@ -64,6 +88,7 @@ export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
     fulfillmentEnabled,
     pausedForFunds,
     pendingRows,
+    supportPollState,
   ] = await Promise.all([
     loadWalletCents(deps),
     deps.settings.get('fulfillment.wallet_alert_threshold_cents'),
@@ -77,6 +102,7 @@ export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
     deps.settings.get('workflow.fulfillment.enabled'),
     deps.settings.get('fulfillment.paused_for_funds'),
     deps.db.select({ value: count() }).from(proposals).where(eq(proposals.status, 'pending')),
+    loadSupportPollState(deps.db),
   ])
 
   return {
@@ -88,5 +114,7 @@ export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
     fulfillmentEnabled,
     pausedForFunds,
     pendingProposals: pendingRows[0]?.value ?? 0,
+    supportPollLastSuccessAt: supportPollState.lastSuccessAt,
+    supportPollConsecutiveFailures: supportPollState.consecutiveFailures,
   }
 }
