@@ -69,8 +69,13 @@ convention) and respects `killswitch.global`.
 2. `listHistory` from stored id, walking pages; collect **messageAdded** ids (ignore label-only
    history). On `HistoryExpiredError` → full resync via `listMessages` (mailbox is tiny) with the
    same upsert path, then re-seed from `getProfile()`.
-3. Per message id → `getMessage` → classify direction: `From` = our own address (or
-   `SENT`-labeled) → `outbound`, else `inbound`.
+3. Per message id → `getMessage` → **support filter first** (§5 alias mode): process the message
+   iff (a) To/Cc/Delivered-To contains `SUPPORT_ADDRESS` (case-insensitive), OR (b) its
+   `threadId` already has a `support_tickets` row — (b) keeps every follow-up on a known ticket
+   (including our own sent replies, and customer replies that dropped the address from headers)
+   regardless of headers. Everything else is skipped untouched. Then classify direction: `From` =
+   our own address (`GMAIL_IMPERSONATE` or `SUPPORT_ADDRESS`, or `SENT`-labeled) → `outbound`,
+   else `inbound`.
 4. Upserts, all idempotent by the existing UNIQUE keys: ticket by `gmail_thread_id` (insert with
    `customer_email`, `subject`, status `new`, `last_inbound_at`; on conflict update
    `last_inbound_at` for inbound), message by `gmail_message_id` ON CONFLICT DO NOTHING
@@ -127,10 +132,25 @@ Same Fastify + `html.ts` patterns as `/admin/orders`:
 
 ## 5. Config & settings
 
+- **Alias mode (owner decision 2026-08-25, supersedes the parent spec's dedicated user):** the
+  Workspace has ONE user, `admin@dogebuddy.com`, with `support@dogebuddy.com` as an alias on it.
+  The pipeline impersonates the PRIMARY user (aliases are not reliable impersonation subjects)
+  and a **`SUPPORT_ADDRESS` filter becomes load-bearing**: only messages whose To/Cc/Delivered-To
+  headers contain `SUPPORT_ADDRESS` (case-insensitive) are ticket-ized; everything else in the
+  mailbox is skipped untouched — no labels, no DB rows, no triage spend, no escalation.
+  Accepted tradeoffs (owner, knowingly): ingest reads header metadata of the whole admin mailbox;
+  an odd delivery path (bare BCC) may miss the match and leave a support mail un-ticketed in the
+  inbox (fails safe). **Escape hatch:** creating a dedicated `support@` user later is a two-var
+  config change (`GMAIL_IMPERSONATE` → the new user; the filter then matches everything anyway) —
+  no code change. **6B note:** replies must send `From: SUPPORT_ADDRESS`; one-time owner check
+  that Gmail "Send mail as" lists the alias.
 - New env (all optional as a group — absent ⇒ ingest skips): `GMAIL_SERVICE_ACCOUNT_EMAIL`,
-  `GMAIL_SERVICE_ACCOUNT_KEY` (PEM, `\n`-escaped like typical SA keys), `GMAIL_IMPERSONATE`
-  (`support@dogebuddy.com`). zod-validated as a trio in `loadConfig` (partial trio = hard config
-  error, not a silent skip).
+  `GMAIL_SERVICE_ACCOUNT_KEY` (PEM, `\n`-escaped like typical SA keys — `loadDotEnv` does NOT
+  unescape, so config parsing must `replace(/\\n/g, '\n')`), `GMAIL_IMPERSONATE`
+  (`admin@dogebuddy.com`), `SUPPORT_ADDRESS` (`support@dogebuddy.com`). zod-validated as a
+  quartet in `loadConfig` (partial group = hard config error, not a silent skip). **Live-verified
+  2026-08-25:** SA JWT → token exchange (DWD accepted) → `getProfile` OK against the real
+  mailbox.
 - `ANTHROPIC_API_KEY` (existing) gates triage the same way.
 - No new settings keys in 6A (`workflow.support_reply.mode` etc. are 6B's); `killswitch.global`
   is honored by the cron.
@@ -172,3 +192,5 @@ Same Fastify + `html.ts` patterns as `/admin/orders`:
 - Sync-state write ordering (upserts commit before historyId advances) makes crash-replay safe
   without transactions spanning API calls.
 - Escalation vocabulary fixed in code; the model can only *suggest* flags from that vocabulary.
+- Alias mode over a dedicated user — owner decision (cost), with the documented tradeoffs,
+  ticket-thread-OR-header filter rule, and two-var escape hatch in §5.
