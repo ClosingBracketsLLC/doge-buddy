@@ -13,6 +13,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.241
         version: 0.3.241(@anthropic-ai/sdk@0.120.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(zod@4.4.3)
+      '@anthropic-ai/sdk':
+        specifier: 0.120.0
+        version: 0.120.0(zod@4.4.3)
       '@doge-buddy/core':
         specifier: workspace:*
         version: link:../../packages/core

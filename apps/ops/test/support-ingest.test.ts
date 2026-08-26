@@ -2,7 +2,13 @@ import { createDb, gmailSyncState, supportMessages, supportTickets } from '@doge
 import { createMockGmail, GmailApiError, MessageGoneError, type MockGmail } from '@doge-buddy/gmail'
 import { asc, eq, inArray, like } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { NEW_LABEL, runIngest, tripwireHit, type IngestDeps } from '../src/support/ingest.ts'
+import {
+  MAX_TICKETS_PER_SENDER_PER_DAY,
+  NEW_LABEL,
+  runIngest,
+  tripwireHit,
+  type IngestDeps,
+} from '../src/support/ingest.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -202,7 +208,10 @@ describe('runIngest', () => {
     const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
     await runIngest(deps)
     const ticket = (await ticketByThread(first.threadId))!
-    await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, ticket.id))
+    await db
+      .update(supportTickets)
+      .set({ status: 'resolved', triageFailureCount: 1 })
+      .where(eq(supportTickets.id, ticket.id))
 
     gmail.receiveInbound({
       from: 'jane@example.com', to: [SUPPORT], subject: 'Re: Hi', bodyText: 'still broken', threadId: first.threadId,
@@ -213,6 +222,8 @@ describe('runIngest', () => {
     expect(reopened.status).toBe('new')
     expect(reopened.lastInboundAt!.getTime()).toBeGreaterThan(ticket.lastInboundAt!.getTime())
     expect(await messagesOfTicket(ticket.id)).toHaveLength(2)
+    // Reopening restarts the triage budget for this ticket (spec §3: reset on success and on reopen).
+    expect(reopened.triageFailureCount).toBe(0)
   })
 
   it('a follow-up on a waiting_on_customer ticket reopens it, but an escalated ticket stays escalated', async () => {
@@ -250,6 +261,51 @@ describe('runIngest', () => {
     await runIngest(deps)
 
     expect((await ticketByThread(first.threadId))!.lastInboundAt).toEqual(future)
+  })
+
+  // Per-sender flood bound (spec §3, last bullet).
+  it('folds a flooding sender`s 6th same-day thread into their newest ticket instead of creating a 6th, with one warning per poll', async () => {
+    await seedSyncState()
+    const flooder = 'flood@example.com'
+    async function ticketsOfFlooder() {
+      return db
+        .select()
+        .from(supportTickets)
+        .where(eq(supportTickets.customerEmail, flooder))
+        .orderBy(asc(supportTickets.createdAt))
+    }
+
+    for (let i = 0; i < MAX_TICKETS_PER_SENDER_PER_DAY; i++) {
+      gmail.receiveInbound({ from: flooder, to: [SUPPORT], subject: `Flood ${i}`, bodyText: `body ${i}` })
+    }
+    await runIngest(deps)
+
+    const seeded = await ticketsOfFlooder()
+    expect(seeded).toHaveLength(MAX_TICKETS_PER_SENDER_PER_DAY)
+    const newest = seeded[seeded.length - 1]!
+    expect(alert).not.toHaveBeenCalled()
+
+    const sixth = gmail.receiveInbound({ from: flooder, to: [SUPPORT], subject: 'Flood 6', bodyText: 'body 6' })
+    const result = await runIngest(deps)
+
+    // The message is still ingested — it just lands on the existing ticket, with no 6th ticket and
+    // no new thread row anywhere.
+    expect(result.insertedMessages).toBe(1)
+    expect(await ticketsOfFlooder()).toHaveLength(MAX_TICKETS_PER_SENDER_PER_DAY)
+    expect(await ticketByThread(sixth.threadId)).toBeUndefined()
+    expect((await messagesOfTicket(newest.id)).map((m) => m.gmailMessageId)).toContain(sixth.id)
+    expect(alert).toHaveBeenCalledTimes(1)
+    expect(alert).toHaveBeenCalledWith('warning', 'support_sender_flood', expect.objectContaining({ customerEmail: flooder }))
+
+    // Two more folds inside ONE poll still page the owner only once (the alert bound is the point).
+    gmail.receiveInbound({ from: flooder, to: [SUPPORT], subject: 'Flood 7', bodyText: 'body 7' })
+    gmail.receiveInbound({ from: flooder, to: [SUPPORT], subject: 'Flood 8', bodyText: 'body 8' })
+    await runIngest(deps)
+
+    expect(await ticketsOfFlooder()).toHaveLength(MAX_TICKETS_PER_SENDER_PER_DAY)
+    // Its own original message plus the 6th, 7th and 8th threads folded onto it.
+    expect(await messagesOfTicket(newest.id)).toHaveLength(4)
+    expect(alert).toHaveBeenCalledTimes(2)
   })
 
   // 5

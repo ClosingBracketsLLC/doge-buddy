@@ -7,10 +7,14 @@ import {
   type HistoryRecord,
   type NormalizedMessage,
 } from '@doge-buddy/gmail'
-import { and, eq, inArray, lt, ne, sql } from 'drizzle-orm'
+import { and, count, desc, eq, gte, inArray, lt, ne, sql } from 'drizzle-orm'
 
 type Db = ReturnType<typeof createDb>['db']
-type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
+export type Alert = (
+  severity: 'info' | 'warning' | 'critical',
+  kind: string,
+  detail: Record<string, unknown>,
+) => Promise<void>
 
 /**
  * The deterministic escalation floor (spec §2.6). A plain case-insensitive substring screen over
@@ -25,6 +29,14 @@ export const TRIPWIRE_KEYWORDS = [
 export const NEW_LABEL = 'DogeBuddy/New'
 /** Applied by triage (spec §3), not here — kept alongside NEW_LABEL so the two label names live together. */
 export const SPAM_LABEL = 'DogeBuddy/Spam'
+
+/**
+ * Per-sender flood bound (spec §3): once one `customer_email` has created this many tickets in a
+ * UTC day, further NEW threads from that sender fold into their newest existing ticket as messages
+ * instead of creating more. An attacker must not be able to starve triage's per-cycle budget or
+ * page the owner's phone at will just by opening threads.
+ */
+export const MAX_TICKETS_PER_SENDER_PER_DAY = 5
 
 /** The single-row primary key of `gmail_sync_state`. */
 const SYNC_STATE_ID = 1
@@ -61,6 +73,9 @@ interface IngestContext {
   labels: LabelCache
   result: IngestResult
   newInboundTicketIds: Set<string>
+  now: () => Date
+  /** Senders already warned about this poll — the flood alert is one per sender per poll, not per message. */
+  floodAlerted: Set<string>
 }
 
 /**
@@ -99,6 +114,8 @@ export async function runIngest(deps: IngestDeps): Promise<IngestResult> {
     labels: createLabelCache(deps.gmail),
     result,
     newInboundTicketIds: new Set(),
+    now,
+    floodAlerted: new Set(),
   }
 
   try {
@@ -257,6 +274,17 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
   // (DMARC is p=none) and are never used for direction.
   const direction = full.labelIds.includes('SENT') ? 'outbound' : 'inbound'
 
+  // Per-sender flood bound: a new thread from a sender who has already opened
+  // MAX_TICKETS_PER_SENDER_PER_DAY tickets today lands on their newest ticket instead of opening
+  // another one. Inbound-only — an outbound-first thread is the owner mailing out, never a flood.
+  let folded = false
+  if (!ticket && direction === 'inbound') {
+    const foldTarget = await findFloodFoldTarget(ctx, full.fromAddr)
+    if (foldTarget) {
+      ticket = foldTarget
+      folded = true
+    }
+  }
   if (!ticket) {
     ticket = await createTicket(ctx.deps.db, full, direction)
   }
@@ -282,6 +310,17 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
 
   ctx.newInboundTicketIds.add(ticket.id)
 
+  // Keyed on the insert like every other side effect, and deduped per sender per poll so a sender
+  // opening 50 threads in one minute pages the owner once, not 50 times.
+  if (folded && full.fromAddr && !ctx.floodAlerted.has(full.fromAddr)) {
+    ctx.floodAlerted.add(full.fromAddr)
+    await ctx.deps.alert('warning', 'support_sender_flood', {
+      customerEmail: full.fromAddr,
+      foldedOntoTicketId: ticket.id,
+      maxPerDay: MAX_TICKETS_PER_SENDER_PER_DAY,
+    })
+  }
+
   // GREATEST, not assignment: history can hand us an older message after a newer one, and the
   // ticket's "latest customer contact" must never move backwards. (GREATEST ignores NULLs.)
   await ctx.deps.db
@@ -293,9 +332,11 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
 
   // Guarded reopen — an `escalated` ticket is the owner's and stays escalated. Runs BEFORE the
   // tripwire so a reopened ticket with escalation-class content still ends up escalated.
+  // The triage failure budget resets with the reopen (spec §3): a new conversation gets its own
+  // two attempts rather than inheriting a stale count from the last one.
   await ctx.deps.db
     .update(supportTickets)
-    .set({ status: 'new' })
+    .set({ status: 'new', triageFailureCount: 0 })
     .where(and(eq(supportTickets.id, ticket.id), inArray(supportTickets.status, ['resolved', 'waiting_on_customer'])))
 
   // Step 6: the code tripwire.
@@ -310,7 +351,7 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
   }
 
   // Step 7.
-  await applyLabel(ctx, full.id, NEW_LABEL)
+  await applyLabel(ctx.deps.gmail, ctx.labels, ctx.deps.alert, full.id, NEW_LABEL)
 }
 
 /** A 404 here is routine (deleted drafts and mail) — skip the message, never fail the poll. */
@@ -333,6 +374,32 @@ async function findTicketByThread(db: Db, threadId: string): Promise<{ id: strin
     .from(supportTickets)
     .where(eq(supportTickets.gmailThreadId, threadId))
   return row
+}
+
+/**
+ * The flood bound's lookup (spec §3): null means "create the ticket normally". Non-null is the
+ * sender's NEWEST ticket, which this message joins instead of opening yet another one — the
+ * message itself is never dropped, so the tripwire, the reopen, and the label all still run on it.
+ */
+async function findFloodFoldTarget(ctx: IngestContext, customerEmail: string | null): Promise<{ id: string } | null> {
+  if (!customerEmail) return null
+
+  const now = ctx.now()
+  const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  const [today] = await ctx.deps.db
+    .select({ value: count() })
+    .from(supportTickets)
+    .where(and(eq(supportTickets.customerEmail, customerEmail), gte(supportTickets.createdAt, midnight)))
+
+  if ((today?.value ?? 0) < MAX_TICKETS_PER_SENDER_PER_DAY) return null
+
+  const [newest] = await ctx.deps.db
+    .select({ id: supportTickets.id })
+    .from(supportTickets)
+    .where(eq(supportTickets.customerEmail, customerEmail))
+    .orderBy(desc(supportTickets.createdAt))
+    .limit(1)
+  return newest ?? null
 }
 
 /**
@@ -364,12 +431,13 @@ async function createTicket(
   return existing
 }
 
-interface LabelCache {
+export interface LabelCache {
   resolve(name: string): Promise<string>
   invalidate(): void
 }
 
-function createLabelCache(gmail: GmailClient): LabelCache {
+/** Shared with triage (spec §3's `DogeBuddy/Spam`), so both label writers use one id cache shape. */
+export function createLabelCache(gmail: GmailClient): LabelCache {
   let byName: Map<string, string> | null = null
 
   async function list(): Promise<Map<string, string>> {
@@ -404,24 +472,30 @@ function createLabelCache(gmail: GmailClient): LabelCache {
 /**
  * Label failures are warning alerts, never job failures (spec §2.7). A 400/404 from `modifyMessage`
  * means the cached label id is stale (the owner deleted/recreated the label): invalidate and retry
- * exactly once.
+ * exactly once. Exported because triage applies `DogeBuddy/Spam` under exactly these rules.
  */
-async function applyLabel(ctx: IngestContext, messageId: string, name: string): Promise<void> {
+export async function applyLabel(
+  gmail: GmailClient,
+  labels: LabelCache,
+  alert: Alert,
+  messageId: string,
+  name: string,
+): Promise<void> {
   try {
-    await ctx.deps.gmail.modifyMessage(messageId, { addLabelIds: [await ctx.labels.resolve(name)] })
+    await gmail.modifyMessage(messageId, { addLabelIds: [await labels.resolve(name)] })
     return
   } catch (err) {
     if (!isStaleLabelError(err)) {
-      await warnLabelFailure(ctx, messageId, name, err)
+      await warnLabelFailure(alert, messageId, name, err)
       return
     }
-    ctx.labels.invalidate()
+    labels.invalidate()
   }
 
   try {
-    await ctx.deps.gmail.modifyMessage(messageId, { addLabelIds: [await ctx.labels.resolve(name)] })
+    await gmail.modifyMessage(messageId, { addLabelIds: [await labels.resolve(name)] })
   } catch (err) {
-    await warnLabelFailure(ctx, messageId, name, err)
+    await warnLabelFailure(alert, messageId, name, err)
   }
 }
 
@@ -429,8 +503,8 @@ function isStaleLabelError(err: unknown): boolean {
   return err instanceof GmailApiError && (err.status === 400 || err.status === 404)
 }
 
-async function warnLabelFailure(ctx: IngestContext, messageId: string, name: string, err: unknown): Promise<void> {
-  await ctx.deps.alert('warning', 'support_label_failed', {
+async function warnLabelFailure(alert: Alert, messageId: string, name: string, err: unknown): Promise<void> {
+  await alert('warning', 'support_label_failed', {
     messageId,
     label: name,
     error: err instanceof Error ? err.message : String(err),
