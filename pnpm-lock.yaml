@@ -19,6 +19,9 @@ importers:
       '@doge-buddy/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@doge-buddy/gmail':
+        specifier: workspace:*
+        version: link:../../packages/gmail
       '@doge-buddy/shopify-admin':
         specifier: workspace:*
         version: link:../../packages/shopify-admin
