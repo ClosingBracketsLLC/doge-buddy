@@ -12,11 +12,20 @@ export interface BuildReplyRawInput {
 }
 
 /**
+ * Sanitizes a header field value by removing/collapsing line breaks.
+ * Strips \r and \n characters (header injection prevention).
+ */
+function sanitizeHeaderField(value: string): string {
+  // Replace all CR and LF with spaces
+  return value.replace(/[\r\n]/g, ' ')
+}
+
+/**
  * Encodes a string as RFC 2047 (MIME encoded-word) if it contains non-ASCII characters.
  * Otherwise returns the string as-is.
  */
 function encodeSubjectIfNeeded(subject: string): string {
-  // Check if subject contains only ASCII characters
+  // Check if subject contains only ASCII characters (after sanitization)
   const isAscii = /^[\x00-\x7F]*$/.test(subject)
   if (isAscii) {
     return subject
@@ -41,21 +50,29 @@ function addRePrefix(subject: string): string {
 /**
  * Builds a base64url-encoded RFC 2822 message for replying.
  * Headers use CRLF line endings; body preserves caller's line endings.
+ * All header fields are sanitized to prevent header injection.
  */
 export function buildReplyRaw(input: BuildReplyRawInput): string {
   const { from, to, subject, inReplyTo, references, bodyText } = input
 
+  // Sanitize all header fields to prevent injection (strip CR/LF)
+  const cleanFrom = sanitizeHeaderField(from)
+  const cleanTo = sanitizeHeaderField(to)
+  const cleanInReplyTo = sanitizeHeaderField(inReplyTo)
+  const cleanReferences = sanitizeHeaderField(references)
+  let cleanSubject = sanitizeHeaderField(subject)
+
   // Process subject: add Re: prefix if needed, then RFC 2047 encode if non-ASCII
-  const prefixedSubject = addRePrefix(subject)
+  const prefixedSubject = addRePrefix(cleanSubject)
   const encodedSubject = encodeSubjectIfNeeded(prefixedSubject)
 
   // Build headers with CRLF line endings
   const headers = [
-    `From: ${from}`,
-    `To: ${to}`,
+    `From: ${cleanFrom}`,
+    `To: ${cleanTo}`,
     `Subject: ${encodedSubject}`,
-    `In-Reply-To: ${inReplyTo}`,
-    `References: ${references}`,
+    `In-Reply-To: ${cleanInReplyTo}`,
+    `References: ${cleanReferences}`,
     'Content-Type: text/plain; charset="UTF-8"',
   ].join('\r\n')
 

@@ -119,4 +119,74 @@ describe('buildReplyRaw', () => {
     // Decoding should not throw
     expect(() => Buffer.from(raw, 'base64url').toString()).not.toThrow()
   })
+
+  it('sanitizes header injection: strips CRLF from subject, inReplyTo, references, to, from', () => {
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com',
+      to: 'jane@example.com',
+      subject: 'Foo\r\nBcc: evil@x.com',
+      inReplyTo: '<abc@mail.example.com>\r\nBcc: evil2@x.com',
+      references: '<root@x> <abc@mail.example.com>\r\nBcc: evil3@x.com',
+      bodyText: 'test',
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+
+    // Should NOT contain any separate Bcc: header line (header injection prevented)
+    const parts = text.split('\r\n\r\n')
+    const headerLines = parts[0] ?? ''
+    const bccHeaderLines = headerLines.split('\r\n').filter((line) => line.startsWith('Bcc:'))
+    expect(bccHeaderLines).toHaveLength(0)
+
+    // Verify exactly one of each header (no duplication from injection)
+    const subjectLines = text.split('\r\n').filter((line) => line.startsWith('Subject:'))
+    expect(subjectLines).toHaveLength(1)
+    const inReplyToLines = text.split('\r\n').filter((line) => line.startsWith('In-Reply-To:'))
+    expect(inReplyToLines).toHaveLength(1)
+    const refLines = text.split('\r\n').filter((line) => line.startsWith('References:'))
+    expect(refLines).toHaveLength(1)
+  })
+
+  it('sanitizes LF-only line breaks in header fields', () => {
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com',
+      to: 'jane@example.com',
+      subject: 'Test\nInjection',
+      inReplyTo: '<abc@mail.example.com>\nBcc: evil@x.com',
+      references: '<root@x>\nBcc: evil@x.com',
+      bodyText: 'test',
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+
+    // Should NOT contain separate Bcc: header line (injection prevented)
+    const parts = text.split('\r\n\r\n')
+    const headerLines = parts[0] ?? ''
+    const bccHeaderLines = headerLines.split('\r\n').filter((line) => line.startsWith('Bcc:'))
+    expect(bccHeaderLines).toHaveLength(0)
+
+    const subjectLines = text.split('\r\n').filter((line) => line.startsWith('Subject:'))
+    expect(subjectLines).toHaveLength(1)
+  })
+
+  it('sanitizes to and from fields for header injection', () => {
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com\r\nBcc: evil@x.com',
+      to: 'jane@example.com\r\nBcc: evil@x.com',
+      subject: 'Test',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'test',
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+
+    // Should NOT contain separate Bcc: header line
+    const parts = text.split('\r\n\r\n')
+    const headerLines = parts[0] ?? ''
+    const bccHeaderLines = headerLines.split('\r\n').filter((line) => line.startsWith('Bcc:'))
+    expect(bccHeaderLines).toHaveLength(0)
+
+    const fromLines = text.split('\r\n').filter((line) => line.startsWith('From:'))
+    expect(fromLines).toHaveLength(1)
+    const toLines = text.split('\r\n').filter((line) => line.startsWith('To:'))
+    expect(toLines).toHaveLength(1)
+  })
 })

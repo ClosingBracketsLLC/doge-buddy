@@ -15,7 +15,7 @@ const METADATA_HEADERS = ['From', 'To', 'Cc', 'Delivered-To', 'Subject', 'Messag
 
 export interface CreateGmailClientOptions {
   auth: GmailAuth
-  /** Stamped as From on sendReply (Task 4); stored-but-unused here. */
+  /** Stamped as From on sendReply — required for all replies. */
   fromAddress: string
   fetchFn?: typeof fetch
 }
@@ -118,7 +118,6 @@ function normalizeMessage(raw: RawGmailMessage, format: 'metadata' | 'full'): No
 
 export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
   const { auth, fromAddress, fetchFn = globalThis.fetch } = opts
-  void fromAddress // consumed by sendReply starting Task 4
 
   /**
    * Single HTTP entry point implementing the full error taxonomy:
