@@ -1,4 +1,5 @@
 import { createDb } from '@doge-buddy/db'
+import { createGmailAuth, createGmailClient } from '@doge-buddy/gmail'
 import {
   findProductByHandle,
   fulfillmentCreate,
@@ -26,6 +27,7 @@ import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { sourcingWeeklyHandler } from './jobs/sourcing-weekly.ts'
+import { supportPollGmailHandler, SUPPORT_POLL_QUEUE, type SupportPollDeps } from './jobs/support-poll-gmail.ts'
 import { loadDotEnv } from './load-env.ts'
 import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
 import { createTelegramNotifier } from './notify/telegram.ts'
@@ -36,6 +38,7 @@ import { createSettings } from './settings.ts'
 import type { SourcingPipelineDeps } from './sourcing/pipeline.ts'
 import { createSerpApiTrends } from './sourcing/trends.ts'
 import { DrizzleCjTokenStore } from './stores/cj-token-store.ts'
+import { createAnthropicTriageCall } from './support/triage.ts'
 
 loadDotEnv(import.meta.url)
 
@@ -153,6 +156,11 @@ if (config.anthropic) app.log.info('sourcing agent: ANTHROPIC_API_KEY configured
 else app.log.warn('sourcing agent DISABLED: ANTHROPIC_API_KEY not set — sourcing.weekly cron will not register')
 if (config.serpapi) app.log.info('sourcing agent: SERPAPI_KEY configured (trends stage armed)')
 else app.log.warn('sourcing trends stage disabled: SERPAPI_KEY not set — runs proceed without google_trends signals')
+
+if (config.gmail) app.log.info('support: Gmail service-account configured (ingest armed)')
+else app.log.warn('support poll DISABLED: Gmail env not set — support.poll-gmail cron registers but no-ops (one info alert at boot)')
+if (config.anthropic) app.log.info('support: ANTHROPIC_API_KEY configured (triage armed)')
+else app.log.warn('support triage DISABLED: ANTHROPIC_API_KEY not set — poll ingests/escalates but skips triage (one info alert at boot)')
 
 alertImpl = createAlerter(db, app.log)
 
@@ -276,6 +284,47 @@ if (config.anthropic) {
   })
   app.log.info('sourcing.weekly cron ARMED — Mondays 13:00 UTC, sonnet-5, $2.00 stop-loss')
 }
+
+// `support.poll-gmail` (Phase 6A, Task 12): the minute-cadence Gmail poll — ingest → triage →
+// escalate. Registered UNCONDITIONALLY (unlike `sourcing.weekly` above, which needs
+// `ANTHROPIC_API_KEY` just to register at all) — this cron's own handler is what degrades
+// gracefully when `config.gmail`/`config.anthropic` are absent (a once-per-boot info alert and a
+// no-op return, per its own doc comment), so there is nothing unsafe about it running at all times
+// even in a dev boot with no Gmail creds. `policy: 'singleton'` + `singletonKey` (spec §2 header)
+// are load-bearing: pg-boss hard-floors cron schedules at one fire/minute, and a plain 'standard'
+// queue has no overlap protection at all — without singleton dedup, a slow poll could still be
+// running when the next minute's schedule fires a second one on top of it. `expireInSeconds: 120`
+// (well under pg-boss's 15-minute default) + `retryLimit: 0` (the cadence itself IS the retry —
+// see the handler's own doc comment) bound how long a Railway hard-kill mid-poll can black out
+// ingest.
+const gmailClient = config.gmail
+  ? createGmailClient({
+      auth: createGmailAuth({
+        saEmail: config.gmail.saEmail,
+        saKey: config.gmail.saKey,
+        impersonate: config.gmail.impersonate,
+      }),
+      fromAddress: config.gmail.supportAddress,
+    })
+  : null
+const triageCall = config.anthropic ? createAnthropicTriageCall({ apiKey: config.anthropic.apiKey }) : null
+const supportPollDeps: SupportPollDeps = {
+  db,
+  gmail: gmailClient,
+  supportAddress: config.gmail?.supportAddress ?? '',
+  settings,
+  alert,
+  notify,
+  adminBaseUrl: config.adminBaseUrl!,
+  triageCall,
+}
+await registerCron(queue.boss, SUPPORT_POLL_QUEUE, '* * * * *', supportPollGmailHandler(supportPollDeps), {
+  policy: 'singleton',
+  singletonKey: SUPPORT_POLL_QUEUE,
+  expireInSeconds: 120,
+  retryLimit: 0,
+})
+app.log.info(`${SUPPORT_POLL_QUEUE} cron ARMED — every minute, singleton`)
 
 await app.listen({ port: config.port, host: config.host })
 app.log.info(`ops listening on :${config.port}`)
