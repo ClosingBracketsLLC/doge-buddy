@@ -151,6 +151,21 @@ describe('notifyPendingEscalations', () => {
     expect(await db.select().from(auditLog).where(eq(auditLog.action, CAPPED_ACTION))).toHaveLength(1)
   })
 
+  // (d cont'd) — review fix: a rejecting alert() during the cap-warning path must not escape.
+  it('daily cap: an alert() that rejects during the cap warning still lets notifyPendingEscalations resolve normally', async () => {
+    await seedTicket({ subject: 'Capped out, alert throws' })
+    await seedAuditRows(NOTIFIED_ACTION, ESCALATION_NOTIFY_MAX_PER_DAY, FIXED_NOW)
+    const deps = makeDeps({
+      alert: vi.fn(async () => {
+        throw new Error('telegram alert boom')
+      }),
+    })
+
+    await expect(notifyPendingEscalations(deps)).resolves.toEqual({ notified: 0 })
+    expect(deps.notify).not.toHaveBeenCalled()
+    expect(await db.select().from(auditLog).where(eq(auditLog.action, CAPPED_ACTION))).toHaveLength(1)
+  })
+
   // (e)
   it('respects the UTC day boundary: batches audited yesterday 23:59 UTC do not count toward today', async () => {
     const id = await seedTicket({ subject: 'Fresh day' })

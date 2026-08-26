@@ -66,10 +66,12 @@ export async function notifyPendingEscalations(deps: EscalateDeps): Promise<{ no
         action: CAPPED_ACTION,
         detail: { max: ESCALATION_NOTIFY_MAX_PER_DAY, pendingCount: pending.length },
       })
-      await deps.alert('warning', 'support_escalation_capped', {
-        max: ESCALATION_NOTIFY_MAX_PER_DAY,
-        pendingCount: pending.length,
-      })
+      await deps
+        .alert('warning', 'support_escalation_capped', {
+          max: ESCALATION_NOTIFY_MAX_PER_DAY,
+          pendingCount: pending.length,
+        })
+        .catch(() => {})
     }
     return { notified: 0 }
   }
