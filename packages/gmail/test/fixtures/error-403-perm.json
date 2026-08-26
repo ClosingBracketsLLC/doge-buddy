@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/msg-perm-1",
+    "query": { "format": "full" }
+  },
+  "response": {
+    "status": 403,
+    "body": {
+      "error": {
+        "code": 403,
+        "message": "Mail service not enabled for this user.",
+        "errors": [
+          {
+            "domain": "global",
+            "reason": "forbidden",
+            "message": "Mail service not enabled for this user."
+          }
+        ],
+        "status": "PERMISSION_DENIED"
+      }
+    }
+  }
+}

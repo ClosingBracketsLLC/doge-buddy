@@ -1,0 +1,28 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/history",
+    "query": { "startHistoryId": "3000", "pageToken": "page-2-token" }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "history": [
+        {
+          "id": "3040",
+          "messages": [{ "id": "msg-203", "threadId": "thread-102" }],
+          "messagesAdded": [
+            {
+              "message": {
+                "id": "msg-203",
+                "threadId": "thread-102",
+                "labelIds": ["INBOX"]
+              }
+            }
+          ]
+        }
+      ],
+      "historyId": "3040"
+    }
+  }
+}

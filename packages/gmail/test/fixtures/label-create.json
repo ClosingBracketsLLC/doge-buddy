@@ -1,0 +1,16 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/gmail/v1/users/me/labels"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "Label_2",
+      "name": "DogeBuddy/Spam",
+      "type": "user",
+      "labelListVisibility": "labelShow",
+      "messageListVisibility": "show"
+    }
+  }
+}

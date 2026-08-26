@@ -1,0 +1,89 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/msg-nested-1",
+    "query": { "format": "full" }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "msg-nested-1",
+      "threadId": "thread-100",
+      "labelIds": ["INBOX", "UNREAD", "CATEGORY_PERSONAL"],
+      "snippet": "Hi DogeBuddy team, My order #4521 hasn't shipped yet...",
+      "internalDate": "1756148400000",
+      "sizeEstimate": 15000,
+      "historyId": "3050",
+      "payload": {
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          { "name": "Delivered-To", "value": "jane@example.com" },
+          { "name": "Delivered-To", "value": "support@dogebuddy.com" },
+          { "name": "Received", "value": "by 2002:a17:90a:1234::1 with SMTP id abc" },
+          { "name": "From", "value": "\"Jane D\" <Jane@Example.com>" },
+          { "name": "To", "value": "DogeBuddy Support <support@dogebuddy.com>" },
+          { "name": "Cc", "value": "manager@example.com, \"Ops Team\" <ops@example.com>" },
+          { "name": "Subject", "value": "Re: Order #4521 hasn't shipped" },
+          { "name": "Message-ID", "value": "<CAJ+abc123@mail.gmail.com>" },
+          { "name": "In-Reply-To", "value": "<original-msg-999@mail.gmail.com>" },
+          { "name": "References", "value": "<original-msg-999@mail.gmail.com>" },
+          { "name": "Date", "value": "Mon, 25 Aug 2026 14:00:00 -0400" },
+          { "name": "MIME-Version", "value": "1.0" },
+          { "name": "Content-Type", "value": "multipart/mixed; boundary=\"mixed-boundary-1\"" }
+        ],
+        "body": { "size": 0 },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "multipart/alternative",
+            "filename": "",
+            "headers": [
+              { "name": "Content-Type", "value": "multipart/alternative; boundary=\"alt-boundary-1\"" }
+            ],
+            "body": { "size": 0 },
+            "parts": [
+              {
+                "partId": "0.0",
+                "mimeType": "text/plain",
+                "filename": "",
+                "headers": [
+                  { "name": "Content-Type", "value": "text/plain; charset=\"UTF-8\"" }
+                ],
+                "body": {
+                  "size": 110,
+                  "data": "SGkgRG9nZUJ1ZGR5IHRlYW0sCgpNeSBvcmRlciAjNDUyMSBoYXNuJ3Qgc2hpcHBlZCB5ZXQgYW5kIGl0J3MgYmVlbiA5IGRheXMuIENhbiB5b3UgY2hlY2sgb24gaXQ_CgpUaGFua3MsCkphbmU"
+                }
+              },
+              {
+                "partId": "0.1",
+                "mimeType": "text/html",
+                "filename": "",
+                "headers": [
+                  { "name": "Content-Type", "value": "text/html; charset=\"UTF-8\"" }
+                ],
+                "body": {
+                  "size": 182,
+                  "data": "PGh0bWw-PGJvZHk-PHN0eWxlPnAgeyBjb2xvcjogcmVkOyB9PC9zdHlsZT48cD5IaSBEb2dlQnVkZHkgdGVhbSw8L3A-PHA-TXkgb3JkZXIgPGI-IzQ1MjE8L2I-IGhhc24mIzM5O3Qgc2hpcHBlZCB5ZXQgJmFtcDsgaXQgaGFzIGJlZW4gOSBkYXlzLjwvcD48cD5UaGFua3MsPGJyPkphbmU8L3A-PC9ib2R5PjwvaHRtbD4"
+                }
+              }
+            ]
+          },
+          {
+            "partId": "1",
+            "mimeType": "application/pdf",
+            "filename": "receipt.pdf",
+            "headers": [
+              { "name": "Content-Type", "value": "application/pdf; name=\"receipt.pdf\"" },
+              { "name": "Content-Disposition", "value": "attachment; filename=\"receipt.pdf\"" }
+            ],
+            "body": {
+              "attachmentId": "ANGjdJ_fakeAttachmentId1234567890",
+              "size": 24576
+            }
+          }
+        ]
+      }
+    }
+  }
+}

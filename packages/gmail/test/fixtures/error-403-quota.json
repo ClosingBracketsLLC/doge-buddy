@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/msg-quota-1",
+    "query": { "format": "full" }
+  },
+  "response": {
+    "status": 403,
+    "body": {
+      "error": {
+        "code": 403,
+        "message": "User-rate limit exceeded. Retry after some time.",
+        "errors": [
+          {
+            "domain": "usageLimits",
+            "reason": "rateLimitExceeded",
+            "message": "User-rate limit exceeded. Retry after some time."
+          }
+        ],
+        "status": "PERMISSION_DENIED"
+      }
+    }
+  }
+}
