@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createMockGmail } from '../src/mock.ts'
-import { HistoryExpiredError, MessageGoneError } from '../src/errors.ts'
+import { GmailApiError, HistoryExpiredError, MessageGoneError, isMessageGone } from '../src/errors.ts'
 
 const SELF = 'support@dogebuddy.com'
 
@@ -90,6 +90,42 @@ describe('createMockGmail', () => {
     expect(sentMsg.labelIds).toEqual(['SENT'])
     expect(sentMsg.threadId).toBe(threadId)
     expect(sentMsg.bodyText).toBe('ready to send')
+  })
+
+  it('sendDraft: throws MessageGoneError when there is no live draft for the thread', () => {
+    const gmail = createMockGmail({ selfAddress: SELF })
+
+    // a thread that never had a draft at all
+    expect(() => gmail.sendDraft('thread-never-drafted')).toThrow(MessageGoneError)
+
+    // a thread whose draft was already sent — the second sendDraft races against the first
+    const threadId = 'thread-send-twice'
+    gmail.saveDraft({ threadId, bodyText: 'ready' })
+    gmail.sendDraft(threadId)
+    expect(() => gmail.sendDraft(threadId)).toThrow(MessageGoneError)
+  })
+
+  it('modifyMessage: a missing/gone id throws plain GmailApiError(404), NOT MessageGoneError', async () => {
+    const gmail = createMockGmail({ selfAddress: SELF })
+    const threadId = 'thread-modify-404'
+    const draft1 = gmail.saveDraft({ threadId, bodyText: 'first' })
+    gmail.saveDraft({ threadId, bodyText: 'second' }) // churn — draft1.id is now gone
+
+    let caught: unknown
+    try {
+      await gmail.modifyMessage(draft1.id, { addLabelIds: ['FOO'] })
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(GmailApiError)
+    expect((caught as GmailApiError).status).toBe(404)
+    expect(isMessageGone(caught)).toBe(false)
+
+    // never-existed id behaves the same way
+    await expect(gmail.modifyMessage('mock-msg-does-not-exist', { addLabelIds: ['FOO'] })).rejects.toMatchObject({
+      name: 'GmailApiError',
+      status: 404,
+    })
   })
 
   it('expireHistory: the next listHistory call throws HistoryExpiredError, then behavior returns to normal', async () => {

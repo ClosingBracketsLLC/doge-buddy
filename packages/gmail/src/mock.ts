@@ -1,5 +1,5 @@
 import type { GmailClient, HistoryRecord, NormalizedMessage } from './types.ts'
-import { HistoryExpiredError, MessageGoneError } from './errors.ts'
+import { GmailApiError, HistoryExpiredError, MessageGoneError } from './errors.ts'
 import { parseAddrSpecs, parseFirstAddrSpec } from './address.ts'
 
 export interface MockGmailOptions {
@@ -176,9 +176,19 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
     }
   }
 
+  /** getMessage's 404 shape: the real client maps getMessage's 404 specifically to MessageGoneError. */
   function requireLiveMessage(id: string): StoredMessage {
     const msg = messages.get(id)
     if (!msg || msg.gone) throw new MessageGoneError()
+    return msg
+  }
+
+  /** modifyMessage's 404 shape: the real client's request() only special-cases 404 for the
+   * listHistory and getMessage endpoints — every other endpoint (including messages.modify) falls
+   * through to a plain GmailApiError. Mirrored here for fidelity rather than reusing MessageGoneError. */
+  function requireMessageForModify(id: string): StoredMessage {
+    const msg = messages.get(id)
+    if (!msg || msg.gone) throw new GmailApiError('Requested entity was not found.', 404, 'notFound')
     return msg
   }
 
@@ -239,7 +249,7 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
 
     async modifyMessage(id, mods) {
       maybeThrowPending('modifyMessage')
-      const msg = requireLiveMessage(id)
+      const msg = requireMessageForModify(id)
       const toRemove = new Set(mods.removeLabelIds ?? [])
       const next = new Set(msg.labelIds.filter((l) => !toRemove.has(l)))
       for (const l of mods.addLabelIds ?? []) next.add(l)
@@ -298,6 +308,11 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
 
     sendDraft(threadId) {
       const draftIds = draftsByThread.get(threadId) ?? []
+      // No live draft to send — either this thread never had one, or a concurrent sendDraft
+      // already consumed it (draft-churn race). Every other operate-on-missing-state path in
+      // this mock fails loudly; sendDraft must not silently send a null-body message.
+      if (draftIds.length === 0) throw new MessageGoneError()
+
       let bodyText: string | null = null
       for (const draftId of draftIds) {
         const draft = messages.get(draftId)
