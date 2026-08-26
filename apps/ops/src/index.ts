@@ -293,10 +293,19 @@ if (config.anthropic) {
 // even in a dev boot with no Gmail creds. `policy: 'singleton'` + `singletonKey` (spec §2 header)
 // are load-bearing: pg-boss hard-floors cron schedules at one fire/minute, and a plain 'standard'
 // queue has no overlap protection at all — without singleton dedup, a slow poll could still be
-// running when the next minute's schedule fires a second one on top of it. `expireInSeconds: 120`
-// (well under pg-boss's 15-minute default) + `retryLimit: 0` (the cadence itself IS the retry —
-// see the handler's own doc comment) bound how long a Railway hard-kill mid-poll can black out
-// ingest.
+// running when the next minute's schedule fires a second one on top of it. That overlap protection
+// is a CHECK-then-ACT (pg-boss checks no job with this singletonKey is already active, then
+// inserts) — it assumes nothing OTHER than this one singleton queue can start a second concurrent
+// poll; it is not a general mutex.
+//
+// `expireInSeconds: 300` (IMPORTANT 4c — was 120, too tight against the pipeline's own worst-case
+// latency): every Gmail call now carries its own 20s timeout with one retry (packages/gmail's
+// `client.ts`, ~40s worst case per call across a resync's several calls) and `runTriage`'s own
+// TRIAGE_CYCLE_DEADLINE_MS caps the triage stage at 60s — 300s keeps a wide margin over the
+// pipeline's own worst-case rather than the two racing on the same order of magnitude, while
+// staying well under pg-boss's 15-minute default. `retryLimit: 0` (the cadence itself IS the
+// retry — see the handler's own doc comment) bounds how long a Railway hard-kill mid-poll can
+// black out ingest to this same window.
 const gmailClient = config.gmail
   ? createGmailClient({
       auth: createGmailAuth({
@@ -321,7 +330,7 @@ const supportPollDeps: SupportPollDeps = {
 await registerCron(queue.boss, SUPPORT_POLL_QUEUE, '* * * * *', supportPollGmailHandler(supportPollDeps), {
   policy: 'singleton',
   singletonKey: SUPPORT_POLL_QUEUE,
-  expireInSeconds: 120,
+  expireInSeconds: 300,
   retryLimit: 0,
 })
 app.log.info(`${SUPPORT_POLL_QUEUE} cron ARMED — every minute, singleton`)

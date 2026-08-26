@@ -10,6 +10,12 @@ export const TRIAGE_MODEL = 'claude-haiku-4-5'
 export const TRIAGE_MAX_CALLS_PER_DAY = 200
 export const TRIAGE_MAX_PER_CYCLE = 20
 export const TRIAGE_TIMEOUT_MS = 30_000
+/** IMPORTANT 4b: a wall-clock budget for the whole per-cycle loop, independent of the 20-ticket
+ * cap — TRIAGE_MAX_PER_CYCLE bounds ticket COUNT, not TIME, and a run of slow (not timed-out)
+ * calls could still eat well past what the poll's own expiry (client.ts §4a, index.ts's queue
+ * `expireInSeconds`) budgets for it. Once elapsed exceeds this, the loop stops; whatever tickets
+ * weren't reached stay `new`/`triaged` and are simply selectable again on the next cycle. */
+export const TRIAGE_CYCLE_DEADLINE_MS = 60_000
 
 /** Escalate once a ticket has burned this many failed/timed-out/unparseable attempts (spec §3). */
 const TRIAGE_FAILURE_ESCALATE_AT = 2
@@ -94,6 +100,7 @@ function utcMidnight(now: Date): Date {
  */
 export async function runTriage(deps: TriageDeps): Promise<{ triaged: number; escalatedTicketIds: string[] }> {
   const now = deps.now ?? (() => new Date())
+  const cycleStart = now()
   const escalatedTicketIds: string[] = []
   let triaged = 0
 
@@ -132,6 +139,11 @@ export async function runTriage(deps: TriageDeps): Promise<{ triaged: number; es
   const labels = createLabelCache(deps.gmail)
 
   for (const ticket of selected) {
+    // IMPORTANT 4b: a wall-clock deadline, independent of the ticket-count cap above — a run of
+    // slow (not individually timed-out) calls could otherwise still eat well past the poll's own
+    // budget. Whatever's left simply stays selectable next cycle, same as hitting the daily cap.
+    if (now().getTime() - cycleStart.getTime() > TRIAGE_CYCLE_DEADLINE_MS) break
+
     if (callsToday >= TRIAGE_MAX_CALLS_PER_DAY) {
       // At cap the remaining tickets simply stay selectable for the next UTC day. The §2.6 ingest
       // tripwire keeps escalation-class mail alerting meanwhile — that is why capping is safe.

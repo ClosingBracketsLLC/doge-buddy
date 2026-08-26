@@ -68,6 +68,12 @@ export async function notifyPendingEscalations(deps: EscalateDeps): Promise<{ no
 
   if (pending.length === 0) return { notified: 0 }
 
+  // IMPORTANT 4c note: this cap is a plain check-then-act (count audit rows, decide, act) — it is
+  // NOT safe against two concurrent callers both reading the same under-cap count and both
+  // proceeding. It is only correct because `support.poll-gmail`'s `policy: 'singleton'` queue
+  // (index.ts) guarantees at most one poll — and therefore at most one call into this function —
+  // runs at a time. If notifyPendingEscalations ever gets a second caller outside that queue, this
+  // guard needs a real lock (e.g. the pg_advisory_xact_lock pattern in agents/lifecycle.ts).
   const [notifiedRow] = await deps.db
     .select({ value: count() })
     .from(auditLog)

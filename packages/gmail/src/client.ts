@@ -65,6 +65,15 @@ function jitterDelayMs(): number {
   return 200 + Math.random() * 400
 }
 
+/** IMPORTANT 4a: every request gets its own hard timeout, well under the poll's own 5-minute
+ * queue expiry (client.ts's own §2.9-adjacent concern) — a hung Gmail call must not be able to
+ * keep a poll (and the singleton queue lock protecting it) alive indefinitely. */
+const REQUEST_TIMEOUT_MS = 20_000
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError'
+}
+
 async function safeJson(res: Response): Promise<unknown> {
   try {
     const text = await res.text()
@@ -150,9 +159,27 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
           ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       }
 
-      const res = await fetchFn(url, init)
+      let res: Response
+      try {
+        res = await fetchFn(url, init)
+      } catch (err) {
+        // A timed-out fetch throws rather than resolving with a Response — treat it like a 5xx:
+        // one jittered retry (sharing the same retry budget as the 5xx path — no more attempts
+        // than a garden-variety server error gets), then throw as a GmailApiError so callers don't
+        // need to special-case a raw DOMException on top of the existing error taxonomy.
+        if (isAbortError(err) && !attemptedServerRetry) {
+          attemptedServerRetry = true
+          await sleep(jitterDelayMs())
+          continue
+        }
+        if (isAbortError(err)) {
+          throw new GmailApiError('Gmail API request timed out', 0, 'timeout')
+        }
+        throw err
+      }
 
       if (res.ok) {
         if (res.status === 204) return undefined

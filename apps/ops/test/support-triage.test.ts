@@ -6,6 +6,7 @@ import {
   createAnthropicTriageCall,
   normalizeOrderNumber,
   runTriage,
+  TRIAGE_CYCLE_DEADLINE_MS,
   TRIAGE_MAX_CALLS_PER_DAY,
   TRIAGE_MODEL,
   type TriageCall,
@@ -343,6 +344,48 @@ describe('runTriage', () => {
     expect(again.triaged).toBe(0)
     expect(alert).toHaveBeenCalledTimes(1)
     expect(await auditRows(TRIAGE_CAPPED_ACTION)).toHaveLength(1)
+  })
+
+  // IMPORTANT 4b regression: a poll must not be able to run indefinitely if the model is slow —
+  // that erodes the margin `expireInSeconds` gives the queue's overlap protection. The deadline is
+  // measured off the injectable `now` seam (not real wall-clock), so the stubbed model call itself
+  // advances a shared mutable clock to simulate one ticket's processing alone eating the budget.
+  it('IMPORTANT 4b: a wall-clock deadline stops the per-cycle loop, leaving remaining tickets selectable next cycle', async () => {
+    // Distinct customer emails — seeding three tickets under the SAME default customerEmail would
+    // trip the unrelated repeat-complainant rule (≥3 non-spam tickets/customer) and escalate them,
+    // muddying this test's own assertion about what status a plain triage lands on.
+    const first = await seedTicket({
+      subject: 'First',
+      customerEmail: 'deadline-a@example.com',
+      lastInboundAt: new Date('2024-06-15T09:00:00.000Z'),
+    })
+    const second = await seedTicket({
+      subject: 'Second',
+      customerEmail: 'deadline-b@example.com',
+      lastInboundAt: new Date('2024-06-15T09:01:00.000Z'),
+    })
+    const third = await seedTicket({
+      subject: 'Third',
+      customerEmail: 'deadline-c@example.com',
+      lastInboundAt: new Date('2024-06-15T09:02:00.000Z'),
+    })
+
+    let clock = FIXED_NOW.getTime()
+    const now = () => new Date(clock)
+    const call = vi.fn<TriageCall>(async () => {
+      // Simulate this one call alone taking longer than the whole cycle's deadline.
+      clock += TRIAGE_CYCLE_DEADLINE_MS + 1_000
+      return verdict()
+    })
+
+    const result = await runTriage(makeDeps(call, { now }))
+
+    expect(result.triaged).toBe(1)
+    expect(call).toHaveBeenCalledTimes(1)
+    expect((await ticketById(first))!.status).toBe('triaged')
+    // Never even attempted — still `new`, so next cycle's selection picks them back up.
+    expect((await ticketById(second))!.status).toBe('new')
+    expect((await ticketById(third))!.status).toBe('new')
   })
 
   it('yesterday`s calls do not count toward today`s cap', async () => {

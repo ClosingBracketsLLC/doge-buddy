@@ -312,6 +312,28 @@ describe('createGmailClient', () => {
     expect(calls).toBe(2)
   })
 
+  it('IMPORTANT 4a: every request carries a 20s AbortSignal so a poll can never hang forever', async () => {
+    const fetchFn = vi.fn(fixtureFetch({ profile: profileFixture }))
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await client.getProfile()
+
+    const init = fetchFn.mock.calls[0]![1] as RequestInit
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('IMPORTANT 4a: a fetch that times out (AbortError) retries once after a jittered delay, then throws GmailApiError', async () => {
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      calls++
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }) as unknown as typeof fetch
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await expect(client.getProfile()).rejects.toMatchObject({ name: 'GmailApiError' })
+    expect(calls).toBe(2)
+  })
+
   it('401: invalidates the cached token, refetches it, and retries the request exactly once', async () => {
     let tokenCalls = 0
     const getAccessToken = vi.fn(async () => (tokenCalls++ === 0 ? 'stale-token' : 'fresh-token'))
