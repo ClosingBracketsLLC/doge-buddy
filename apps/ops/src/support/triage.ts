@@ -217,6 +217,10 @@ async function recordFailure(deps: TriageDeps, ticket: SelectedTicket): Promise<
       status: 'escalated',
       escalationReason: 'triage_failed_twice',
       triageFailureCount: failures,
+      // CRITICAL 1: this UPDATE transitions the ticket INTO 'escalated' — clear the stamp so a
+      // ticket that was escalated+notified before, then resolved, then re-escalated by two more
+      // failed triage attempts is still selectable by notifyPendingEscalations.
+      escalationNotifiedAt: null,
     })
     .where(and(eq(supportTickets.id, ticket.id), eq(supportTickets.status, ticket.status)))
     .returning({ id: supportTickets.id })
@@ -273,6 +277,12 @@ async function applyVerdict(
       escalationReason,
       lastTriagedAt: now(),
       triageFailureCount: 0,
+      // CRITICAL 1: this write transitions the ticket INTO 'escalated' when `status ===
+      // 'escalated'` — clear the stamp so a re-escalation (e.g. a repeat complainant flagged again
+      // after being resolved) is still selectable by notifyPendingEscalations. `ticket.status` is
+      // guaranteed 'new'/'triaged' going in (already-escalated tickets are excluded from
+      // selection), so this is a genuine new-into-escalated transition whenever it applies.
+      ...(status === 'escalated' ? { escalationNotifiedAt: null } : {}),
       // Only a verdict that actually claims a number touches the link: a follow-up that simply
       // doesn't repeat the order number must not unlink an order verified on an earlier pass.
       ...(link ?? {}),

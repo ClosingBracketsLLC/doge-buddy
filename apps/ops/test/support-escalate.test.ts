@@ -166,6 +166,31 @@ describe('notifyPendingEscalations', () => {
     expect(await db.select().from(auditLog).where(eq(auditLog.action, CAPPED_ACTION))).toHaveLength(1)
   })
 
+  // IMPORTANT 2 regression: the collapsed body must be bounded, not one line per pending ticket
+  // unboundedly (>4096 chars => Telegram 400 => notify false => the same oversized batch retried
+  // forever). The cap bounds the BODY only — every pending ticket still gets stamped on success.
+  it('caps the collapsed body at 10 listed tickets ("...and N more") and ~3500 chars, but stamps ALL pending on success', async () => {
+    const ids: string[] = []
+    for (let i = 0; i < 15; i++) {
+      ids.push(await seedTicket({ subject: `Ticket ${i} subject` }))
+    }
+    const deps = makeDeps()
+
+    const result = await notifyPendingEscalations(deps)
+
+    expect(result.notified).toBe(15)
+    expect(deps.notify).toHaveBeenCalledTimes(1)
+    const call = (deps.notify as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { body: string }
+    expect(call.body.length).toBeLessThan(3500)
+    for (let i = 0; i < 10; i++) expect(call.body).toContain(`Ticket ${i} subject`)
+    for (let i = 10; i < 15; i++) expect(call.body).not.toContain(`Ticket ${i} subject`)
+    expect(call.body).toContain('and 5 more')
+
+    for (const id of ids) {
+      expect((await ticketById(id))?.escalationNotifiedAt).toEqual(FIXED_NOW)
+    }
+  })
+
   // (e)
   it('respects the UTC day boundary: batches audited yesterday 23:59 UTC do not count toward today', async () => {
     const id = await seedTicket({ subject: 'Fresh day' })

@@ -1,4 +1,4 @@
-import { createDb, gmailSyncState, supportMessages, supportTickets } from '@doge-buddy/db'
+import { auditLog, createDb, gmailSyncState, supportMessages, supportTickets } from '@doge-buddy/db'
 import { createMockGmail, GmailApiError, MessageGoneError, type MockGmail } from '@doge-buddy/gmail'
 import { asc, eq, inArray, like } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,6 +9,7 @@ import {
   tripwireHit,
   type IngestDeps,
 } from '../src/support/ingest.ts'
+import { notifyPendingEscalations } from '../src/support/escalate.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -718,6 +719,75 @@ describe('runIngest', () => {
     expect(alert.mock.calls[0]![0]).toBe('warning')
     expect(alert.mock.calls[0]![1]).toBe('support_resync_thread_failed')
     expect(alert.mock.calls[0]![2]).toMatchObject({ threadIds: [first.threadId] })
+  })
+
+  // CRITICAL 1 regression: escalate -> notify stamps `escalation_notified_at` -> owner resolves
+  // (the admin Resolve/Escalate handlers never touch that column) -> customer replies with a new
+  // chargeback -> the tripwire re-escalates. Without clearing the stamp on every transition INTO
+  // 'escalated', the re-escalated ticket is permanently invisible to notifyPendingEscalations'
+  // `escalation_notified_at IS NULL` selection, and the owner is never paged for the reopened case.
+  it('re-escalation re-notify cycle: stamp clears on re-escalation so a second notify fires', async () => {
+    // This test calls notifyPendingEscalations directly, which (unlike everything else in this
+    // file) writes `support.escalation_notified` audit rows — a table this file's afterEach never
+    // sweeps. Snapshot so cleanup at the end removes only the rows this test creates.
+    const notifiedBefore = await db
+      .select({ id: auditLog.id })
+      .from(auditLog)
+      .where(eq(auditLog.action, 'support.escalation_notified'))
+
+    try {
+      await seedSyncState()
+      const first = gmail.receiveInbound({
+        from: 'jane@example.com',
+        to: [SUPPORT],
+        subject: 'Order 1001',
+        bodyText: 'If I do not hear back I will file a chargeback with my bank.',
+      })
+      await runIngest(deps)
+
+      const ticket = (await ticketByThread(first.threadId))!
+      expect(ticket.status).toBe('escalated')
+      expect(ticket.escalationNotifiedAt).toBeNull()
+
+      const notify = vi.fn(async () => true)
+      const escalateDeps = { db, notify, alert, adminBaseUrl: 'http://admin.test' }
+
+      const firstNotify = await notifyPendingEscalations(escalateDeps)
+      expect(firstNotify.notified).toBe(1)
+      expect(notify).toHaveBeenCalledTimes(1)
+      expect((await ticketByThread(first.threadId))!.escalationNotifiedAt).not.toBeNull()
+
+      // Owner resolves it from /admin — the guarded transition never clears escalation_notified_at
+      // (an owner-initiated Escalate/Resolve must not page the owner's own phone).
+      await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, ticket.id))
+
+      // Customer replies with a fresh chargeback threat on the same thread.
+      gmail.receiveInbound({
+        from: 'jane@example.com',
+        to: [SUPPORT],
+        subject: 'Re: Order 1001',
+        bodyText: 'Filing the chargeback today, this is final.',
+        threadId: first.threadId,
+      })
+      await runIngest(deps)
+
+      const reEscalated = (await ticketByThread(first.threadId))!
+      expect(reEscalated.status).toBe('escalated')
+      // The bug: without clearing the stamp on the re-escalation write, this stays non-null forever.
+      expect(reEscalated.escalationNotifiedAt).toBeNull()
+
+      const secondNotify = await notifyPendingEscalations(escalateDeps)
+      expect(secondNotify.notified).toBe(1)
+      expect(notify).toHaveBeenCalledTimes(2)
+      expect((await ticketByThread(first.threadId))!.escalationNotifiedAt).not.toBeNull()
+    } finally {
+      const notifiedAfter = await db
+        .select({ id: auditLog.id })
+        .from(auditLog)
+        .where(eq(auditLog.action, 'support.escalation_notified'))
+      const newIds = notifiedAfter.map((r) => r.id).filter((id) => !notifiedBefore.some((b) => b.id === id))
+      if (newIds.length > 0) await db.delete(auditLog).where(inArray(auditLog.id, newIds))
+    }
   })
 })
 

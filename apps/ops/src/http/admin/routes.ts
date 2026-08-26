@@ -470,6 +470,9 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       // otherwise make Postgres reject the whole UPDATE (invalid input for enum ticket_status)
       // instead of the intended silent no-op. Every outcome — flipped or stale — redirects back
       // to the same thread view; an audit row is written only on an actual flip.
+      // The 'escalate' transition deliberately does NOT touch escalation_notified_at (unlike the
+      // ingest tripwire and triage's own escalate writes) — the owner's own click here shouldn't
+      // page their own phone.
       const TICKET_TRANSITIONS = [
         { path: 'escalate', to: 'escalated', action: 'support.ticket_escalated' },
         { path: 'resolve', to: 'resolved', action: 'support.ticket_resolved' },

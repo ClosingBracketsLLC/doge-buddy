@@ -1,6 +1,6 @@
-import { createDb, gmailSyncState } from '@doge-buddy/db'
+import { auditLog, createDb, gmailSyncState, supportMessages, supportTickets } from '@doge-buddy/db'
 import { createMockGmail } from '@doge-buddy/gmail'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   executeSupportPoll,
@@ -350,5 +350,99 @@ describe('supportPollGmailHandler', () => {
     ])
 
     expect(ingestFn).toHaveBeenCalledTimes(2)
+  })
+
+  // CRITICAL 1 INTEGRATED regression: every other test in this file stubs ingestFn/triageFn/
+  // escalateFn, which is exactly the structural blind spot that hid the re-escalation-never-
+  // re-notified bug — none of those tests ever let a real escalated ticket flow from ingest into
+  // escalate. This one wires the REAL runIngest + REAL notifyPendingEscalations (only the
+  // injectable TriageCall model seam is stubbed) through the actual cron handler, against a
+  // MockGmail mailbox, end to end.
+  it('INTEGRATED: a ticket that re-escalates after being resolved gets re-notified end to end', async () => {
+    const gmail = createMockGmail()
+    const notify = vi.fn(async () => true)
+    const triageCall = vi.fn(async () => ({
+      category: 'other' as const,
+      order_number: null,
+      sentiment: 'neutral' as const,
+      is_spam: false,
+      escalation_flags: [],
+    }))
+    const deps: SupportPollDeps = {
+      db,
+      gmail,
+      supportAddress: 'support@dogebuddy.com',
+      settings,
+      alert: vi.fn(async () => {}),
+      notify,
+      adminBaseUrl: 'https://admin.example.com',
+      triageCall,
+      // ingestFn/triageFn/escalateFn intentionally omitted: this test relies on the REAL pipeline.
+    }
+    const job = (id: string) => [{ id, name: SUPPORT_POLL_QUEUE, data: {}, expireInSeconds: 120 }]
+
+    // Snapshot so cleanup below removes only the rows THIS test creates, not another file's
+    // (support-escalate.test.ts owns the same audit action and cleans up its own rows, but files
+    // run serially — this just avoids any ordering assumption).
+    const notifiedBefore = await db
+      .select({ id: auditLog.id })
+      .from(auditLog)
+      .where(eq(auditLog.action, 'support.escalation_notified'))
+
+    let threadId: string | undefined
+    try {
+      // Poll #1: seed-on-null (no mail yet).
+      await supportPollGmailHandler(deps)(job('job-1'))
+
+      const sent = gmail.receiveInbound({
+        from: 'jane@example.com',
+        to: ['support@dogebuddy.com'],
+        subject: 'Order 1001',
+        bodyText: 'If I do not hear back I will file a chargeback with my bank.',
+      })
+      threadId = sent.threadId
+
+      // Poll #2: ingest tripwires the ticket to escalated; escalate notifies in the same cycle.
+      await supportPollGmailHandler(deps)(job('job-2'))
+
+      const [ticket] = await db.select().from(supportTickets).where(eq(supportTickets.gmailThreadId, sent.threadId))
+      expect(ticket?.status).toBe('escalated')
+      expect(notify).toHaveBeenCalledTimes(1)
+
+      // Owner resolves from /admin (does not clear escalation_notified_at).
+      await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, ticket!.id))
+
+      // Customer replies with a fresh chargeback.
+      gmail.receiveInbound({
+        from: 'jane@example.com',
+        to: ['support@dogebuddy.com'],
+        subject: 'Re: Order 1001',
+        bodyText: 'Filing the chargeback today, this is final.',
+        threadId: sent.threadId,
+      })
+
+      // Poll #3: reopen -> re-tripwire -> escalate must notify AGAIN.
+      await supportPollGmailHandler(deps)(job('job-3'))
+
+      const [reEscalated] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket!.id))
+      expect(reEscalated?.status).toBe('escalated')
+      expect(notify).toHaveBeenCalledTimes(2)
+    } finally {
+      // try/finally so a genuine assertion failure here still can't leak a ticket or an audit row
+      // into whatever test file runs next.
+      if (threadId) {
+        const [ticket] = await db.select({ id: supportTickets.id }).from(supportTickets).where(eq(supportTickets.gmailThreadId, threadId))
+        if (ticket) {
+          await db.delete(supportMessages).where(eq(supportMessages.ticketId, ticket.id))
+          await db.delete(supportTickets).where(eq(supportTickets.id, ticket.id))
+        }
+      }
+      const notifiedAfter = await db
+        .select({ id: auditLog.id })
+        .from(auditLog)
+        .where(eq(auditLog.action, 'support.escalation_notified'))
+      const newIds = notifiedAfter.map((r) => r.id).filter((id) => !notifiedBefore.some((b) => b.id === id))
+      if (newIds.length > 0) await db.delete(auditLog).where(inArray(auditLog.id, newIds))
+    }
   })
 })

@@ -9,6 +9,27 @@ type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: R
  * one summary warning instead of paging the owner further. */
 export const ESCALATION_NOTIFY_MAX_PER_DAY = 10
 
+/** IMPORTANT 2: the collapsed Telegram body must be bounded — one line per pending ticket with no
+ * cap can blow past Telegram's ~4096-char message limit, which fails the send, leaves the whole
+ * batch unstamped, and gets retried (and re-fail) every single minute forever. Cap the LISTED
+ * tickets, not the ones actually stamped: every pending ticket is still stamped on a successful
+ * notify (see below), this only bounds what's rendered into the message text. */
+const MAX_LISTED_TICKETS_IN_BODY = 10
+/** Hard backstop under Telegram's ~4096-char limit, in case even 10 lines run long (very long
+ * subjects). */
+const BODY_MAX_CHARS = 3500
+
+function buildBody(pending: { id: string; subject: string | null }[], adminBaseUrl: string): string {
+  const listed = pending.slice(0, MAX_LISTED_TICKETS_IN_BODY)
+  const lines = listed.map((t) => `${t.subject ?? '(no subject)'} — ${adminBaseUrl}/admin/tickets/${t.id}`)
+
+  const overflow = pending.length - listed.length
+  if (overflow > 0) lines.push(`…and ${overflow} more`)
+
+  const body = lines.join('\n')
+  return body.length > BODY_MAX_CHARS ? body.slice(0, BODY_MAX_CHARS) : body
+}
+
 const NOTIFIED_ACTION = 'support.escalation_notified'
 const CAPPED_ACTION = 'support.escalation_capped'
 
@@ -76,7 +97,7 @@ export async function notifyPendingEscalations(deps: EscalateDeps): Promise<{ no
     return { notified: 0 }
   }
 
-  const body = pending.map((t) => `${t.subject ?? '(no subject)'} — ${deps.adminBaseUrl}/admin/tickets/${t.id}`).join('\n')
+  const body = buildBody(pending, deps.adminBaseUrl)
   const ok = await deps.notify({
     title: `${pending.length} ticket${pending.length === 1 ? '' : 's'} escalated`,
     body,

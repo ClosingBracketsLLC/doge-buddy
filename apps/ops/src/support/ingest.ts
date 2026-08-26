@@ -342,9 +342,14 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
   // Step 6: the code tripwire.
   const keyword = tripwireHit(full.subject, full.bodyText)
   if (keyword) {
+    // CRITICAL 1: every UPDATE that transitions a ticket INTO 'escalated' must clear
+    // escalation_notified_at, or a ticket that was already escalated+notified once, then resolved,
+    // then re-escalated by a fresh tripwire hit stays permanently invisible to
+    // notifyPendingEscalations' `escalation_notified_at IS NULL` selection — the owner is never
+    // paged for the reopened case. The admin Escalate POST is the one exception (routes.ts).
     const escalated = await ctx.deps.db
       .update(supportTickets)
-      .set({ status: 'escalated', escalationReason: `tripwire: ${keyword}` })
+      .set({ status: 'escalated', escalationReason: `tripwire: ${keyword}`, escalationNotifiedAt: null })
       .where(and(eq(supportTickets.id, ticket.id), ne(supportTickets.status, 'escalated')))
       .returning({ id: supportTickets.id })
     if (escalated.length > 0) ctx.result.tripwiredTicketIds.push(ticket.id)
