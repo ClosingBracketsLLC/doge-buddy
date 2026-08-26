@@ -16,4 +16,7 @@ describe('parseAddrSpecs', () => {
     expect(parseFirstAddrSpec('Bob <b@y.com>')).toBe('b@y.com')
     expect(parseFirstAddrSpec('')).toBeNull()
   })
+  it('extracts the LAST angle bracket group when multiple are present', () => {
+    expect(parseAddrSpecs('Name <spoof@evil.com> <real@good.com>')).toEqual(['real@good.com'])
+  })
 })

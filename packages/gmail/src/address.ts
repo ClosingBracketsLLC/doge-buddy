@@ -14,10 +14,10 @@ export function parseAddrSpecs(header: string | null | undefined): string[] {
   for (const mailbox of mailboxes) {
     let addr = mailbox.trim()
 
-    // Step 3: Extract from angle brackets if present, otherwise use bare token
-    const angleMatch = addr.match(/<([^>]+)>/)
-    if (angleMatch && angleMatch[1]) {
-      addr = angleMatch[1]
+    // Step 3: Extract from the LAST angle bracket group if present, otherwise use bare token
+    const angleMatches = [...addr.matchAll(/<([^>]+)>/g)]
+    if (angleMatches.length > 0) {
+      addr = angleMatches[angleMatches.length - 1]![1]!
     }
 
     // Step 4: Lowercase the address
