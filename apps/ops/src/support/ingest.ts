@@ -10,6 +10,11 @@ import {
 import { and, count, desc, eq, gte, inArray, lt, ne, sql } from 'drizzle-orm'
 
 type Db = ReturnType<typeof createDb>['db']
+/** The type of the callback's `tx` parameter inside `db.transaction(async (tx) => {...})` — the
+ * helpers below (`findTicketByThread`, `createTicket`, `findFloodFoldTarget`) run under either a
+ * plain `Db` (nothing to be atomic with) or this transaction-scoped handle (IMPORTANT 3). */
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
+type DbOrTx = Db | Tx
 export type Alert = (
   severity: 'info' | 'warning' | 'critical',
   kind: string,
@@ -250,6 +255,18 @@ async function runResync(ctx: IngestContext, now: () => Date): Promise<void> {
     .where(and(eq(gmailSyncState.id, SYNC_STATE_ID), lt(gmailSyncState.lastHistoryId, preCapturedHistoryId)))
 }
 
+/** What one message's transaction actually committed — enough for the caller to fire the
+ * (necessarily post-commit) external calls and update in-memory bookkeeping accordingly. */
+interface MessageOutcome {
+  ticketId: string
+  inserted: boolean
+  direction: 'inbound' | 'outbound'
+  /** True iff this message folded onto an existing ticket under the flood bound. */
+  folded: boolean
+  /** The tripwire keyword that actually flipped the ticket to escalated this call, or null. */
+  tripwireKeyword: string | null
+}
+
 /**
  * Steps 3–7 for a single message id. Idempotent and side-effect-safe on re-seen messages, so the
  * resync path can reuse it verbatim.
@@ -264,8 +281,8 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
   if (meta.labelIds.includes('DRAFT') || meta.labelIds.includes('TRASH')) return
 
   const addressed = [...meta.to, ...meta.cc, ...meta.deliveredTo].includes(ctx.supportAddress)
-  let ticket = await findTicketByThread(ctx.deps.db, meta.threadId)
-  if (!addressed && !ticket) return
+  const existingTicket = await findTicketByThread(ctx.deps.db, meta.threadId)
+  if (!addressed && !existingTicket) return
 
   const full = await getMessageOrSkip(ctx, messageId, 'full')
   if (!full) return
@@ -274,86 +291,117 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
   // (DMARC is p=none) and are never used for direction.
   const direction = full.labelIds.includes('SENT') ? 'outbound' : 'inbound'
 
-  // Per-sender flood bound: a new thread from a sender who has already opened
-  // MAX_TICKETS_PER_SENDER_PER_DAY tickets today lands on their newest ticket instead of opening
-  // another one. Inbound-only — an outbound-first thread is the owner mailing out, never a flood.
-  let folded = false
-  if (!ticket && direction === 'inbound') {
-    const foldTarget = await findFloodFoldTarget(ctx, full.fromAddr)
-    if (foldTarget) {
-      ticket = foldTarget
-      folded = true
+  // IMPORTANT 3: everything from here through the tripwire write is a DB side effect that must be
+  // atomic with the message insert — a crash between the insert and the tripwire update used to
+  // lose the escalation permanently (the insert gate makes a replay see the message as already
+  // seen, so the tripwire that would have caught it on that same message never runs again). One
+  // transaction makes "the message exists" and "the ticket reflects it" a single fact.
+  //
+  // The flood alert and applyLabel are deliberately NOT in here even though the spec's fix
+  // description lists "flood handling" alongside the DB writes: both are external network calls
+  // (a Telegram alert, a Gmail API call), and holding a Postgres transaction open across either
+  // one is exactly the kind of thing this fix exists to avoid doing more of — a slow/hung external
+  // call would hold the transaction (and whatever it's touched) open for no reason. They run after
+  // commit instead, gated on what the transaction actually committed.
+  const outcome = await ctx.deps.db.transaction(async (tx) => {
+    let ticket = existingTicket
+    let folded = false
+
+    // Per-sender flood bound: a new thread from a sender who has already opened
+    // MAX_TICKETS_PER_SENDER_PER_DAY tickets today lands on their newest ticket instead of
+    // opening another one. Inbound-only — an outbound-first thread is the owner mailing out.
+    if (!ticket && direction === 'inbound') {
+      const foldTarget = await findFloodFoldTarget(tx, ctx.now(), full.fromAddr)
+      if (foldTarget) {
+        ticket = foldTarget
+        folded = true
+      }
     }
-  }
-  if (!ticket) {
-    ticket = await createTicket(ctx.deps.db, full, direction)
-  }
+    if (!ticket) {
+      ticket = await createTicket(tx, full, direction)
+    }
 
-  // Step 5: the insert IS the side-effect gate. No row returned = seen before = do nothing.
-  const [inserted] = await ctx.deps.db
-    .insert(supportMessages)
-    .values({
+    // Step 5: the insert IS the side-effect gate. No row returned = seen before = do nothing.
+    const [inserted] = await tx
+      .insert(supportMessages)
+      .values({
+        ticketId: ticket.id,
+        gmailMessageId: full.id,
+        direction,
+        fromEmail: full.fromAddr,
+        bodyText: full.bodyText,
+        rfcMessageId: full.rfcMessageId,
+        sentAt: full.internalDate,
+      })
+      .onConflictDoNothing({ target: supportMessages.gmailMessageId })
+      .returning({ id: supportMessages.id })
+
+    if (!inserted) return { ticketId: ticket.id, inserted: false, direction, folded, tripwireKeyword: null }
+    if (direction === 'outbound') return { ticketId: ticket.id, inserted: true, direction, folded, tripwireKeyword: null }
+
+    // GREATEST, not assignment: history can hand us an older message after a newer one, and the
+    // ticket's "latest customer contact" must never move backwards. (GREATEST ignores NULLs.)
+    await tx
+      .update(supportTickets)
+      .set({
+        lastInboundAt: sql`greatest(${supportTickets.lastInboundAt}, ${full.internalDate.toISOString()}::timestamptz)`,
+      })
+      .where(eq(supportTickets.id, ticket.id))
+
+    // Guarded reopen — an `escalated` ticket is the owner's and stays escalated. Runs BEFORE the
+    // tripwire so a reopened ticket with escalation-class content still ends up escalated.
+    // The triage failure budget resets with the reopen (spec §3): a new conversation gets its own
+    // two attempts rather than inheriting a stale count from the last one.
+    await tx
+      .update(supportTickets)
+      .set({ status: 'new', triageFailureCount: 0 })
+      .where(and(eq(supportTickets.id, ticket.id), inArray(supportTickets.status, ['resolved', 'waiting_on_customer'])))
+
+    // Step 6: the code tripwire.
+    const keyword = tripwireHit(full.subject, full.bodyText)
+    let tripwireFlipped = false
+    if (keyword) {
+      // CRITICAL 1: every UPDATE that transitions a ticket INTO 'escalated' must clear
+      // escalation_notified_at, or a ticket that was already escalated+notified once, then
+      // resolved, then re-escalated by a fresh tripwire hit stays permanently invisible to
+      // notifyPendingEscalations' `escalation_notified_at IS NULL` selection — the owner is never
+      // paged for the reopened case. The admin Escalate POST is the one exception (routes.ts).
+      const escalated = await tx
+        .update(supportTickets)
+        .set({ status: 'escalated', escalationReason: `tripwire: ${keyword}`, escalationNotifiedAt: null })
+        .where(and(eq(supportTickets.id, ticket.id), ne(supportTickets.status, 'escalated')))
+        .returning({ id: supportTickets.id })
+      tripwireFlipped = escalated.length > 0
+    }
+
+    const outcome: MessageOutcome = {
       ticketId: ticket.id,
-      gmailMessageId: full.id,
+      inserted: true,
       direction,
-      fromEmail: full.fromAddr,
-      bodyText: full.bodyText,
-      rfcMessageId: full.rfcMessageId,
-      sentAt: full.internalDate,
-    })
-    .onConflictDoNothing({ target: supportMessages.gmailMessageId })
-    .returning({ id: supportMessages.id })
+      folded,
+      tripwireKeyword: tripwireFlipped ? keyword : null,
+    }
+    return outcome
+  })
 
-  if (!inserted) return
+  if (!outcome.inserted) return
   ctx.result.insertedMessages += 1
-  if (direction === 'outbound') return
+  if (outcome.direction === 'outbound') return
 
-  ctx.newInboundTicketIds.add(ticket.id)
+  ctx.newInboundTicketIds.add(outcome.ticketId)
 
   // Keyed on the insert like every other side effect, and deduped per sender per poll so a sender
   // opening 50 threads in one minute pages the owner once, not 50 times.
-  if (folded && full.fromAddr && !ctx.floodAlerted.has(full.fromAddr)) {
+  if (outcome.folded && full.fromAddr && !ctx.floodAlerted.has(full.fromAddr)) {
     ctx.floodAlerted.add(full.fromAddr)
     await ctx.deps.alert('warning', 'support_sender_flood', {
       customerEmail: full.fromAddr,
-      foldedOntoTicketId: ticket.id,
+      foldedOntoTicketId: outcome.ticketId,
       maxPerDay: MAX_TICKETS_PER_SENDER_PER_DAY,
     })
   }
 
-  // GREATEST, not assignment: history can hand us an older message after a newer one, and the
-  // ticket's "latest customer contact" must never move backwards. (GREATEST ignores NULLs.)
-  await ctx.deps.db
-    .update(supportTickets)
-    .set({
-      lastInboundAt: sql`greatest(${supportTickets.lastInboundAt}, ${full.internalDate.toISOString()}::timestamptz)`,
-    })
-    .where(eq(supportTickets.id, ticket.id))
-
-  // Guarded reopen — an `escalated` ticket is the owner's and stays escalated. Runs BEFORE the
-  // tripwire so a reopened ticket with escalation-class content still ends up escalated.
-  // The triage failure budget resets with the reopen (spec §3): a new conversation gets its own
-  // two attempts rather than inheriting a stale count from the last one.
-  await ctx.deps.db
-    .update(supportTickets)
-    .set({ status: 'new', triageFailureCount: 0 })
-    .where(and(eq(supportTickets.id, ticket.id), inArray(supportTickets.status, ['resolved', 'waiting_on_customer'])))
-
-  // Step 6: the code tripwire.
-  const keyword = tripwireHit(full.subject, full.bodyText)
-  if (keyword) {
-    // CRITICAL 1: every UPDATE that transitions a ticket INTO 'escalated' must clear
-    // escalation_notified_at, or a ticket that was already escalated+notified once, then resolved,
-    // then re-escalated by a fresh tripwire hit stays permanently invisible to
-    // notifyPendingEscalations' `escalation_notified_at IS NULL` selection — the owner is never
-    // paged for the reopened case. The admin Escalate POST is the one exception (routes.ts).
-    const escalated = await ctx.deps.db
-      .update(supportTickets)
-      .set({ status: 'escalated', escalationReason: `tripwire: ${keyword}`, escalationNotifiedAt: null })
-      .where(and(eq(supportTickets.id, ticket.id), ne(supportTickets.status, 'escalated')))
-      .returning({ id: supportTickets.id })
-    if (escalated.length > 0) ctx.result.tripwiredTicketIds.push(ticket.id)
-  }
+  if (outcome.tripwireKeyword) ctx.result.tripwiredTicketIds.push(outcome.ticketId)
 
   // Step 7.
   await applyLabel(ctx.deps.gmail, ctx.labels, ctx.deps.alert, full.id, NEW_LABEL)
@@ -373,7 +421,7 @@ async function getMessageOrSkip(
   }
 }
 
-async function findTicketByThread(db: Db, threadId: string): Promise<{ id: string } | undefined> {
+async function findTicketByThread(db: DbOrTx, threadId: string): Promise<{ id: string } | undefined> {
   const [row] = await db
     .select({ id: supportTickets.id })
     .from(supportTickets)
@@ -385,20 +433,21 @@ async function findTicketByThread(db: Db, threadId: string): Promise<{ id: strin
  * The flood bound's lookup (spec §3): null means "create the ticket normally". Non-null is the
  * sender's NEWEST ticket, which this message joins instead of opening yet another one — the
  * message itself is never dropped, so the tripwire, the reopen, and the label all still run on it.
+ * Runs inside `ingestMessageId`'s transaction (IMPORTANT 3), so it takes `tx` and the already-read
+ * `now` directly rather than pulling them off `ctx`.
  */
-async function findFloodFoldTarget(ctx: IngestContext, customerEmail: string | null): Promise<{ id: string } | null> {
+async function findFloodFoldTarget(tx: Tx, now: Date, customerEmail: string | null): Promise<{ id: string } | null> {
   if (!customerEmail) return null
 
-  const now = ctx.now()
   const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-  const [today] = await ctx.deps.db
+  const [today] = await tx
     .select({ value: count() })
     .from(supportTickets)
     .where(and(eq(supportTickets.customerEmail, customerEmail), gte(supportTickets.createdAt, midnight)))
 
   if ((today?.value ?? 0) < MAX_TICKETS_PER_SENDER_PER_DAY) return null
 
-  const [newest] = await ctx.deps.db
+  const [newest] = await tx
     .select({ id: supportTickets.id })
     .from(supportTickets)
     .where(eq(supportTickets.customerEmail, customerEmail))
@@ -413,7 +462,7 @@ async function findFloodFoldTarget(ctx: IngestContext, customerEmail: string | n
  * `onConflictDoNothing` + re-read covers a concurrent poll creating the same thread's ticket.
  */
 async function createTicket(
-  db: Db,
+  db: DbOrTx,
   message: NormalizedMessage,
   direction: 'inbound' | 'outbound',
 ): Promise<{ id: string }> {

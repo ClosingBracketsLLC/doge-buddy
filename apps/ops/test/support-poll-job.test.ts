@@ -324,6 +324,15 @@ describe('supportPollGmailHandler', () => {
     await db.delete(gmailSyncState).where(eq(gmailSyncState.id, SYNC_STATE_ID))
   })
 
+  // The INTEGRATED test below drives the REAL runIngest through several polls, which leaves a
+  // real, non-null gmail_sync_state row behind. beforeEach alone only protects tests declared
+  // AFTER it in this same describe block — without this, that row leaks into whatever runs next
+  // in the same process (another describe block, another file) and corrupts its OWN
+  // `lastHistoryId == null` seed-on-null check.
+  afterEach(async () => {
+    await db.delete(gmailSyncState).where(eq(gmailSyncState.id, SYNC_STATE_ID))
+  })
+
   it('SUPPORT_POLL_QUEUE constant matches the spec queue name', () => {
     expect(SUPPORT_POLL_QUEUE).toBe('support.poll-gmail')
   })
