@@ -3,16 +3,7 @@
 AI-managed dog supply dropshipping store. Hydrogen storefront + an autonomous
 ops service (sourcing, fulfillment, support, scoring agents).
 
-Design docs: `docs/superpowers/specs/`. Current phase: 4 (proposals + admin). **Plan A (the
-proposal pipeline) is merged and live-verified** — a seeded proposal was
-approved by one-click link and became a real, fulfillable, published product on the store. **Plan
-B (admin surface) is merged** — a magic-link login (Telegram-delivered) gates a dashboard at
-`<ADMIN_BASE_URL>/admin` with proposals, orders, and settings pages; spec at
-`docs/superpowers/specs/2026-08-23-phase-4-proposals-design.md` §§4-5. Phase 4 is complete
-pending the owner's Tier-2 walk of the dashboard (tracked on `docs/OWNER-CHECKLIST.md`); next up
-is Phase 5 (sourcing agent). Ops runs deployed on Railway with Shopify+CJ webhooks live
-end-to-end; storefront deploys to Oxygen on push. Owner tasks + the next-session pointer live in
-`docs/OWNER-CHECKLIST.md`.
+Design docs: `docs/superpowers/specs/`. **Phase 5 (sourcing agent) is live:** weekly runs harvest trends, fetch suppliers, submit winning proposals, apply approvals → live-listed products on the store. Phase 6A (support email plumbing) is built and pending live verification — Gmail client, ingest pipeline, triage + admin ticket surface, and escalation alerts are merged and tested; owner-side: add Railway email vars and verify the test-email flow (tracked on `docs/OWNER-CHECKLIST.md`). Ops runs deployed on Railway with Shopify+CJ+Gmail webhooks live end-to-end; storefront deploys to Oxygen on push. Owner tasks + the next-session pointer live in `docs/OWNER-CHECKLIST.md`.
 
 ## Development
 
