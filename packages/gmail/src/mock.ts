@@ -228,6 +228,17 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
       return { ids, nextPageToken: undefined }
     },
 
+    async getThread(threadId) {
+      maybeThrowPending('getThread')
+      const ids: { id: string }[] = []
+      for (const msg of messages.values()) {
+        if (msg.gone) continue
+        if (msg.threadId !== threadId) continue
+        ids.push({ id: msg.id })
+      }
+      return { messages: ids }
+    },
+
     async getMessage(id, opts) {
       maybeThrowPending('getMessage')
       const msg = requireLiveMessage(id)

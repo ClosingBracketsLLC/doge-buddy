@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/threads/thread-gone-1",
+    "query": { "format": "minimal" }
+  },
+  "response": {
+    "status": 404,
+    "body": {
+      "error": {
+        "code": 404,
+        "message": "Requested entity was not found.",
+        "errors": [
+          {
+            "domain": "global",
+            "reason": "notFound",
+            "message": "Requested entity was not found."
+          }
+        ],
+        "status": "NOT_FOUND"
+      }
+    }
+  }
+}

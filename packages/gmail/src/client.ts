@@ -236,6 +236,17 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
       }
     },
 
+    async getThread(threadId) {
+      const raw = (await request(
+        'GET',
+        `/threads/${encodeURIComponent(threadId)}`,
+        [['format', 'minimal']],
+        'other',
+      )) as { messages?: { id: string }[] }
+
+      return { messages: (raw.messages ?? []).map((m) => ({ id: m.id })) }
+    },
+
     async getMessage(id, opts) {
       const params: [string, string][] = [['format', opts.format]]
       if (opts.format === 'metadata') {

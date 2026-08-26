@@ -26,6 +26,8 @@ export interface GmailClient {
   getProfile(): Promise<{ emailAddress: string; historyId: string }>
   listHistory(q: { startHistoryId: string; pageToken?: string }): Promise<{ records: HistoryRecord[]; nextPageToken?: string }>
   listMessages(q: { q?: string; pageToken?: string; includeSpamTrash?: boolean }): Promise<{ ids: { id: string; threadId: string }[]; nextPageToken?: string }>
+  /** Resync support: walks a known thread's LIVE message ids (format=minimal — ids only). */
+  getThread(threadId: string): Promise<{ messages: { id: string }[] }>
   getMessage(id: string, opts: { format: 'metadata' | 'full' }): Promise<NormalizedMessage>
   listLabels(): Promise<{ id: string; name: string }[]>
   createLabel(name: string): Promise<{ id: string; name: string }>

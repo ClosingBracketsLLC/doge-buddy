@@ -239,6 +239,38 @@ describe('createMockGmail', () => {
     expect(withSpam.ids.map((m) => m.id)).toContain(spamMatch.id)
   })
 
+  it('getThread: returns the live message ids of the thread, gone drafts excluded', async () => {
+    const gmail = createMockGmail({ selfAddress: SELF })
+    const threadId = 'thread-getThread-1'
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SELF], subject: 'Hi', bodyText: 'hi', threadId })
+    // draft churn: draft1 supersedes to gone, draft2 stays live
+    gmail.saveDraft({ threadId, bodyText: 'draft rev 1' })
+    const draft2 = gmail.saveDraft({ threadId, bodyText: 'draft rev 2' })
+    const reply = await gmail.sendReply({
+      threadId,
+      to: 'jane@example.com',
+      subject: 'Re: Hi',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'On it',
+    })
+
+    const thread = await gmail.getThread(threadId)
+
+    expect(thread.messages.map((m) => m.id)).toEqual([first.id, draft2.id, reply.id])
+  })
+
+  it('getThread: failNext injects a one-shot error', async () => {
+    const gmail = createMockGmail({ selfAddress: SELF })
+    const threadId = 'thread-getThread-2'
+    gmail.receiveInbound({ from: 'jane@example.com', to: [SELF], subject: 'Hi', bodyText: 'hi', threadId })
+    const boom = new Error('boom')
+
+    gmail.failNext('getThread', boom)
+    await expect(gmail.getThread(threadId)).rejects.toBe(boom)
+    await expect(gmail.getThread(threadId)).resolves.toMatchObject({ messages: [{ id: expect.any(String) }] })
+  })
+
   it('listLabels/createLabel: system labels are seeded, custom labels register', async () => {
     const gmail = createMockGmail({ selfAddress: SELF })
     const before = await gmail.listLabels()

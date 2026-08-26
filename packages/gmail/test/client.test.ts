@@ -9,6 +9,8 @@ import historyPage1Fixture from './fixtures/history-page1.json' with { type: 'js
 import historyPage2Fixture from './fixtures/history-page2.json' with { type: 'json' }
 import history404Fixture from './fixtures/history-404.json' with { type: 'json' }
 import messagesListFixture from './fixtures/messages-list.json' with { type: 'json' }
+import threadGetFixture from './fixtures/thread-get.json' with { type: 'json' }
+import thread404Fixture from './fixtures/thread-404.json' with { type: 'json' }
 import messageFullNestedFixture from './fixtures/message-full-nested.json' with { type: 'json' }
 import messageFullSinglepartFixture from './fixtures/message-full-singlepart.json' with { type: 'json' }
 import messageMetadataFixture from './fixtures/message-metadata.json' with { type: 'json' }
@@ -116,6 +118,31 @@ describe('createGmailClient', () => {
         { id: 'msg-302', threadId: 'thread-201' },
       ],
       nextPageToken: undefined,
+    })
+  })
+
+  it('getThread: builds GET /threads/{id}?format=minimal and returns live message ids', async () => {
+    const fetchFn = vi.fn(fixtureFetch({ thread: threadGetFixture }))
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await expect(client.getThread('thread-100')).resolves.toEqual({
+      messages: [{ id: 'msg-201' }, { id: 'msg-205' }],
+    })
+
+    const calledUrl = new URL(String(fetchFn.mock.calls[0]![0]))
+    expect(calledUrl.pathname).toBe('/gmail/v1/users/me/threads/thread-100')
+    expect(calledUrl.searchParams.get('format')).toBe('minimal')
+  })
+
+  it('getThread: 404 becomes a plain GmailApiError, NOT a typed thread-gone error', async () => {
+    const client = createGmailClient({
+      auth: stubAuth(),
+      fromAddress: FROM_ADDRESS,
+      fetchFn: fixtureFetch({ err: thread404Fixture }),
+    })
+    await expect(client.getThread('thread-gone-1')).rejects.toMatchObject({
+      name: 'GmailApiError',
+      status: 404,
     })
   })
 
