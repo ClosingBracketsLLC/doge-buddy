@@ -1,0 +1,35 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/msg-single-1",
+    "query": { "format": "full" }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "msg-single-1",
+      "threadId": "thread-300",
+      "labelIds": ["INBOX", "UNREAD"],
+      "snippet": "Quick question about my refund status. - Bob",
+      "internalDate": "1756150000000",
+      "sizeEstimate": 900,
+      "historyId": "3060",
+      "payload": {
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          { "name": "From", "value": "Bob <bob@customer.com>" },
+          { "name": "To", "value": "support@dogebuddy.com" },
+          { "name": "Subject", "value": "Refund status?" },
+          { "name": "Message-ID", "value": "<bob-msg-1@mail.gmail.com>" },
+          { "name": "Date", "value": "Tue, 26 Aug 2026 09:15:00 -0400" },
+          { "name": "Content-Type", "value": "text/plain; charset=\"UTF-8\"" }
+        ],
+        "body": {
+          "size": 44,
+          "data": "UXVpY2sgcXVlc3Rpb24gYWJvdXQgbXkgcmVmdW5kIHN0YXR1cy4gLSBCb2I"
+        }
+      }
+    }
+  }
+}

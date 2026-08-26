@@ -1,0 +1,47 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/msg-nested-1",
+    "query": {
+      "format": "metadata",
+      "metadataHeaders": [
+        "From",
+        "To",
+        "Cc",
+        "Delivered-To",
+        "Subject",
+        "Message-ID",
+        "In-Reply-To",
+        "References"
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "msg-nested-1",
+      "threadId": "thread-100",
+      "labelIds": ["INBOX", "UNREAD", "CATEGORY_PERSONAL"],
+      "snippet": "Hi DogeBuddy team, My order #4521 hasn't shipped yet...",
+      "internalDate": "1756148400000",
+      "sizeEstimate": 15000,
+      "historyId": "3050",
+      "payload": {
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          { "name": "Delivered-To", "value": "jane@example.com" },
+          { "name": "Delivered-To", "value": "support@dogebuddy.com" },
+          { "name": "From", "value": "\"Jane D\" <Jane@Example.com>" },
+          { "name": "To", "value": "DogeBuddy Support <support@dogebuddy.com>" },
+          { "name": "Cc", "value": "manager@example.com, \"Ops Team\" <ops@example.com>" },
+          { "name": "Subject", "value": "Re: Order #4521 hasn't shipped" },
+          { "name": "Message-ID", "value": "<CAJ+abc123@mail.gmail.com>" },
+          { "name": "In-Reply-To", "value": "<original-msg-999@mail.gmail.com>" },
+          { "name": "References", "value": "<original-msg-999@mail.gmail.com>" }
+        ],
+        "body": { "size": 0 }
+      }
+    }
+  }
+}

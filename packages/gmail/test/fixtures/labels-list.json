@@ -1,0 +1,23 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/labels"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "labels": [
+        { "id": "INBOX", "name": "INBOX", "type": "system" },
+        { "id": "SENT", "name": "SENT", "type": "system" },
+        { "id": "UNREAD", "name": "UNREAD", "type": "system" },
+        {
+          "id": "Label_1",
+          "name": "DogeBuddy/New",
+          "type": "user",
+          "labelListVisibility": "labelShow",
+          "messageListVisibility": "show"
+        }
+      ]
+    }
+  }
+}

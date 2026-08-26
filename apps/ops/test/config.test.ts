@@ -148,4 +148,40 @@ describe('loadConfig', () => {
     expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' }).serpapi).toBeUndefined()
     expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', SERPAPI_KEY: 'serp-x' }).serpapi).toEqual({ apiKey: 'serp-x' })
   })
+
+  it('assembles the gmail block when the full quartet is set, unescaping \\n in the key', () => {
+    const c = loadConfig({
+      DATABASE_URL: 'postgres://u:p@h:5432/d',
+      GMAIL_SERVICE_ACCOUNT_EMAIL: 'sa@project.iam.gserviceaccount.com',
+      GMAIL_SERVICE_ACCOUNT_KEY: '-----BEGIN PRIVATE KEY-----\\nabc123\\n-----END PRIVATE KEY-----\\n',
+      GMAIL_IMPERSONATE: 'owner@example.com',
+      SUPPORT_ADDRESS: 'support@example.com',
+    })
+    expect(c.gmail).toBeDefined()
+    expect(c.gmail!.saEmail).toBe('sa@project.iam.gserviceaccount.com')
+    expect(c.gmail!.saKey).toContain('\n')
+    expect(c.gmail!.saKey).not.toContain('\\n')
+    expect(c.gmail!.impersonate).toBe('owner@example.com')
+    expect(c.gmail!.supportAddress).toBe('support@example.com')
+  })
+
+  it('leaves gmail undefined when none of the quartet vars are set', () => {
+    const c = loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' })
+    expect(c.gmail).toBeUndefined()
+  })
+
+  it('throws naming the three missing vars when only GMAIL_SERVICE_ACCOUNT_EMAIL is set', () => {
+    let message = ''
+    try {
+      loadConfig({
+        DATABASE_URL: 'postgres://u:p@h:5432/d',
+        GMAIL_SERVICE_ACCOUNT_EMAIL: 'sa@project.iam.gserviceaccount.com',
+      })
+    } catch (e) {
+      message = (e as Error).message
+    }
+    expect(message).toContain('GMAIL_SERVICE_ACCOUNT_KEY')
+    expect(message).toContain('GMAIL_IMPERSONATE')
+    expect(message).toContain('SUPPORT_ADDRESS')
+  })
 })

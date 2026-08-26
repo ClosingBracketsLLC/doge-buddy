@@ -1,0 +1,200 @@
+import { formatCents } from '@doge-buddy/core'
+import { ticketStatus } from '@doge-buddy/db'
+import type { supportMessages, supportTickets } from '@doge-buddy/db'
+import { html, raw, type RawHtml } from './html.ts'
+
+export type TicketRow = typeof supportTickets.$inferSelect
+export type MessageRow = typeof supportMessages.$inferSelect
+
+/** Every legal `support_tickets.status` value, source-of-truth from the DB enum (mirrors
+ * routes.ts's own `PROPOSAL_STATUSES = proposalStatus.enumValues` idiom). */
+export const TICKET_STATUSES = ticketStatus.enumValues
+
+/**
+ * One /admin/tickets list row: the `support_tickets` columns the table needs plus the parent
+ * order's `shopify_order_number` (left-joined — `null` when `orderId` is null OR the joined
+ * order row has no number of its own). `id` links to the thread view.
+ */
+export interface TicketListRow {
+  id: string
+  status: string
+  category: string | null
+  sentiment: string | null
+  customerEmail: string | null
+  subject: string | null
+  orderId: string | null
+  linkedOrderNumber: string | null
+  claimedOrderNumber: string | null
+  lastInboundAt: Date | null
+  createdAt: Date
+}
+
+/** The linked order's summary shown on the thread view — a small projection of `orders`, not the
+ * full row (this page shows a summary, not a second copy of /admin/orders). */
+export interface LinkedOrderSummary {
+  shopifyOrderGid: string
+  shopifyOrderNumber: string | null
+  customerName: string | null
+  email: string | null
+  financialStatus: string | null
+  fulfillmentStatus: string | null
+  totalCents: number | null
+}
+
+/** `?status=` filter chips: every real ticket status, plus a `spam` chip whose underlying filter
+ * is `is_spam = true` (spam rows are always `resolved` per triage.ts, so no separate status value
+ * is needed for it) — the chip list `routes.ts`'s GET handler validates against. */
+export const TICKET_FILTER_CHIPS = ['all', ...TICKET_STATUSES, 'spam'] as const
+
+function renderStatusChips(current: string | undefined): RawHtml {
+  const active = current && (TICKET_FILTER_CHIPS as readonly string[]).includes(current) ? current : 'all'
+  return html`<nav id="ticket-filters">
+    ${TICKET_FILTER_CHIPS.map((chip) => {
+      const href = chip === 'all' ? '/admin/tickets' : `/admin/tickets?status=${chip}`
+      const label = chip === active ? html`<strong>${chip}</strong>` : html`${chip}`
+      return html`<a href="${raw(href)}">${label}</a> `
+    })}
+  </nav>`
+}
+
+/** "linked order (verified)" beats "claimed order number (unverified)": a row only ever has one
+ * of the two set (triage.ts's `resolveOrderLink` never sets both), but the verified case is
+ * checked first regardless so a data anomaly can't silently show the weaker unverified claim. */
+function renderOrderCell(row: Pick<TicketListRow, 'orderId' | 'linkedOrderNumber' | 'claimedOrderNumber'>): RawHtml {
+  if (row.orderId) {
+    return html`${row.linkedOrderNumber ?? row.orderId}`
+  }
+  if (row.claimedOrderNumber) {
+    return html`claimed #${row.claimedOrderNumber} (unverified)`
+  }
+  return html`—`
+}
+
+function renderTicketRow(row: TicketListRow): RawHtml {
+  return html`<tr>
+    <td>${row.status}</td>
+    <td>${row.category ?? '—'}</td>
+    <td>${row.sentiment ?? '—'}</td>
+    <td>${row.customerEmail ?? '—'}</td>
+    <td><a href="/admin/tickets/${row.id}">${row.subject ?? '(no subject)'}</a></td>
+    <td>${renderOrderCell(row)}</td>
+    <td>${(row.lastInboundAt ?? row.createdAt).toISOString()}</td>
+  </tr>`
+}
+
+/**
+ * The /admin/tickets list body: filter chips followed by the table (or an empty state). Ordering
+ * (escalated pinned first, then `last_inbound_at` desc) is done by the caller's SQL — this
+ * function only renders whatever row order it's handed, same seam as render-orders.ts's pinned
+ * section functions.
+ */
+export function renderTicketsList(rows: TicketListRow[], currentStatus: string | undefined): RawHtml {
+  const chips = renderStatusChips(currentStatus)
+  if (rows.length === 0) {
+    return html`${chips}<p>No tickets.</p>`
+  }
+  return html`${chips}<table>
+    <tbody>
+      ${rows.map(renderTicketRow)}
+    </tbody>
+  </table>`
+}
+
+/**
+ * One message bubble: direction-styled via a CSS class (`message-inbound` / `message-outbound`,
+ * both fixed enum values — safe to interpolate even though html`` would escape them anyway), and
+ * the body rendered as PLAIN TEXT with `white-space: pre-wrap` — never as HTML. `bodyText` is a
+ * customer-controlled string straight from Gmail; there is no rich-text path for it anywhere in
+ * this admin surface.
+ */
+function renderMessage(m: MessageRow): RawHtml {
+  const when = m.sentAt ?? m.createdAt
+  return html`<div class="message message-${m.direction}">
+    <p><strong>${m.direction}</strong> ${m.fromEmail ?? '—'} — ${when.toISOString()}</p>
+    <div style="white-space: pre-wrap">${m.bodyText ?? ''}</div>
+  </div>`
+}
+
+function renderVerdictBlock(t: TicketRow): RawHtml {
+  return html`<section id="triage-verdict">
+    <h3>Triage</h3>
+    <p>Category: ${t.category ?? '—'}</p>
+    <p>Sentiment: ${t.sentiment ?? '—'}</p>
+    <p>Spam: ${t.isSpam === null ? '—' : t.isSpam ? 'yes' : 'no'}</p>
+    <p>Escalation reason: ${t.escalationReason ?? '—'}</p>
+    <p>Last triaged: ${t.lastTriagedAt ? t.lastTriagedAt.toISOString() : '—'}</p>
+    <p>Triage failures: ${t.triageFailureCount}</p>
+  </section>`
+}
+
+/**
+ * Verified linked order (a small summary, not the full /admin/orders row) beats an unverified
+ * claimed number, beats "no order mentioned at all" — same three-way precedence as
+ * `renderOrderCell` above, spelled out again here since the thread view has room to show more
+ * than just the order number.
+ */
+function renderLinkedOrderSection(order: LinkedOrderSummary | null, claimedOrderNumber: string | null): RawHtml {
+  if (order) {
+    return html`<section id="linked-order">
+      <h3>Linked order</h3>
+      <p>Order: ${order.shopifyOrderNumber ?? order.shopifyOrderGid}</p>
+      <p>Customer: ${order.customerName ?? '—'} (${order.email ?? '—'})</p>
+      <p>Status: ${order.financialStatus ?? '—'} / ${order.fulfillmentStatus ?? '—'}</p>
+      <p>Total: ${order.totalCents === null ? '—' : formatCents(order.totalCents)}</p>
+    </section>`
+  }
+  if (claimedOrderNumber) {
+    return html`<section id="linked-order">
+      <h3>Linked order</h3>
+      <p>claimed #${claimedOrderNumber} (unverified)</p>
+    </section>`
+  }
+  return html`<section id="linked-order">
+    <h3>Linked order</h3>
+    <p>None.</p>
+  </section>`
+}
+
+/**
+ * Escalate / Resolve — both POST to routes.ts's guarded-transition handlers, carrying the
+ * status THIS PAGE RENDERED as a hidden `expectedStatus` field (the guard is
+ * `WHERE id = ? AND status = expectedStatus`, so a stale tab's click 0-row-matches and no-ops
+ * instead of clobbering whatever a different writer already changed the row to). Each form only
+ * renders when it would actually change something — no "Escalate" button on an already-escalated
+ * ticket, no "Resolve" on an already-resolved one — so a fresh page load never offers a
+ * guaranteed-stale action.
+ */
+function renderActionForms(t: TicketRow): RawHtml {
+  const escalate =
+    t.status === 'escalated'
+      ? html``
+      : html`<form method="post" action="/admin/tickets/${t.id}/escalate">
+          <input type="hidden" name="expectedStatus" value="${t.status}">
+          <button type="submit">Escalate</button>
+        </form>`
+  const resolve =
+    t.status === 'resolved'
+      ? html``
+      : html`<form method="post" action="/admin/tickets/${t.id}/resolve">
+          <input type="hidden" name="expectedStatus" value="${t.status}">
+          <button type="submit">Resolve</button>
+        </form>`
+  return html`${escalate}${resolve}`
+}
+
+/** The /admin/tickets/:id thread view: header, triage verdict, linked-order summary, the two
+ * guarded action forms, then the message thread in chronological order (caller-supplied order —
+ * this function only renders it, same seam as render-run.ts's `renderRunDetail`). */
+export function renderTicketDetail(t: TicketRow, messages: MessageRow[], linkedOrder: LinkedOrderSummary | null): RawHtml {
+  return html`<h1>Ticket ${t.id}</h1>
+    <p>Status: ${t.status}</p>
+    <p>Subject: ${t.subject ?? '(no subject)'}</p>
+    <p>Customer: ${t.customerEmail ?? '—'}</p>
+    ${renderVerdictBlock(t)}
+    ${renderLinkedOrderSection(linkedOrder, t.claimedOrderNumber)}
+    ${renderActionForms(t)}
+    <section id="thread">
+      <h3>Messages</h3>
+      ${messages.length === 0 ? html`<p>No messages.</p>` : messages.map(renderMessage)}
+    </section>`
+}

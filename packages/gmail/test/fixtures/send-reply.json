@@ -1,0 +1,13 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/gmail/v1/users/me/messages/send"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "msg-reply-1",
+      "threadId": "thread-100"
+    }
+  }
+}

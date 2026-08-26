@@ -1,0 +1,42 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/history",
+    "query": { "startHistoryId": "3000" }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "history": [
+        {
+          "id": "3025",
+          "messages": [{ "id": "msg-201", "threadId": "thread-100" }],
+          "messagesAdded": [
+            {
+              "message": {
+                "id": "msg-201",
+                "threadId": "thread-100",
+                "labelIds": ["INBOX", "UNREAD"]
+              }
+            }
+          ]
+        },
+        {
+          "id": "3031",
+          "messages": [{ "id": "msg-202", "threadId": "thread-101" }],
+          "messagesAdded": [
+            {
+              "message": {
+                "id": "msg-202",
+                "threadId": "thread-101",
+                "labelIds": ["INBOX", "UNREAD"]
+              }
+            }
+          ]
+        }
+      ],
+      "historyId": "3031",
+      "nextPageToken": "page-2-token"
+    }
+  }
+}

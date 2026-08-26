@@ -1,0 +1,12 @@
+{
+  "request": { "method": "GET", "path": "/gmail/v1/users/me/profile" },
+  "response": {
+    "status": 200,
+    "body": {
+      "emailAddress": "admin@dogebuddy.com",
+      "messagesTotal": 4210,
+      "threadsTotal": 3190,
+      "historyId": "3025"
+    }
+  }
+}

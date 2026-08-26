@@ -13,12 +13,18 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.241
         version: 0.3.241(@anthropic-ai/sdk@0.120.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(zod@4.4.3)
+      '@anthropic-ai/sdk':
+        specifier: 0.120.0
+        version: 0.120.0(zod@4.4.3)
       '@doge-buddy/core':
         specifier: workspace:*
         version: link:../../packages/core
       '@doge-buddy/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@doge-buddy/gmail':
+        specifier: workspace:*
+        version: link:../../packages/gmail
       '@doge-buddy/shopify-admin':
         specifier: workspace:*
         version: link:../../packages/shopify-admin
@@ -236,6 +242,22 @@ importers:
       tsx:
         specifier: ^4.20.0
         version: 4.23.11
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/node@22.20.1)(jiti@2.7.0)(jsdom@30.0.1)(lightningcss@1.33.0)(tsx@4.23.11)(yaml@2.9.0)
+
+  packages/gmail:
+    dependencies:
+      '@doge-buddy/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.20.1
       typescript:
         specifier: ^5.9.2
         version: 5.9.3

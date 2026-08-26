@@ -1,0 +1,18 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/threads/thread-100",
+    "query": { "format": "minimal" }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "thread-100",
+      "historyId": "3050",
+      "messages": [
+        { "id": "msg-201", "threadId": "thread-100", "labelIds": ["INBOX"] },
+        { "id": "msg-205", "threadId": "thread-100", "labelIds": ["SENT"] }
+      ]
+    }
+  }
+}

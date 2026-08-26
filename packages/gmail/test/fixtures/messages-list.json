@@ -1,0 +1,17 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages",
+    "query": { "q": "in:inbox" }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "messages": [
+        { "id": "msg-301", "threadId": "thread-200" },
+        { "id": "msg-302", "threadId": "thread-201" }
+      ],
+      "resultSizeEstimate": 2
+    }
+  }
+}

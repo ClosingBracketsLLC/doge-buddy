@@ -21,6 +21,7 @@ export const SETTINGS_DEFAULTS = {
   'workflow.refund.mode': 'manual',
   'workflow.deprecation.mode': 'manual',
   'refund.auto_max_cents': 2500,
+  'workflow.support.enabled': true,
 }
 // Deliberately no `as const`/`satisfies` here: either narrows the boolean properties down
 // to their literal default (e.g. `false` instead of `boolean`), which would make `set()`
@@ -28,7 +29,11 @@ export const SETTINGS_DEFAULTS = {
 // which settings are booleans; modes are `WorkflowMode` strings; everything else is a number (cents/bps/days).
 
 export type SettingKey = keyof typeof SETTINGS_DEFAULTS
-type BooleanSettingKey = 'killswitch.global' | 'workflow.fulfillment.enabled' | 'fulfillment.paused_for_funds'
+type BooleanSettingKey =
+  | 'killswitch.global'
+  | 'workflow.fulfillment.enabled'
+  | 'fulfillment.paused_for_funds'
+  | 'workflow.support.enabled'
 type ModeSettingKey =
   | 'workflow.sourcing.mode'
   | 'workflow.support_reply.mode'
