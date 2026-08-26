@@ -3,6 +3,7 @@ import type { GmailClient, HistoryRecord, NormalizedMessage } from './types.ts'
 import { GmailApiError, GmailRateLimitError, HistoryExpiredError, MessageGoneError } from './errors.ts'
 import { parseAddrSpecs, parseFirstAddrSpec } from './address.ts'
 import { extractBodyText } from './body.ts'
+import { buildReplyRaw } from './rfc2822.ts'
 
 const BASE_URL = 'https://gmail.googleapis.com/gmail/v1/users/me'
 
@@ -269,9 +270,22 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
       })
     },
 
-    async sendReply() {
-      // Arrives in Task 4. Kept here only to satisfy the GmailClient interface.
-      throw new Error('sendReply is not implemented until Task 4')
+    async sendReply(r) {
+      const raw = buildReplyRaw({
+        from: fromAddress,
+        to: r.to,
+        subject: r.subject,
+        inReplyTo: r.inReplyTo,
+        references: r.references,
+        bodyText: r.bodyText,
+      })
+
+      const result = (await request('POST', '/messages/send', [], 'other', { raw, threadId: r.threadId })) as {
+        id: string
+        threadId: string
+      }
+
+      return { id: result.id, threadId: result.threadId }
     },
   }
 }

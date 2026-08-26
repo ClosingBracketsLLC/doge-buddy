@@ -17,6 +17,7 @@ import labelsListFixture from './fixtures/labels-list.json' with { type: 'json' 
 import labelCreateFixture from './fixtures/label-create.json' with { type: 'json' }
 import error403QuotaFixture from './fixtures/error-403-quota.json' with { type: 'json' }
 import error403PermFixture from './fixtures/error-403-perm.json' with { type: 'json' }
+import sendReplyFixture from './fixtures/send-reply.json' with { type: 'json' }
 
 const FROM_ADDRESS = 'support@dogebuddy.com'
 
@@ -330,11 +331,59 @@ describe('createGmailClient', () => {
     expect(auth.invalidate).toHaveBeenCalledTimes(1)
   })
 
-  it('sendReply: not implemented until Task 4 (interface stub only)', async () => {
-    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn: fixtureFetch({}) })
-    await expect(
-      client.sendReply({ threadId: 't1', to: 'x@y.com', subject: 'hi', inReplyTo: '', references: '', bodyText: 'hey' }),
-    ).rejects.toThrow()
+  it('sendReply: POSTs { raw, threadId } to /messages/send and returns { id, threadId }', async () => {
+    const fetchFn = vi.fn(fixtureFetch({ send: sendReplyFixture }))
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    const response = await client.sendReply({
+      threadId: 'thread-100',
+      to: 'jane@example.com',
+      subject: 'Broken leash',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<root@x> <abc@mail.example.com>',
+      bodyText: 'Hi Jane,\n\nSorry about that.',
+    })
+
+    expect(response).toEqual({ id: 'msg-reply-1', threadId: 'thread-100' })
+
+    // Verify POST body contains raw and threadId
+    const [, init] = fetchFn.mock.calls[0]!
+    expect(init?.method).toBe('POST')
+    const body = JSON.parse(String(init?.body))
+    expect(body).toHaveProperty('raw')
+    expect(body).toHaveProperty('threadId')
+    expect(body.threadId).toBe('thread-100')
+
+    // Verify raw is base64url encoded
+    expect(typeof body.raw).toBe('string')
+    expect(body.raw).toMatch(/^[A-Za-z0-9_-]+$/)
+
+    // Decode and verify the message contains expected headers
+    const text = Buffer.from(body.raw, 'base64url').toString()
+    expect(text).toContain('From: support@dogebuddy.com\r\n')
+    expect(text).toContain('To: jane@example.com\r\n')
+    expect(text).toContain('Subject: Re: Broken leash\r\n')
+  })
+
+  it('sendReply: RFC 2047 encodes non-ASCII subjects', async () => {
+    const fetchFn = vi.fn(fixtureFetch({ send: sendReplyFixture }))
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await client.sendReply({
+      threadId: 'thread-100',
+      to: 'jane@example.com',
+      subject: 'Re: Hundeleine kaputt 🐶',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'test',
+    })
+
+    const [, init] = fetchFn.mock.calls[0]!
+    const body = JSON.parse(String(init?.body))
+    const text = Buffer.from(body.raw, 'base64url').toString()
+
+    // Should contain RFC 2047 encoded subject
+    expect(text).toMatch(/Subject: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?\=\r\n/)
   })
 
   it('no fixture contains auth material', async () => {
