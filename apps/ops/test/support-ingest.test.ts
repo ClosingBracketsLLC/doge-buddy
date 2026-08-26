@@ -456,12 +456,117 @@ describe('runIngest', () => {
     expect(alert.mock.calls[0]![1]).toBe('support_label_failed')
   })
 
-  it('propagates HistoryExpiredError (the resync path is a separate concern)', async () => {
+  // Task 9 — bounded, resumable resync on history expiry (spec §2 step 2).
+  it('a plain history expiry with no complications resolves normally (HistoryExpiredError never surfaces)', async () => {
     await seedSyncState()
     gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
     gmail.expireHistory()
 
-    await expect(runIngest(deps)).rejects.toThrow('History ID is no longer valid')
+    await expect(runIngest(deps)).resolves.toBeDefined()
+  })
+
+  it('(a) mixed mailbox: new support mail ingested, resolved ticket NOT reopened, non-support mail absent, sync state = pre-captured id', async () => {
+    await seedSyncState()
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+    const resolvedTicket = (await ticketByThread(first.threadId))!
+    await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, resolvedTicket.id))
+
+    gmail.expireHistory()
+    const newMail = gmail.receiveInbound({ from: 'bob@example.com', to: [SUPPORT], subject: 'New', bodyText: 'new mail' })
+    const nonSupport = gmail.receiveInbound({
+      from: 'x@example.com', to: ['other@dogebuddy.com'], subject: 'Not support', bodyText: 'irrelevant',
+    })
+    // Nothing advances the mock's history counter between this read and runIngest's own internal
+    // getProfile() call inside the resync, so the two values are the same pre-captured id.
+    const expectedHistoryId = BigInt((await gmail.getProfile()).historyId)
+    const modifyMessage = vi.spyOn(gmail, 'modifyMessage')
+
+    const result = await runIngest(deps)
+
+    expect(result.insertedMessages).toBe(1)
+    const newTicket = await ticketByThread(newMail.threadId)
+    expect(newTicket).toBeDefined()
+    expect(newTicket!.status).toBe('new')
+    expect(await messagesOfTicket(newTicket!.id)).toHaveLength(1)
+
+    // The resolved ticket's original message re-matches the resync's q filter and is walked again,
+    // but the insert gate makes it a no-op: no reopen, no re-label.
+    expect((await ticketByThread(first.threadId))!.status).toBe('resolved')
+    expect(await messagesOfTicket(resolvedTicket.id)).toHaveLength(1)
+    expect(modifyMessage).toHaveBeenCalledTimes(1)
+    expect(modifyMessage).not.toHaveBeenCalledWith(first.id, expect.anything())
+
+    expect(await ticketByThread(nonSupport.threadId)).toBeUndefined()
+    expect(await db.select().from(supportMessages).where(eq(supportMessages.gmailMessageId, nonSupport.id))).toEqual([])
+
+    expect((await syncState())?.lastHistoryId).toBe(expectedHistoryId)
+  })
+
+  it('(b) a follow-up that dropped support@ from every header is still picked up via the known-thread walk, and reopens the ticket', async () => {
+    await seedSyncState()
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+    const ticket = (await ticketByThread(first.threadId))!
+    await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, ticket.id))
+
+    gmail.expireHistory()
+    // Addressed to neither support@ (To/Cc/Delivered-To) — the q filter cannot see this one.
+    gmail.receiveInbound({
+      from: 'jane@example.com', to: ['jane-cc@example.com'], subject: 'Re: Hi', bodyText: 'still need help',
+      threadId: first.threadId,
+    })
+    const getThread = vi.spyOn(gmail, 'getThread')
+
+    await runIngest(deps)
+
+    expect(getThread).toHaveBeenCalledWith(first.threadId)
+    const reopened = (await ticketByThread(first.threadId))!
+    expect(reopened.status).toBe('new')
+    expect(await messagesOfTicket(ticket.id)).toHaveLength(2)
+  })
+
+  it('(c) a mid-resync failure on listMessages page 2 leaves page 1 durable; the next runIngest resumes without reopening or duplicating anything', async () => {
+    await seedSyncState()
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+    const resolvedTicket = (await ticketByThread(first.threadId))!
+    await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, resolvedTicket.id))
+
+    gmail.expireHistory()
+    const msgA = gmail.receiveInbound({ from: 'a@example.com', to: [SUPPORT], subject: 'A', bodyText: 'a body' })
+    const msgB = gmail.receiveInbound({ from: 'b@example.com', to: [SUPPORT], subject: 'B', bodyText: 'b body' })
+
+    let call = 0
+    const listMessagesSpy = vi.spyOn(gmail, 'listMessages').mockImplementation(async () => {
+      call++
+      if (call === 1) return { ids: [{ id: msgA.id, threadId: msgA.threadId }], nextPageToken: 'page-2' }
+      throw new Error('boom mid-resync')
+    })
+
+    await expect(runIngest(deps)).rejects.toThrow('boom mid-resync')
+
+    // Page 1's write already committed — it isn't rolled back by page 2's failure.
+    const ticketA = await ticketByThread(msgA.threadId)
+    expect(ticketA).toBeDefined()
+    expect(await messagesOfTicket(ticketA!.id)).toHaveLength(1)
+    // Nothing the failed resync never reached was touched.
+    expect((await ticketByThread(first.threadId))!.status).toBe('resolved')
+    expect(await ticketByThread(msgB.threadId)).toBeUndefined()
+
+    listMessagesSpy.mockRestore()
+    const modifyMessage = vi.spyOn(gmail, 'modifyMessage')
+
+    // History is no longer expired (the mock's expiry is one-shot), so this resumes via the plain
+    // incremental walk — which is exactly the point: the retry doesn't need to be a resync to be
+    // safe, because page 1's insert gate already made msgA idempotent.
+    const result = await runIngest(deps)
+
+    expect(result.insertedMessages).toBe(1)
+    expect(await messagesOfTicket(ticketA!.id)).toHaveLength(1)
+    expect(await ticketByThread(msgB.threadId)).toBeDefined()
+    expect((await ticketByThread(first.threadId))!.status).toBe('resolved')
+    expect(modifyMessage).not.toHaveBeenCalledWith(msgA.id, expect.anything())
   })
 })
 

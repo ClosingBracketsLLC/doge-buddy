@@ -1,6 +1,7 @@
 import { gmailSyncState, supportMessages, supportTickets, type createDb } from '@doge-buddy/db'
 import {
   GmailApiError,
+  HistoryExpiredError,
   isMessageGone,
   type GmailClient,
   type HistoryRecord,
@@ -68,7 +69,8 @@ interface IngestContext {
  * effect keyed on the message row actually inserting — which is what makes crash replay (and the
  * resync path) free of reopen storms, duplicate escalations, and label churn.
  *
- * `HistoryExpiredError` propagates: the bounded resync that answers it is a separate concern.
+ * `HistoryExpiredError` from the incremental walk is caught and answered with a bounded resync
+ * (see `runResync`); any other error propagates.
  */
 export async function runIngest(deps: IngestDeps): Promise<IngestResult> {
   const now = deps.now ?? (() => new Date())
@@ -91,15 +93,6 @@ export async function runIngest(deps: IngestDeps): Promise<IngestResult> {
     return result
   }
 
-  // Step 2: walk every history page from the stored id.
-  const records: HistoryRecord[] = []
-  let pageToken: string | undefined
-  do {
-    const page = await deps.gmail.listHistory({ startHistoryId: state.lastHistoryId.toString(), pageToken })
-    records.push(...page.records)
-    pageToken = page.nextPageToken
-  } while (pageToken)
-
   const ctx: IngestContext = {
     deps,
     supportAddress,
@@ -108,32 +101,112 @@ export async function runIngest(deps: IngestDeps): Promise<IngestResult> {
     newInboundTicketIds: new Set(),
   }
 
-  const seen = new Set<string>()
-  for (const record of records) {
-    for (const added of record.messagesAdded) {
-      if (seen.has(added.id)) continue
-      seen.add(added.id)
-      await ingestMessageId(ctx, added.id)
-    }
-  }
+  try {
+    // Step 2: walk every history page from the stored id. Nothing is processed until every page
+    // has been fetched, so a HistoryExpiredError here (even on a later page) never leaves a
+    // partially-applied incremental batch behind — there is nothing to unwind.
+    const records: HistoryRecord[] = []
+    let pageToken: string | undefined
+    do {
+      const page = await deps.gmail.listHistory({ startHistoryId: state.lastHistoryId.toString(), pageToken })
+      records.push(...page.records)
+      pageToken = page.nextPageToken
+    } while (pageToken)
 
-  // Step 8: advance to the max history-RECORD id (BigInt compare — historyIds are uint64 strings,
-  // so a lexicographic max corrupts state), and only after this batch's upserts have committed.
-  // The guard is defence against any residual overlap with a concurrent poll.
-  let maxRecordId: bigint | null = null
-  for (const record of records) {
-    const id = BigInt(record.id)
-    if (maxRecordId == null || id > maxRecordId) maxRecordId = id
-  }
-  if (maxRecordId != null) {
-    await deps.db
-      .update(gmailSyncState)
-      .set({ lastHistoryId: maxRecordId, updatedAt: now() })
-      .where(and(eq(gmailSyncState.id, SYNC_STATE_ID), lt(gmailSyncState.lastHistoryId, maxRecordId)))
+    const seen = new Set<string>()
+    for (const record of records) {
+      for (const added of record.messagesAdded) {
+        if (seen.has(added.id)) continue
+        seen.add(added.id)
+        await ingestMessageId(ctx, added.id)
+      }
+    }
+
+    // Step 8: advance to the max history-RECORD id (BigInt compare — historyIds are uint64 strings,
+    // so a lexicographic max corrupts state), and only after this batch's upserts have committed.
+    // The guard is defence against any residual overlap with a concurrent poll.
+    let maxRecordId: bigint | null = null
+    for (const record of records) {
+      const id = BigInt(record.id)
+      if (maxRecordId == null || id > maxRecordId) maxRecordId = id
+    }
+    if (maxRecordId != null) {
+      await deps.db
+        .update(gmailSyncState)
+        .set({ lastHistoryId: maxRecordId, updatedAt: now() })
+        .where(and(eq(gmailSyncState.id, SYNC_STATE_ID), lt(gmailSyncState.lastHistoryId, maxRecordId)))
+    }
+  } catch (err) {
+    if (!(err instanceof HistoryExpiredError)) throw err
+    await runResync(ctx, now)
   }
 
   result.newInboundTicketIds = [...ctx.newInboundTicketIds]
   return result
+}
+
+/**
+ * The bounded, resumable resync (spec §2 step 2). `listHistory` 404s once its start id has aged
+ * out of Gmail's retention window — there is no incremental diff to recover at that point, so this
+ * rebuilds from a scoped mailbox scan instead: support-addressed mail, plus every already-known
+ * ticket thread (for follow-ups that dropped the address from every header).
+ *
+ * Ordering is load-bearing, per the spec:
+ *   1. Capture `getProfile().historyId` FIRST, before touching the DB at all. Anything that lands
+ *      in the mailbox from this instant forward is still covered by the NEXT poll's incremental
+ *      walk starting from this id — the resync only has to account for what happened before it.
+ *   2. `listMessages({ q, includeSpamTrash: true })`, page-by-page: each page's ids run through the
+ *      SAME per-message path as the incremental walk (`ingestMessageId`), and that path's insert
+ *      gate is what makes a page safe to redo — a message already ingested (including by a prior,
+ *      interrupted resync attempt) is a no-op, never a reopen or a re-label. Each page's writes are
+ *      durable before the next page is even requested, so a failure here needs nothing to be
+ *      unwound — only the caller retrying.
+ *   3. Then every already-known ticket thread's LIVE messages via `getThread` — `q` cannot see a
+ *      follow-up that dropped `SUPPORT_ADDRESS` from every header, but its thread is already ours.
+ *      Ids already processed by step 2 are skipped, so a thread whose messages also matched the
+ *      q-filter is never double-fetched.
+ *   4. Only THEN store the PRE-captured historyId, guarded by the same comparator as the normal
+ *      path. Storing last is what makes step 1's early capture safe: if the resync itself is
+ *      interrupted, nothing is stored, so the next poll either sees history-expired again (and
+ *      redoes the bounded scan) or, if the id turned out still valid, resumes incrementally — and
+ *      either way nothing already-committed gets a side effect twice.
+ */
+async function runResync(ctx: IngestContext, now: () => Date): Promise<void> {
+  const { deps, supportAddress } = ctx
+
+  const profile = await deps.gmail.getProfile()
+  const preCapturedHistoryId = BigInt(profile.historyId)
+
+  const seen = new Set<string>()
+
+  const q = `to:${supportAddress} OR cc:${supportAddress} OR deliveredto:${supportAddress}`
+  let pageToken: string | undefined
+  do {
+    const page = await deps.gmail.listMessages({ q, pageToken, includeSpamTrash: true })
+    for (const { id } of page.ids) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      await ingestMessageId(ctx, id)
+    }
+    pageToken = page.nextPageToken
+  } while (pageToken)
+
+  const ticketThreads = await deps.db
+    .selectDistinct({ gmailThreadId: supportTickets.gmailThreadId })
+    .from(supportTickets)
+  for (const { gmailThreadId } of ticketThreads) {
+    const thread = await deps.gmail.getThread(gmailThreadId)
+    for (const { id } of thread.messages) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      await ingestMessageId(ctx, id)
+    }
+  }
+
+  await deps.db
+    .update(gmailSyncState)
+    .set({ lastHistoryId: preCapturedHistoryId, updatedAt: now() })
+    .where(and(eq(gmailSyncState.id, SYNC_STATE_ID), lt(gmailSyncState.lastHistoryId, preCapturedHistoryId)))
 }
 
 /**
