@@ -407,7 +407,15 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             .where(conditions.length > 0 ? and(...conditions) : undefined)
             .orderBy(
               sql`case when ${supportTickets.status} = 'escalated' then 0 else 1 end`,
-              desc(supportTickets.lastInboundAt),
+              // `last_inbound_at` is nullable — a ticket that has never had an inbound message
+              // (outbound-first, per ingest.ts's own comments) stays NULL until the customer
+              // first replies. Bare `desc(lastInboundAt)` would sort those NULLs FIRST (Postgres's
+              // default for DESC), jumping such a ticket to the top of its bucket ahead of ones
+              // with genuinely recent contact — the opposite of "most recent contact first".
+              // `coalesce` to `created_at` matches the exact fallback render-tickets.ts already
+              // uses for DISPLAYING that same row's age, so the sort order and the printed
+              // timestamp never disagree.
+              desc(sql`coalesce(${supportTickets.lastInboundAt}, ${supportTickets.createdAt})`),
             )
             .limit(100)
 

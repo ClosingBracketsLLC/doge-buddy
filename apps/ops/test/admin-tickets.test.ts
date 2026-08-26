@@ -84,6 +84,7 @@ describe('tickets view, thread, and guarded actions', () => {
     orderId: string | null
     claimedOrderNumber: string | null
     lastInboundAt: Date | null
+    createdAt: Date
     category: string | null
     sentiment: string | null
     escalationReason: string | null
@@ -98,7 +99,12 @@ describe('tickets view, thread, and guarded actions', () => {
         isSpam: overrides.isSpam ?? null,
         orderId: overrides.orderId ?? null,
         claimedOrderNumber: overrides.claimedOrderNumber ?? null,
-        lastInboundAt: overrides.lastInboundAt ?? new Date(),
+        // `??` would coerce an explicit `lastInboundAt: null` (a ticket that has never had an
+        // inbound message — outbound-first, per ingest.ts's own comments) back into `new Date()`,
+        // since `null` is nullish too. `'lastInboundAt' in overrides` distinguishes "not passed"
+        // (default to now) from "passed as null" (leave it null).
+        lastInboundAt: 'lastInboundAt' in overrides ? overrides.lastInboundAt : new Date(),
+        ...(overrides.createdAt ? { createdAt: overrides.createdAt } : {}),
         category: overrides.category ?? null,
         sentiment: overrides.sentiment ?? null,
         escalationReason: overrides.escalationReason ?? null,
@@ -203,6 +209,40 @@ describe('tickets view, thread, and guarded actions', () => {
     // Escalated pinned first, then last_inbound_at DESC among the rest.
     expect(escalatedIdx).toBeLessThan(newerIdx)
     expect(newerIdx).toBeLessThan(olderIdx)
+
+    await app.close()
+  })
+
+  it('4b. list: a NULL last_inbound_at ticket (never had an inbound message) sorts LAST among its status bucket, by its createdAt fallback — not first via Postgres\'s NULLS FIRST default for DESC', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const now = Date.now()
+    // Same status bucket for all three (no escalated pinning in play) so this isolates the
+    // last_inbound_at ordering itself. The NULL ticket's createdAt is set far in the past — if
+    // the ordering correctly falls back to createdAt for a NULL last_inbound_at (matching the
+    // display fallback in render-tickets.ts), it sorts LAST, behind both dated tickets. Under the
+    // bug (bare `desc(lastInboundAt)`, Postgres's NULLS FIRST default for DESC), it would
+    // wrongly sort FIRST instead.
+    const nullOld = await seedTicket({
+      status: 'new',
+      lastInboundAt: null,
+      createdAt: new Date(now - 300_000),
+    })
+    const recentContact = await seedTicket({ status: 'new', lastInboundAt: new Date(now) })
+    const olderContact = await seedTicket({ status: 'new', lastInboundAt: new Date(now - 100_000) })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: '/admin/tickets', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    const nullIdx = res.body.indexOf(nullOld.id)
+    const recentIdx = res.body.indexOf(recentContact.id)
+    const olderIdx = res.body.indexOf(olderContact.id)
+    expect(nullIdx).toBeGreaterThanOrEqual(0)
+    expect(recentIdx).toBeGreaterThanOrEqual(0)
+    expect(olderIdx).toBeGreaterThanOrEqual(0)
+    expect(recentIdx).toBeLessThan(olderIdx)
+    expect(olderIdx).toBeLessThan(nullIdx)
 
     await app.close()
   })
