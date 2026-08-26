@@ -29,6 +29,10 @@ const EnvSchema = z
     TELEGRAM_CHAT_ID: z.string().optional(),
     ANTHROPIC_API_KEY: z.string().min(1).optional(),
     SERPAPI_KEY: z.string().min(1).optional(),
+    GMAIL_SERVICE_ACCOUNT_EMAIL: z.string().optional(),
+    GMAIL_SERVICE_ACCOUNT_KEY: z.string().optional(),
+    GMAIL_IMPERSONATE: z.string().optional(),
+    SUPPORT_ADDRESS: z.string().optional(),
   })
   .superRefine((data, ctx) => {
     const shopifyVars = {
@@ -82,6 +86,24 @@ const EnvSchema = z
         message: `Telegram config requires both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID when either is set; missing: ${missing.join(', ')}`,
       })
     }
+
+    const gmailVars = {
+      GMAIL_SERVICE_ACCOUNT_EMAIL: data.GMAIL_SERVICE_ACCOUNT_EMAIL,
+      GMAIL_SERVICE_ACCOUNT_KEY: data.GMAIL_SERVICE_ACCOUNT_KEY,
+      GMAIL_IMPERSONATE: data.GMAIL_IMPERSONATE,
+      SUPPORT_ADDRESS: data.SUPPORT_ADDRESS,
+    }
+    const gmailSetCount = Object.values(gmailVars).filter((v) => v !== undefined).length
+    if (gmailSetCount > 0 && gmailSetCount < 4) {
+      const missing = Object.entries(gmailVars)
+        .filter(([, v]) => v === undefined)
+        .map(([k]) => k)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['gmail'],
+        message: `Gmail config requires all of GMAIL_SERVICE_ACCOUNT_EMAIL, GMAIL_SERVICE_ACCOUNT_KEY, GMAIL_IMPERSONATE, SUPPORT_ADDRESS when any are set; missing: ${missing.join(', ')}`,
+      })
+    }
   })
 
 export interface Config {
@@ -95,6 +117,7 @@ export interface Config {
   telegram?: { botToken: string; chatId: string }
   anthropic?: { apiKey: string }
   serpapi?: { apiKey: string }
+  gmail?: { saEmail: string; saKey: string; impersonate: string; supportAddress: string }
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
@@ -144,6 +167,20 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
 
   if (data.SERPAPI_KEY !== undefined) {
     config.serpapi = { apiKey: data.SERPAPI_KEY }
+  }
+
+  if (
+    data.GMAIL_SERVICE_ACCOUNT_EMAIL !== undefined &&
+    data.GMAIL_SERVICE_ACCOUNT_KEY !== undefined &&
+    data.GMAIL_IMPERSONATE !== undefined &&
+    data.SUPPORT_ADDRESS !== undefined
+  ) {
+    config.gmail = {
+      saEmail: data.GMAIL_SERVICE_ACCOUNT_EMAIL,
+      saKey: data.GMAIL_SERVICE_ACCOUNT_KEY.replace(/\\n/g, '\n'),
+      impersonate: data.GMAIL_IMPERSONATE,
+      supportAddress: data.SUPPORT_ADDRESS,
+    }
   }
 
   return config

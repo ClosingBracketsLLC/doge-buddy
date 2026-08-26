@@ -52,6 +52,11 @@ describe('settings', () => {
     expect(await s.get('refund.auto_max_cents')).toBe(2500)
   })
 
+  it('defaults workflow.support.enabled to true', async () => {
+    const s = createSettings(db)
+    expect(await s.get('workflow.support.enabled')).toBe(true)
+  })
+
   it('round-trips a mode value as a typed string', async () => {
     const s = createSettings(db)
     await s.set('workflow.sourcing.mode', 'auto')

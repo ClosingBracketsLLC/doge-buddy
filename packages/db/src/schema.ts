@@ -146,6 +146,13 @@ export const supportTickets = pgTable('support_tickets', {
   orderId: uuid('order_id').references(() => orders.id),
   agentSessionId: text('agent_session_id'),
   lastInboundAt: timestamp('last_inbound_at', { withTimezone: true }),
+  sentiment: text('sentiment'),
+  isSpam: boolean('is_spam'),
+  escalationReason: text('escalation_reason'),
+  lastTriagedAt: timestamp('last_triaged_at', { withTimezone: true }),
+  triageFailureCount: integer('triage_failure_count').notNull().default(0),
+  claimedOrderNumber: text('claimed_order_number'),
+  escalationNotifiedAt: timestamp('escalation_notified_at', { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 })
@@ -166,6 +173,8 @@ export const supportMessages = pgTable('support_messages', {
 export const gmailSyncState = pgTable('gmail_sync_state', {
   id: integer('id').primaryKey().default(1),
   lastHistoryId: bigint('last_history_id', { mode: 'bigint' }),
+  consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+  lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
   updatedAt: updatedAt(),
 })
 
