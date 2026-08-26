@@ -3,7 +3,7 @@
 AI-managed dog supply dropshipping store. Hydrogen storefront + an autonomous
 ops service (sourcing, fulfillment, support, scoring agents).
 
-Design docs: `docs/superpowers/specs/`. **Phase 5 (sourcing agent) is live:** weekly runs harvest trends, fetch suppliers, submit winning proposals, apply approvals → live-listed products on the store. Phase 6A (support email plumbing) is built and pending live verification — Gmail client, ingest pipeline, triage + admin ticket surface, and escalation alerts are merged and tested; owner-side: add Railway email vars and verify the test-email flow (tracked on `docs/OWNER-CHECKLIST.md`). Ops runs deployed on Railway with Shopify+CJ+Gmail webhooks live end-to-end; storefront deploys to Oxygen on push. Owner tasks + the next-session pointer live in `docs/OWNER-CHECKLIST.md`.
+Design docs: `docs/superpowers/specs/`. **Phase 5 (sourcing agent) is live:** weekly runs harvest trends, fetch suppliers, submit winning proposals, apply approvals → live-listed products on the store. Phase 6A (support email plumbing) is built and pending live verification — Gmail client, ingest pipeline, triage + admin ticket surface, and escalation alerts are merged and tested; owner-side: add Railway email vars and verify the test-email flow (tracked on `docs/OWNER-CHECKLIST.md`). Ops runs deployed on Railway with Shopify+CJ webhooks live end-to-end; Gmail support ingest is polling-based (no Pub/Sub, per the parent spec), built and merged, pending live verification (see above); storefront deploys to Oxygen on push. Owner tasks + the next-session pointer live in `docs/OWNER-CHECKLIST.md`.
 
 ## Development
 
