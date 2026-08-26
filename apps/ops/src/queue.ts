@@ -205,38 +205,55 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
 }
 
 /**
- * Per-cron queue options (`registerCron`'s `opts` param). Currently just the two knobs Phase 5's
- * `sourcing.weekly` cron needs to pin away from pg-boss defaults (retryLimit 2, a 15-minute
- * expiry) — extend as more crons need more `PgBoss.Queue` fields. Deliberately excludes `policy`:
- * `registerCron` reads and passes through whatever policy the queue already has (see below) so
- * opts can never accidentally change it.
+ * Per-cron queue options (`registerCron`'s `opts` param). `retryLimit`/`expireInSeconds` are the
+ * two knobs Phase 5's `sourcing.weekly` cron needs to pin away from pg-boss defaults (retryLimit
+ * 2, a 15-minute expiry) — extend as more crons need more `PgBoss.Queue` fields. `policy` lets a
+ * caller pin the queue's dedup policy explicitly (Task 12's minute-cadence singleton poll job
+ * needs `policy: 'singleton'`); when omitted, `registerCron` reads and passes through whatever
+ * policy the queue already has (see below) so opts can never *accidentally* change it — see
+ * `registerCron`'s own doc comment for the full explicit-vs-preserved story. `singletonKey` is
+ * schedule-level, not queue-level (pg-boss's `Queue` type has no such field), so it's carved out
+ * of the `PgBoss.Queue`-shaped object built for `createQueue`/`updateQueue` below and instead
+ * threaded through to the `boss.schedule(...)` call, which is how pg-boss actually enforces "at
+ * most one pending/active job for this cron's key at a time" on a `policy: 'singleton'` queue.
  */
 export interface CronJobOptions {
   retryLimit?: number
   expireInSeconds?: number
+  policy?: 'standard' | 'singleton'
+  singletonKey?: string
 }
 
 /**
  * Creates a queue (if needed), registers its worker, and schedules it on a cron. Used for
  * recurring jobs like `shopify.webhook-audit` that aren't triggered by application events.
  *
- * `opts` (optional) pins queue-level settings — e.g. `retryLimit`/`expireInSeconds` — that
- * diverge from pg-boss's defaults. Omitted `opts` is today's behavior exactly: `createQueueRetrying`
- * still creates the queue with no options, same as every existing caller. When `opts` is given,
- * `createQueueRetrying(boss, name, { name, ...opts })` covers the *first-ever* create, but
- * `createQueue` is idempotent — if the queue already exists (e.g. `startQueue` or an earlier
- * `registerCron` call created it first with defaults), that create is a silent no-op and the
- * options never apply. So follow up with `boss.updateQueue(name, { name, ...opts })`, which pg-boss
- * always applies (update, not create-if-missing) and makes the settings stick either way.
+ * `opts` (optional) pins queue-level settings — e.g. `retryLimit`/`expireInSeconds`/`policy` —
+ * that diverge from pg-boss's defaults, plus the schedule-level `singletonKey`. Omitted `opts` is
+ * today's behavior exactly: `createQueueRetrying` still creates the queue with no options, same
+ * as every existing caller, and `boss.schedule(name, cron)` keeps its two-arg form. When `opts` is
+ * given, `createQueueRetrying(boss, name, { name, ...queueOpts })` (where `queueOpts` is `opts`
+ * minus `singletonKey`) covers the *first-ever* create, but `createQueue` is idempotent — if the
+ * queue already exists (e.g. `startQueue` or an earlier `registerCron` call created it first with
+ * defaults), that create is a silent no-op and the options never apply. So follow up with
+ * `boss.updateQueue(name, { name, ...queueOpts })`, which pg-boss always applies (update, not
+ * create-if-missing) and makes the settings stick either way.
  *
  * That follow-up `updateQueue` call must pass `policy` explicitly. pg-boss's `updateQueue`
  * (`manager.js`) destructures `const { policy = 'standard' } = options` *before* building its SQL
  * params, so an omitted `policy` isn't passed through as `null` for the query's `COALESCE(...,
  * policy)` to preserve — it's resolved to the literal string `'standard'` in JS first. That means
  * calling `updateQueue` without `policy` silently downgrades any queue (e.g. one created elsewhere
- * with `policy: 'singleton'`) back to `'standard'`. So read the queue's current policy via
- * `getQueue` first and pass it straight through, defaulting to `'standard'` only for the
- * brand-new-queue case where `getQueue` finds nothing yet.
+ * with `policy: 'singleton'`) back to `'standard'`. When `opts.policy` is given explicitly, that
+ * value wins outright — no need to consult the queue's current policy at all. Only when `opts`
+ * omits `policy` does this read the queue's current policy via `getQueue` and pass it straight
+ * through, defaulting to `'standard'` only for the brand-new-queue case where `getQueue` finds
+ * nothing yet.
+ *
+ * Finally, when `opts.singletonKey` is set, `boss.schedule` is called with pg-boss's 4-arg form
+ * (`name, cron, {}, { singletonKey }`) so every run of this cron dedupes against that key — e.g. a
+ * minute-cadence poll job that must never have two runs pending/active at once. Without it,
+ * `schedule` keeps the plain 2-arg form.
  */
 export async function registerCron<ReqData extends object = object>(
   boss: PgBoss,
@@ -245,11 +262,16 @@ export async function registerCron<ReqData extends object = object>(
   handler: PgBoss.WorkHandler<ReqData>,
   opts?: CronJobOptions,
 ): Promise<void> {
-  await createQueueRetrying(boss, name, opts ? { name, ...opts } : undefined)
+  const { singletonKey, ...queueOpts } = (opts ?? {}) as CronJobOptions
+  await createQueueRetrying(boss, name, opts ? { name, ...queueOpts } : undefined)
   if (opts) {
-    const current = await boss.getQueue(name)
-    await boss.updateQueue(name, { name, policy: current?.policy ?? 'standard', ...opts })
+    const policy = queueOpts.policy ?? (await boss.getQueue(name))?.policy ?? 'standard'
+    await boss.updateQueue(name, { name, policy, ...queueOpts })
   }
   await boss.work(name, handler)
-  await boss.schedule(name, cron)
+  if (singletonKey) {
+    await boss.schedule(name, cron, {}, { singletonKey })
+  } else {
+    await boss.schedule(name, cron)
+  }
 }
