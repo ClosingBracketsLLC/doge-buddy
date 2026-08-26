@@ -544,6 +544,7 @@ describe('runIngest', () => {
       throw new Error('boom mid-resync')
     })
 
+    const stateBeforeFailure = await syncState()
     await expect(runIngest(deps)).rejects.toThrow('boom mid-resync')
 
     // Page 1's write already committed — it isn't rolled back by page 2's failure.
@@ -553,6 +554,9 @@ describe('runIngest', () => {
     // Nothing the failed resync never reached was touched.
     expect((await ticketByThread(first.threadId))!.status).toBe('resolved')
     expect(await ticketByThread(msgB.threadId)).toBeUndefined()
+    // The pre-captured historyId is never stored until the WHOLE resync completes — a mid-resync
+    // failure must leave gmail_sync_state exactly where it was, not a partial/interim value.
+    expect((await syncState())?.lastHistoryId).toBe(stateBeforeFailure?.lastHistoryId)
 
     listMessagesSpy.mockRestore()
     const modifyMessage = vi.spyOn(gmail, 'modifyMessage')
@@ -567,6 +571,97 @@ describe('runIngest', () => {
     expect(await ticketByThread(msgB.threadId)).toBeDefined()
     expect((await ticketByThread(first.threadId))!.status).toBe('resolved')
     expect(modifyMessage).not.toHaveBeenCalledWith(msgA.id, expect.anything())
+  })
+
+  it('(c2) a retried resync (history still expired on the retry) replays page 1 as a no-op and finishes the sweep on the second attempt', async () => {
+    await seedSyncState()
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+    const resolvedTicket = (await ticketByThread(first.threadId))!
+    await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, resolvedTicket.id))
+
+    gmail.expireHistory()
+    const msgA = gmail.receiveInbound({ from: 'a@example.com', to: [SUPPORT], subject: 'A', bodyText: 'a body' })
+    const msgB = gmail.receiveInbound({ from: 'b@example.com', to: [SUPPORT], subject: 'B', bodyText: 'b body' })
+
+    let call = 0
+    const listMessagesSpy = vi.spyOn(gmail, 'listMessages').mockImplementation(async () => {
+      call++
+      if (call === 1) return { ids: [{ id: msgA.id, threadId: msgA.threadId }], nextPageToken: 'page-2' }
+      throw new Error('boom mid-resync')
+    })
+
+    await expect(runIngest(deps)).rejects.toThrow('boom mid-resync')
+    const ticketA = await ticketByThread(msgA.threadId)
+    expect(ticketA).toBeDefined()
+    expect(await ticketByThread(msgB.threadId)).toBeUndefined()
+
+    listMessagesSpy.mockRestore()
+    // Unlike scenario (c): real Gmail keeps 404ing on the same now-expired startHistoryId until the
+    // NEXT successful resync stores a fresh one. Simulate that by expiring history again, forcing
+    // the retry to go through runResync a second time rather than falling back to the incremental
+    // walk (which is what (c) already covers).
+    gmail.expireHistory()
+    const expectedHistoryId = BigInt((await gmail.getProfile()).historyId)
+    const modifyMessage = vi.spyOn(gmail, 'modifyMessage')
+
+    const result = await runIngest(deps)
+
+    // msgA (and the resolved ticket's original message) re-match the q filter and are walked again
+    // by this second resync — both are no-ops via the insert gate. Only msgB, never reached by the
+    // first attempt, is newly inserted.
+    expect(result.insertedMessages).toBe(1)
+    expect(await messagesOfTicket(ticketA!.id)).toHaveLength(1)
+    const ticketB = await ticketByThread(msgB.threadId)
+    expect(ticketB).toBeDefined()
+    expect(ticketB!.status).toBe('new')
+    expect(await messagesOfTicket(ticketB!.id)).toHaveLength(1)
+
+    expect((await ticketByThread(first.threadId))!.status).toBe('resolved')
+    expect(await messagesOfTicket(resolvedTicket.id)).toHaveLength(1)
+    expect(modifyMessage).not.toHaveBeenCalledWith(msgA.id, expect.anything())
+    expect(modifyMessage).not.toHaveBeenCalledWith(first.id, expect.anything())
+
+    expect((await syncState())?.lastHistoryId).toBe(expectedHistoryId)
+  })
+
+  it('a getThread failure on one known thread is skipped, not fatal: the resync still completes, other mail is still ingested, and sync state still advances', async () => {
+    await seedSyncState()
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+
+    gmail.expireHistory()
+    const healthy = gmail.receiveInbound({ from: 'bob@example.com', to: [SUPPORT], subject: 'New', bodyText: 'new mail' })
+
+    // `healthy` mints its own ticket during this same resync's q-filter walk (step 2), so by the
+    // time the known-thread walk (step 3) runs, BOTH `first.threadId` and `healthy.threadId` are
+    // known threads — and `SELECT DISTINCT` gives no ordering guarantee over which one is walked
+    // first. Target the failure at `first.threadId` specifically (rather than relying on
+    // `failNext`'s one-shot-in-call-order semantics) so the assertions below are deterministic
+    // regardless of query order — this simulates a thread the owner deleted from Gmail entirely
+    // (getThread 404s -> plain GmailApiError) while everything else in the mailbox is healthy.
+    const realGetThread = gmail.getThread.bind(gmail)
+    vi.spyOn(gmail, 'getThread').mockImplementation(async (threadId) => {
+      if (threadId === first.threadId) throw new GmailApiError('Requested entity was not found.', 404, 'notFound')
+      return realGetThread(threadId)
+    })
+
+    const expectedHistoryId = BigInt((await gmail.getProfile()).historyId)
+
+    const result = await runIngest(deps)
+
+    expect(result.insertedMessages).toBe(1)
+    const healthyTicket = await ticketByThread(healthy.threadId)
+    expect(healthyTicket).toBeDefined()
+    expect(healthyTicket!.status).toBe('new')
+
+    // The resync completed and stored the pre-captured id despite the dead thread.
+    expect((await syncState())?.lastHistoryId).toBe(expectedHistoryId)
+
+    expect(alert).toHaveBeenCalledTimes(1)
+    expect(alert.mock.calls[0]![0]).toBe('warning')
+    expect(alert.mock.calls[0]![1]).toBe('support_resync_thread_failed')
+    expect(alert.mock.calls[0]![2]).toMatchObject({ threadIds: [first.threadId] })
   })
 })
 

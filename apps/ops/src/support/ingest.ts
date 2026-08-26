@@ -164,7 +164,13 @@ export async function runIngest(deps: IngestDeps): Promise<IngestResult> {
  *   3. Then every already-known ticket thread's LIVE messages via `getThread` — `q` cannot see a
  *      follow-up that dropped `SUPPORT_ADDRESS` from every header, but its thread is already ours.
  *      Ids already processed by step 2 are skipped, so a thread whose messages also matched the
- *      q-filter is never double-fetched.
+ *      q-filter is never double-fetched. A `getThread` failure (e.g. a thread the owner deleted
+ *      from Gmail entirely, 404ing) is caught PER THREAD and skipped — never allowed to fail the
+ *      whole resync. An uncaught failure here would be a poison pill: the sync-state UPDATE (step
+ *      4) would never run, so every subsequent poll would hit `HistoryExpiredError` again, re-enter
+ *      this same resync, and die on the same dead thread forever. Skipped threads are reported in
+ *      one aggregate warning alert (mirroring §2.7's label-failure pattern) rather than failing the
+ *      job.
  *   4. Only THEN store the PRE-captured historyId, guarded by the same comparator as the normal
  *      path. Storing last is what makes step 1's early capture safe: if the resync itself is
  *      interrupted, nothing is stored, so the next poll either sees history-expired again (and
@@ -194,13 +200,31 @@ async function runResync(ctx: IngestContext, now: () => Date): Promise<void> {
   const ticketThreads = await deps.db
     .selectDistinct({ gmailThreadId: supportTickets.gmailThreadId })
     .from(supportTickets)
+  const skippedThreads: { threadId: string; error: unknown }[] = []
   for (const { gmailThreadId } of ticketThreads) {
-    const thread = await deps.gmail.getThread(gmailThreadId)
+    let thread: { messages: { id: string }[] }
+    try {
+      thread = await deps.gmail.getThread(gmailThreadId)
+    } catch (err) {
+      // A thread the owner deleted from Gmail entirely (or any other getThread failure) must not
+      // wedge the resync: an uncaught throw here would skip the step-4 store below, so the NEXT
+      // poll would hit HistoryExpiredError again, re-enter this resync, and die on the same thread
+      // forever. Skip it and keep going — the rest of the mailbox still needs to be swept.
+      skippedThreads.push({ threadId: gmailThreadId, error: err })
+      continue
+    }
     for (const { id } of thread.messages) {
       if (seen.has(id)) continue
       seen.add(id)
       await ingestMessageId(ctx, id)
     }
+  }
+
+  if (skippedThreads.length > 0) {
+    await deps.alert('warning', 'support_resync_thread_failed', {
+      threadIds: skippedThreads.map((s) => s.threadId),
+      errors: skippedThreads.map((s) => (s.error instanceof Error ? s.error.message : String(s.error))),
+    })
   }
 
   await deps.db
