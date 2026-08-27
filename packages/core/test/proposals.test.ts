@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { ProposalPayloadSchema, NewListingPayloadSchema, RefundPayloadSchema } from '@doge-buddy/core'
+import {
+  ProposalPayloadSchema, NewListingPayloadSchema, RefundPayloadSchema, SupportReplyPayloadSchema,
+} from '@doge-buddy/core'
 
 const validListing = {
   type: 'new_listing',
@@ -60,6 +62,22 @@ describe('NewListingPayloadSchema', () => {
   })
 })
 
+describe('SupportReplyPayloadSchema', () => {
+  const validReply = {
+    type: 'support_reply',
+    ticketId: '4b4e6ac8-3e37-4f6e-9e0a-0a4bbf9a4a11',
+    body: 'Thanks for writing in.',
+    threadSnapshotAt: '2026-08-27T12:00:00.000Z',
+  }
+  it('accepts a reply carrying its thread snapshot', () => {
+    expect(SupportReplyPayloadSchema.parse(validReply).threadSnapshotAt).toBe('2026-08-27T12:00:00.000Z')
+  })
+  it('requires threadSnapshotAt as an ISO datetime — the apply staleness guard has nothing to compare without it', () => {
+    expect(SupportReplyPayloadSchema.safeParse({ ...validReply, threadSnapshotAt: undefined }).success).toBe(false)
+    expect(SupportReplyPayloadSchema.safeParse({ ...validReply, threadSnapshotAt: '2026-08-27' }).success).toBe(false)
+  })
+})
+
 describe('RefundPayloadSchema', () => {
   const validRefund = {
     type: 'refund',
@@ -69,9 +87,14 @@ describe('RefundPayloadSchema', () => {
     reason: 'Item arrived damaged',
     openCjDispute: true,
     cjDisputeReasonId: 'r42',
+    threadSnapshotAt: '2026-08-27T12:00:00.000Z',
   }
   it('accepts a refund with a CJ dispute + reason id', () => {
     expect(RefundPayloadSchema.parse(validRefund).amountCents).toBe(1999)
+  })
+  it('requires threadSnapshotAt as an ISO datetime', () => {
+    expect(RefundPayloadSchema.safeParse({ ...validRefund, threadSnapshotAt: undefined }).success).toBe(false)
+    expect(RefundPayloadSchema.safeParse({ ...validRefund, threadSnapshotAt: 'yesterday' }).success).toBe(false)
   })
   it('requires cjDisputeReasonId when openCjDispute is true', () => {
     expect(RefundPayloadSchema.safeParse({ ...validRefund, cjDisputeReasonId: undefined }).success).toBe(false)

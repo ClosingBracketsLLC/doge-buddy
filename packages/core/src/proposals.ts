@@ -45,10 +45,21 @@ export const NewListingPayloadSchema = z
   })
 export type NewListingPayload = z.infer<typeof NewListingPayloadSchema>
 
+/**
+ * The thread snapshot the drafting run actually saw — the ticket's `last_inbound_at` as read under
+ * the run's CAS claim (6B §1 `threadSnapshotAt`), ISO-8601. REQUIRED on both support payloads:
+ * the apply executors compare it against the ticket's current `last_inbound_at` to detect a reply
+ * drafted against a thread the customer has since added to (a stale draft must not send), and a
+ * proposal that carried no snapshot could not be checked at all. It lives INSIDE the payload
+ * because `proposals` has no column for it and these schemas are strict.
+ */
+const threadSnapshotAt = z.iso.datetime()
+
 export const SupportReplyPayloadSchema = z.object({
   type: z.literal('support_reply'),
   ticketId: z.string().uuid(),
   body: z.string().min(1),
+  threadSnapshotAt,
 })
 export type SupportReplyPayload = z.infer<typeof SupportReplyPayloadSchema>
 
@@ -61,6 +72,7 @@ export const RefundPayloadSchema = z
     reason: z.string().min(1),
     openCjDispute: z.boolean(),
     cjDisputeReasonId: z.string().min(1).optional(),
+    threadSnapshotAt,
   })
   .refine((p) => !p.openCjDispute || p.cjDisputeReasonId !== undefined, {
     message: 'cjDisputeReasonId is required when openCjDispute is true',
