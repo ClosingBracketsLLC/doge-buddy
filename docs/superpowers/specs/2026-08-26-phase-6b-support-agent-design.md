@@ -297,12 +297,17 @@ requires `reply` — a refund the customer isn't told about is a bug).
    escalate refund requests it cannot back. `cjDisputeReasonId` required when `openCjDispute`
    (core zod already enforces).
 
-**Submit step (ordering pinned):** validator → commit `triaged → awaiting_approval` (guarded;
-0 rows → audit + return, someone else moved the ticket) → expire this ticket's still-pending
-support proposals (audit `superseded` — a reopen re-run must never leave two live refund
-approvals on the owner's phone) → `submitProposal` for the reply, then the refund if present —
-**both with row-level `ticketId` set** (refund additionally `orderId`); each rides its own
-mode/cap settings. Transition-before-submit is what makes a future auto-mode flip a pure config
+**Submit step (ordering pinned; amended 2026-08-27 after implementation review):** validator →
+commit `triaged → awaiting_approval` (guarded; 0 rows → audit + return, someone else moved the
+ticket) → supersede: expire this ticket's still-pending REPLY proposals always, but pending
+REFUND proposals ONLY when the new output carries a `refund` (audit `superseded`; a run that
+proposes no refund isn't replacing the standing one — expiring it would strand a
+refund-promising reply with nothing behind it, the exact state the validator's sibling
+exemption certified against) → `submitProposal` for the REFUND first (if present), then the
+reply — **both with row-level `ticketId` set** (refund additionally `orderId`); each rides its
+own mode/cap settings. Refund-first because the two submits are separate transactions: a crash
+between them leaves a refund with no reply (owner approves money, customer merely gets no email
+— recoverable) instead of a customer-facing promise with no money behind it. Transition-before-submit is what makes a future auto-mode flip a pure config
 change: auto-approve enqueues apply instantly, and the apply's `awaiting_approval`-anchored
 checks must already hold.
 
