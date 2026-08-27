@@ -60,6 +60,9 @@ const PROMISE_RE =
  * count as one promised-action hit. */
 const PROMISE_PROXIMITY_CHARS = 200
 
+/** A refund proposal that is still on its way to moving money (or already has). Shared by the
+ * promised-action screen's sibling lookup and the accumulation bound — both ask the same question:
+ * is there refund money on this order that is not cancelled? */
 const LIVE_REFUND_PROPOSAL_STATUSES = ['pending', 'approved', 'applying', 'applied'] as const
 
 // -- URL / domain screen --
@@ -374,7 +377,8 @@ export async function validateReplyBody(
 }
 
 /**
- * Refund cross-checks (spec §3): verified order, non-NULL total, accumulation bound, sender
+ * Refund cross-checks (spec §3): verified order, non-NULL total, accumulation bound over every
+ * LIVE prior refund proposal (pending/approved/applying/applied — not just applied), sender
  * authenticated (dmarc=pass on the ticket's latest inbound message), and — when the agent wants to
  * open a CJ dispute — a reason id. Every one of these re-derives from the DB; nothing here trusts
  * the agent's own numbers.
@@ -391,16 +395,27 @@ export async function validateRefundIntent(
     return fail('refund_unverified_order', 'order total is not known (order missing or total_cents is NULL)')
   }
 
-  const priorApplied = await db
+  // Every LIVE refund proposal counts against the total, not just the applied ones: a `pending` or
+  // `approved` refund is money the owner is one tap away from moving (an `approved` one is already
+  // enqueued for apply), so summing only `applied` lets a second proposal be drafted, approved, and
+  // applied on top of a first that lands moments later — a double refund past the order total, the
+  // exact outcome this bound exists to prevent.
+  const priorLive = await db
     .select({ amountCents: sql<number>`(${proposals.payload} ->> 'amountCents')::int` })
     .from(proposals)
-    .where(and(eq(proposals.orderId, ticket.orderId), eq(proposals.type, 'refund'), eq(proposals.status, 'applied')))
-  const priorAppliedSum = priorApplied.reduce((sum, row) => sum + (row.amountCents ?? 0), 0)
+    .where(
+      and(
+        eq(proposals.orderId, ticket.orderId),
+        eq(proposals.type, 'refund'),
+        inArray(proposals.status, [...LIVE_REFUND_PROPOSAL_STATUSES]),
+      ),
+    )
+  const priorLiveSum = priorLive.reduce((sum, row) => sum + (row.amountCents ?? 0), 0)
 
-  if (refund.amountCents > order.totalCents - priorAppliedSum) {
+  if (refund.amountCents > order.totalCents - priorLiveSum) {
     return fail(
       'refund_exceeds_total',
-      `requested ${refund.amountCents}c exceeds remaining ${order.totalCents - priorAppliedSum}c (total ${order.totalCents}c, prior applied ${priorAppliedSum}c)`,
+      `requested ${refund.amountCents}c exceeds remaining ${order.totalCents - priorLiveSum}c (total ${order.totalCents}c, prior live ${priorLiveSum}c)`,
     )
   }
 

@@ -33,14 +33,16 @@ export class StaleProposalStatusError extends Error {
 /**
  * Exhaustive legal-transition matrix for `proposals.status`. Every status change on
  * proposals across the approval pipeline must flow through `applyProposalTransition` below — no
- * job may write `status` directly — with two narrow, explicitly-guarded exceptions:
- * `jobs/proposal-expire-sweep.ts`'s cron and `http/admin/routes.ts`'s admin-load sweep
- * (`sweepExpiredOnLoad`) each run their own bulk `UPDATE proposals SET status = 'expired' WHERE
- * status = 'pending' AND expires_at < now()` — a guarded, single-status-in/single-status-out bulk
- * expiry that this per-row helper has no batch form for, and whose own `WHERE status = 'pending'`
- * clause is the guard (the same optimistic-concurrency discipline this table exists to enforce,
- * just expressed as a bulk predicate instead of a single-row `applyProposalTransition` call). So
- * this table is the single source of truth for every OTHER status change.
+ * job may write `status` directly — with three narrow, explicitly-guarded exceptions, all of them
+ * bulk `pending → expired` flips this per-row helper has no batch form for, and each guarded by its
+ * own `WHERE status = 'pending'` clause (the same optimistic-concurrency discipline this table
+ * exists to enforce, just expressed as a bulk predicate instead of a single-row call):
+ *   1. `jobs/proposal-expire-sweep.ts`'s cron (`… AND expires_at < now()`).
+ *   2. `http/admin/routes.ts`'s admin-load sweep, `sweepExpiredOnLoad` (same predicate).
+ *   3. `jobs/support-agent-run.ts`'s supersede step, which expires a ticket's still-pending
+ *      support proposals when a newer agent run replaces them (`… AND ticket_id = $1 AND type IN
+ *      (…)`), writing one `proposal.superseded` audit row per flipped row.
+ * So this table is the single source of truth for every OTHER status change.
  *
  * Self-transitions (from === to) are always illegal and are never listed here.
  */

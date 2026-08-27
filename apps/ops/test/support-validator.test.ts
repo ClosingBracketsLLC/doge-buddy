@@ -551,9 +551,31 @@ describe('support validator', () => {
       expect((result as { code: string }).code).toBe('refund_exceeds_total')
     })
 
-    it('does not count non-applied prior proposals toward the accumulation bound', async () => {
+    // A `pending`/`approved`/`applying` refund is money the owner is one tap away from moving (an
+    // approved one is already enqueued for apply). Counting only `applied` would let a second
+    // refund be drafted, approved, and applied on top of a first that lands moments later.
+    it.each(['pending', 'approved', 'applying'] as const)(
+      'counts a prior %s refund toward the accumulation bound',
+      async (status) => {
+        const orderId = await seedOrder(2000)
+        await seedRefundProposal({ orderId, status, amountCents: 1900 })
+        const ticketId = await seedTicket({ orderId })
+        await seedInboundMessage(ticketId, { authResults: 'dkim=pass; dmarc=pass' })
+        const result = await validateRefundIntent(
+          db,
+          { id: ticketId, orderId },
+          { amountCents: 1500, openCjDispute: false },
+        )
+        expect(result.ok).toBe(false)
+        expect((result as { code: string }).code).toBe('refund_exceeds_total')
+      },
+    )
+
+    it('does not count rejected, expired, or failed prior proposals toward the bound', async () => {
       const orderId = await seedOrder(2000)
-      await seedRefundProposal({ orderId, status: 'pending', amountCents: 1900 })
+      await seedRefundProposal({ orderId, status: 'rejected', amountCents: 1900 })
+      await seedRefundProposal({ orderId, status: 'expired', amountCents: 1900 })
+      await seedRefundProposal({ orderId, status: 'failed', amountCents: 1900 })
       const ticketId = await seedTicket({ orderId })
       await seedInboundMessage(ticketId, { authResults: 'dkim=pass; dmarc=pass' })
       const result = await validateRefundIntent(

@@ -52,14 +52,15 @@ export const AGENT_NO_ACTION_ACTION = 'support.agent_no_action'
 /** A `propose` outcome whose `triaged → awaiting_approval` flip matched 0 rows — nothing is
  * submitted, so this row is the only record that a drafted reply was thrown away. */
 export const AGENT_PROPOSE_LOST_RACE_ACTION = 'support.agent_propose_lost_race'
+/** The same thing for an `escalate` outcome whose guarded flip matched 0 rows. Its own action
+ * rather than a generic skip: this one happened AFTER a run was paid for, and telling it apart
+ * from a claim that never ran matters when reading the audit trail. */
+export const AGENT_ESCALATE_LOST_RACE_ACTION = 'support.agent_escalate_lost_race'
 /** One row per failed attempt, carrying the failure code (and the validator's detail, which is
  * deliberately audit-only — it quotes the rejected draft and is never customer-visible). */
 export const AGENT_RUN_FAILED_ACTION = 'support.agent_run_failed'
 /** One row per proposal expired by a newer run's propose outcome. */
 export const PROPOSAL_SUPERSEDED_ACTION = 'proposal.superseded'
-
-/** The proposal types a support run owns — the set a newer run supersedes. */
-const SUPPORT_PROPOSAL_TYPES = ['support_reply', 'refund'] as const
 
 export interface SupportAgentJobDeps {
   db: Db
@@ -277,8 +278,15 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
   }
 }
 
-/** Best-effort `rm -rf` of the SDK's local session mirror. Never throws — Postgres is the durable
- * copy, and a run must not fail because a temp directory could not be removed. */
+/**
+ * Best-effort `rm -rf` of the SDK's local session mirror. Never throws — Postgres is the durable
+ * copy, and a run must not fail because a temp directory could not be removed.
+ *
+ * ASSUMES SERIAL RUNS: this removes the WHOLE shared config dir, not one run's subdirectory, so a
+ * concurrently running support agent in the same process would have its live mirror deleted out
+ * from under it. The queue wiring must keep this queue's worker batch size at 1 (and one worker per
+ * process) — if that ever changes, this has to narrow to the run's own session subdirectory first.
+ */
 async function removeLocalSessionMirror(): Promise<void> {
   try {
     await fs.rm(SUPPORT_LOCAL_CONFIG_DIR, { recursive: true, force: true })
@@ -328,16 +336,39 @@ async function runAndHandleOutcome(
   /** The value we believe `agent_session_id` currently holds — every guarded write uses it. */
   let knownSessionId = args.resumeSessionId
 
-  let result = await callRunner(deps, runFn, runDeps, { runId, ctx: args.ctx }, ticketId)
-
   // --- Resume failure (spec §2). ANY error before the first assistant message on a RESUMED run is
   // resume failure — the SDK surfaces materialization errors as plain `Error`s with no typed class,
-  // so this is the only signal available. A run whose result MESSAGE arrived (even one whose DB
-  // write then threw) always reports `failedBeforeFirstAssistant: false`, so an authoritative
-  // result can never be misread as a resume failure here.
-  if (args.ctx.isResume && result.status !== 'succeeded' && result.failedBeforeFirstAssistant) {
+  // so this is the only signal available. It arrives in TWO shapes, and both have to route here:
+  //   (a) a HarnessResult with `failedBeforeFirstAssistant` — a run whose result MESSAGE arrived
+  //       (even one whose DB write then threw) always reports `false`, so an authoritative result
+  //       can never be misread as a resume failure; and
+  //   (b) a THROW out of the runner — no result at all, which is the strongest possible form of
+  //       "died before the first assistant message". A throw on a FRESH run is not determinable as
+  //       resume failure (there is no session to blame), so that one falls through to the failure
+  //       path as before.
+  let result: HarnessResult<SupportOutput> | null = null
+  let resumeThrow: unknown = null
+  try {
+    result = await runFn(runDeps, { runId, ctx: args.ctx })
+  } catch (err) {
+    if (!args.ctx.isResume) {
+      await recordFailureSafely(deps, ticketId, { code: 'run_threw', detail: errorToDetail(err) })
+      throw err
+    }
+    resumeThrow = err
+  }
+
+  if (
+    args.ctx.isResume &&
+    (resumeThrow !== null || (result!.status !== 'succeeded' && result!.failedBeforeFirstAssistant))
+  ) {
     await deps
-      .alert('warning', 'support_resume_failed', { ticketId, runId, sessionId: args.resumeSessionId })
+      .alert('warning', 'support_resume_failed', {
+        ticketId,
+        runId,
+        sessionId: args.resumeSessionId,
+        ...(resumeThrow === null ? {} : { error: errorToDetail(resumeThrow) }),
+      })
       .catch(() => {})
     await clearSessionId(deps.db, ticketId, knownSessionId)
     knownSessionId = null
@@ -351,17 +382,28 @@ async function runAndHandleOutcome(
       .values({ workflow: 'support', triggerRef: ticketId, model: SUPPORT_MODEL, status: 'running' })
       .returning({ id: agentRuns.id })
     runId = retryRun!.id
-    result = await callRunner(deps, runFn, runDeps, { runId, ctx: freshCtx }, ticketId)
+    try {
+      result = await runFn(runDeps, { runId, ctx: freshCtx })
+    } catch (err) {
+      // Only the RETRY's failure enters the failure path (spec §2).
+      await recordFailureSafely(deps, ticketId, { code: 'run_threw', detail: errorToDetail(err) })
+      throw err
+    }
   }
 
+  // Non-null from here: the first call either returned, or — on a throw — already rethrew (fresh
+  // run) or was replaced by the retry above (resumed run).
+  const settled = result!
+
   // --- Mirror error: the durable transcript has a hole, so this session must never be resumed.
-  // Checked on the result we actually process — a first attempt that was replaced by the resume
-  // retry above already had its session cleared and its own alert. The outcome still processes
-  // normally; only the session-id store is suppressed (it would undo this clear).
+  // Checked on the result we actually process. A first attempt replaced by the resume retry above
+  // is deliberately not checked: its session was already cleared and it already produced its own
+  // `support_resume_failed` alert (NOT a mirror alert), so the actionable half is covered and a
+  // second warning would be noise about a transcript nothing can resume any more.
   let sessionUsable = true
-  if (result.sawMirrorError) {
+  if (settled.sawMirrorError) {
     await deps
-      .alert('warning', 'support_session_mirror_error', { ticketId, runId, sessionId: result.sessionId })
+      .alert('warning', 'support_session_mirror_error', { ticketId, runId, sessionId: settled.sessionId })
       .catch(() => {})
     await clearSessionId(deps.db, ticketId, knownSessionId)
     knownSessionId = null
@@ -371,9 +413,9 @@ async function runAndHandleOutcome(
   // --- Failure path: no usable output. `aborted` is the budget/turn ceiling; `failed` covers a
   // throw, the watchdog, and a schema-invalid `structured_output` (which the harness reports as a
   // failed run rather than a throw).
-  if (result.status !== 'succeeded' || result.output === null) {
-    const code = result.status === 'aborted' ? 'run_aborted' : 'run_failed'
-    await recordFailure(deps, ticketId, { code, detail: `agent run ${result.status}` })
+  if (settled.status !== 'succeeded' || settled.output === null) {
+    const code = settled.status === 'aborted' ? 'run_aborted' : 'run_failed'
+    await recordFailureSafely(deps, ticketId, { code, detail: `agent run ${settled.status}` })
     throw new Error(`support agent run ${code} for ticket ${ticketId}`)
   }
 
@@ -383,14 +425,14 @@ async function runAndHandleOutcome(
   const validation = await validateSupportOutput(
     deps.db,
     { id: ticket.id, orderId: ticket.orderId, customerEmail: ticket.customerEmail },
-    result.output,
+    settled.output,
   )
   if (!validation.ok) {
-    await recordFailure(deps, ticketId, { code: validation.code, detail: validation.detail })
+    await recordFailureSafely(deps, ticketId, { code: validation.code, detail: validation.detail })
     throw new Error(`support agent output rejected (${validation.code}) for ticket ${ticketId}`)
   }
 
-  const output = result.output
+  const output = settled.output
   if (output.outcome === 'no_action') {
     await deps.db.insert(auditLog).values({
       actor: 'system',
@@ -414,10 +456,10 @@ async function runAndHandleOutcome(
     if (escalated.length === 0) {
       await deps.db.insert(auditLog).values({
         actor: 'system',
-        action: AGENT_RUN_SKIPPED_ACTION,
+        action: AGENT_ESCALATE_LOST_RACE_ACTION,
         entityType: 'ticket',
         entityId: ticketId,
-        detail: { reason: 'escalate_lost_race', runId },
+        detail: { runId },
       })
     }
   } else {
@@ -429,9 +471,10 @@ async function runAndHandleOutcome(
       // NFKC-normalized body it actually checked).
       body: validation.normalizedBody ?? output.reply.body,
       runId,
-      // A ticket with no inbound message yet has no snapshot; "as of now" is then the truthful
-      // one — any later inbound correctly reads as newer to the apply executors' staleness guard.
-      threadSnapshotAt: (args.threadSnapshotAt ?? now()).toISOString(),
+      // A ticket with no inbound message yet has no snapshot. Fail CLOSED with the epoch rather
+      // than "now": every conceivable later inbound then reads as NEWER, so the apply executors'
+      // staleness guard treats such a draft as stale instead of waving it through.
+      threadSnapshotAt: (args.threadSnapshotAt ?? new Date(0)).toISOString(),
     })
   }
 
@@ -448,28 +491,39 @@ async function runAndHandleOutcome(
     })
     .where(eq(supportTickets.id, ticketId))
 
-  if (sessionUsable && result.sessionId !== null) {
+  if (sessionUsable && settled.sessionId !== null) {
     await deps.db
       .update(supportTickets)
-      .set({ agentSessionId: result.sessionId })
+      .set({ agentSessionId: settled.sessionId })
       .where(and(eq(supportTickets.id, ticketId), sessionIdIs(knownSessionId)))
   }
 }
 
-/** Runs the agent, routing a throw out of the runner itself through the failure path before it
- * propagates. (`runAgentQuery` never throws — but `deps.runFn` and the MCP plumbing can.) */
-async function callRunner(
+/**
+ * `recordFailure`, wrapped so its OWN failure can never mask the real one. Every caller rethrows
+ * the original error immediately after; if the bookkeeping transaction itself throws (the DB is
+ * down — the usual reason the run failed in the first place), swallowing it here keeps that
+ * original error intact and reports the bookkeeping loss as its own critical alert instead.
+ *
+ * The cost of that swallow is bounded: with no increment and no finish stamp, the ticket keeps its
+ * claim stamp and is rescued by the 20-minute stuck gate, which then charges the failure.
+ */
+async function recordFailureSafely(
   deps: SupportAgentJobDeps,
-  runFn: NonNullable<SupportAgentJobDeps['runFn']>,
-  runDeps: SupportRunDeps,
-  input: { runId: string; ctx: SupportRunContext },
   ticketId: string,
-): Promise<HarnessResult<SupportOutput>> {
+  failure: { code: string; detail: string },
+): Promise<void> {
   try {
-    return await runFn(runDeps, input)
-  } catch (err) {
-    await recordFailure(deps, ticketId, { code: 'run_threw', detail: errorToDetail(err) })
-    throw err
+    await recordFailure(deps, ticketId, failure)
+  } catch (bookkeepingErr) {
+    await deps
+      .alert('critical', 'support_failure_bookkeeping_failed', {
+        ticketId,
+        code: failure.code,
+        reason: failure.detail,
+        error: errorToDetail(bookkeepingErr),
+      })
+      .catch(() => {})
   }
 }
 
@@ -488,11 +542,21 @@ async function clearSessionId(db: Db, ticketId: string, expected: string | null)
 }
 
 /**
- * The `propose` outcome's pinned order (spec §3): guarded transition → supersede → reply → refund.
+ * The `propose` outcome's pinned order (spec §3, as amended): load the order → guarded transition →
+ * supersede → refund → reply.
  *
- * Transition-BEFORE-submit is what makes a future auto-mode flip a pure config change: auto-approve
- * enqueues the apply job instantly, and the apply's `awaiting_approval`-anchored checks must
- * already hold when it runs.
+ * **Transition BEFORE submit** is what makes a future auto-mode flip a pure config change:
+ * auto-approve enqueues the apply job instantly, and the apply's `awaiting_approval`-anchored
+ * checks must already hold when it runs.
+ *
+ * **Refund BEFORE reply.** A crash between the two submits then leaves a refund with no reply — the
+ * owner approves money and the customer merely never gets an email, which a human can finish by
+ * hand. The other order leaves the opposite: a customer-facing promise with no money behind it.
+ *
+ * **A throw anywhere in here is caught by one of two nets, by design (no local rollback).** Before
+ * the flip, the ticket is still `triaged` with `last_agent_finished_at` unstamped, so the claim's
+ * 20-minute stuck gate re-claims it. After the flip, it sits in `awaiting_approval`, where the
+ * poll's 15-minute orphan backstop escalates any such ticket that has no live support proposal.
  */
 async function submitProposeOutcome(
   deps: SupportAgentJobDeps,
@@ -506,6 +570,23 @@ async function submitProposeOutcome(
   },
 ): Promise<void> {
   const { ticketId, ticket, output, runId, threadSnapshotAt } = args
+
+  // Loaded BEFORE the flip so an unreachable order row fails while nothing has committed yet —
+  // the ticket stays `triaged` and the stuck gate retries it, rather than stranding it in
+  // `awaiting_approval` with half a proposal pair. (The validator's refund gate already proved
+  // both `ticket.orderId` and this row exist, and `support_tickets.order_id` is an FK; this is the
+  // belt on that brace, not an expected path.)
+  let order: { shopifyOrderGid: string; number: string | null } | undefined
+  if (output.refund) {
+    ;[order] = await deps.db
+      .select({ shopifyOrderGid: orders.shopifyOrderGid, number: orders.shopifyOrderNumber })
+      .from(orders)
+      .where(eq(orders.id, ticket.orderId!))
+      .limit(1)
+    if (!order) {
+      throw new Error(`refund proposed for ticket ${ticketId} whose linked order ${ticket.orderId} is missing`)
+    }
+  }
 
   const flipped = await deps.db
     .update(supportTickets)
@@ -525,14 +606,22 @@ async function submitProposeOutcome(
     return
   }
 
-  // A reopen re-run must never leave two live refund approvals sitting on the owner's phone.
+  // The reply this run is about to submit replaces any pending reply, always. A pending REFUND is
+  // only superseded when THIS run carries a refund of its own — a reply-only run is not replacing
+  // the standing refund, and expiring it would silently break what the validator's promised-action
+  // exemption leans on: a draft that says "your refund is on the way" is allowed to say so
+  // precisely BECAUSE a live sibling refund proposal backs it. Expiring that sibling after the
+  // screen passed would ship a promise with nothing behind it.
+  const supersedeTypes: ('support_reply' | 'refund')[] = output.refund
+    ? ['support_reply', 'refund']
+    : ['support_reply']
   const superseded = await deps.db
     .update(proposals)
     .set({ status: 'expired' })
     .where(
       and(
         eq(proposals.ticketId, ticketId),
-        inArray(proposals.type, [...SUPPORT_PROPOSAL_TYPES]),
+        inArray(proposals.type, supersedeTypes),
         eq(proposals.status, 'pending'),
       ),
     )
@@ -558,29 +647,13 @@ async function submitProposeOutcome(
     adminBaseUrl: deps.adminBaseUrl,
   }
 
-  await submitProposal(submitDeps, {
-    type: 'support_reply',
-    summary: `Reply: ${ticket.subject ?? '(no subject)'}`,
-    payload: { type: 'support_reply', ticketId, body: args.body, threadSnapshotAt },
-    sourceWorkflow: 'support',
-    agentRunId: runId,
-    ticketId,
-  })
-
   if (output.refund) {
-    // `ticket.orderId` and the order row are both guaranteed by the validator's refund gate
-    // (`refund_unverified_order`), and `support_tickets.order_id` is an FK — the row cannot vanish.
     const orderId = ticket.orderId!
-    const [order] = await deps.db
-      .select({ shopifyOrderGid: orders.shopifyOrderGid, number: orders.shopifyOrderNumber })
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1)
     const { amountCents, reason, openCjDispute, cjDisputeReasonId } = output.refund
 
     await submitProposal(submitDeps, {
       type: 'refund',
-      summary: `Refund ${formatCents(amountCents)} order #${order?.number ?? 'unknown'} — ${reason.slice(0, 60)}`,
+      summary: `Refund ${formatCents(amountCents)} order #${order!.number ?? 'unknown'} — ${reason.slice(0, 60)}`,
       payload: {
         type: 'refund',
         orderId,
@@ -594,11 +667,20 @@ async function submitProposeOutcome(
       sourceWorkflow: 'support',
       agentRunId: runId,
       ticketId,
-      // The Task-8 accumulation bound sums prior applied refunds by `proposals.order_id` — an
-      // unset one makes this refund invisible to the next run's cap check.
+      // The accumulation bound sums live refunds by `proposals.order_id` — an unset one makes this
+      // refund invisible to the next run's cap check.
       orderId,
     })
   }
+
+  await submitProposal(submitDeps, {
+    type: 'support_reply',
+    summary: `Reply: ${ticket.subject ?? '(no subject)'}`,
+    payload: { type: 'support_reply', ticketId, body: args.body, threadSnapshotAt },
+    sourceWorkflow: 'support',
+    agentRunId: runId,
+    ticketId,
+  })
 }
 
 /**

@@ -8,6 +8,7 @@ import { SUPPORT_PROJECT_KEY } from '../src/agents/session-store.ts'
 import type { SupportOutput } from '../src/agents/support-output-schema.ts'
 import { SUPPORT_MODEL, type SupportRunContext, type SupportRunInput } from '../src/agents/support-run.ts'
 import {
+  AGENT_ESCALATE_LOST_RACE_ACTION,
   AGENT_NO_ACTION_ACTION,
   AGENT_PROPOSE_LOST_RACE_ACTION,
   AGENT_RUN_AUDIT_ACTION,
@@ -39,6 +40,7 @@ const AUDIT_ACTIONS = [
   AGENT_RUN_TICKET_CAPPED_ACTION,
   AGENT_NO_ACTION_ACTION,
   AGENT_PROPOSE_LOST_RACE_ACTION,
+  AGENT_ESCALATE_LOST_RACE_ACTION,
   AGENT_RUN_FAILED_ACTION,
 ]
 
@@ -844,25 +846,78 @@ describe('executeSupportAgentRun', () => {
       expect(ticket.agentSessionId).toBe('stub-session')
     })
 
-    it("expires this ticket's still-pending support proposals, one superseded audit row each", async () => {
+    it("expires this ticket's pending REPLY proposals, one superseded audit row each", async () => {
       const ticketId = await seedTicket()
       const otherTicketId = await seedTicket()
-      const pendingRefund = await seedProposal({ ticketId, type: 'refund', status: 'pending' })
       const pendingReply = await seedProposal({ ticketId, type: 'support_reply', status: 'pending' })
       const rejectedReply = await seedProposal({ ticketId, type: 'support_reply', status: 'rejected' })
-      const otherTicketRefund = await seedProposal({ ticketId: otherTicketId, type: 'refund', status: 'pending' })
+      const otherTicketReply = await seedProposal({ ticketId: otherTicketId, type: 'support_reply', status: 'pending' })
 
       await executeSupportAgentRun(withRun(succeededResult(proposeOutput())), ticketId)
 
-      // A reopen re-run must never leave two live refund approvals on the owner's phone.
-      expect(await proposalStatus(pendingRefund)).toBe('expired')
       expect(await proposalStatus(pendingReply)).toBe('expired')
       expect(await proposalStatus(rejectedReply)).toBe('rejected')
-      expect(await proposalStatus(otherTicketRefund)).toBe('pending')
+      expect(await proposalStatus(otherTicketReply)).toBe('pending')
 
       const superseded = await auditRows(PROPOSAL_SUPERSEDED_ACTION)
-      expect(superseded.map((r) => r.entityId).sort()).toEqual([pendingRefund, pendingReply].sort())
+      expect(superseded.map((r) => r.entityId)).toEqual([pendingReply])
       expect(superseded[0]!.entityType).toBe('proposal')
+    })
+
+    // A reopen re-run must never leave two live refund approvals on the owner's phone — but ONLY a
+    // run that carries its own refund is replacing the standing one.
+    it('supersedes a pending sibling refund when this run carries a refund of its own', async () => {
+      const order = await seedOrder({ totalCents: 5000 })
+      const ticketId = await seedTicket({ orderId: order.id })
+      await seedMessage(ticketId, { bodyText: 'still broken', sentAt: minutesAgo(30), authResults: 'dmarc=pass' })
+      const staleRefund = await seedProposal({ ticketId, type: 'refund', status: 'pending' })
+
+      await executeSupportAgentRun(
+        withRun(
+          succeededResult(proposeOutput({ refund: { amountCents: 1000, reason: 'damaged', openCjDispute: false } })),
+        ),
+        ticketId,
+      )
+
+      expect(await proposalStatus(staleRefund)).toBe('expired')
+      expect((await auditRows(PROPOSAL_SUPERSEDED_ACTION)).map((r) => r.entityId)).toEqual([staleRefund])
+      const live = (await proposalRows(ticketId)).filter((r) => r.status === 'pending')
+      expect(live.map((r) => r.type).sort()).toEqual(['refund', 'support_reply'])
+    })
+
+    // The bug this pins: expiring the sibling refund after the promised-action screen already
+    // passed BECAUSE of it would ship "your refund is on the way" with nothing behind it.
+    it('leaves a pending sibling refund alone when this run proposes no refund of its own', async () => {
+      const order = await seedOrder({ totalCents: 5000 })
+      const ticketId = await seedTicket({ orderId: order.id })
+      await seedMessage(ticketId, { bodyText: 'any news?', sentAt: minutesAgo(30), authResults: 'dmarc=pass' })
+      const siblingRefund = await seedProposal({ ticketId, type: 'refund', status: 'pending' })
+      // Only allowed past the promised-action screen because that live sibling refund exists.
+      const promisingBody = 'Hi Jane,\n\nYour refund has been approved and is on its way.\n\nDoge Buddy Support'
+
+      await executeSupportAgentRun(
+        withRun(succeededResult(proposeOutput({ reply: { body: promisingBody } }))),
+        ticketId,
+      )
+
+      expect(await proposalStatus(siblingRefund)).toBe('pending')
+      expect(await auditRows(PROPOSAL_SUPERSEDED_ACTION)).toEqual([])
+      const rows = await proposalRows(ticketId)
+      expect(rows.filter((r) => r.type === 'support_reply' && r.status === 'pending')).toHaveLength(1)
+    })
+
+    it('with no sibling refund, that same promising body is still rejected by the screen', async () => {
+      const ticketId = await seedTicket()
+      const promisingBody = 'Hi Jane,\n\nYour refund has been approved and is on its way.\n\nDoge Buddy Support'
+      const deps = withRun(succeededResult(proposeOutput({ reply: { body: promisingBody } })))
+
+      await expect(executeSupportAgentRun(deps, ticketId)).rejects.toThrow()
+
+      expect(await proposalRows(ticketId)).toEqual([])
+      expect((await ticketById(ticketId)).status).toBe('triaged')
+      expect((await auditRows(AGENT_RUN_FAILED_ACTION, ticketId))[0]!.detail).toMatchObject({
+        code: 'promised_action',
+      })
     })
 
     it('losing the transition race submits nothing and audits it', async () => {
@@ -886,7 +941,7 @@ describe('executeSupportAgentRun', () => {
       expect(ticket.lastAgentFinishedAt).toEqual(NOW)
     })
 
-    it('submits the refund with the row-level orderId, the order gid, and the thread snapshot', async () => {
+    it('submits the REFUND FIRST, then the reply, with the row-level orderId and the order gid', async () => {
       const order = await seedOrder({ totalCents: 5000, orderNumber: '1042' })
       const ticketId = await seedTicket({ orderId: order.id })
       await seedMessage(ticketId, {
@@ -895,6 +950,12 @@ describe('executeSupportAgentRun', () => {
         authResults: 'spf=pass; dkim=pass; dmarc=pass',
       })
       const reason = 'Arrived damaged; customer sent photos of the torn seam and missing squeaker'
+      // One notify per `submitProposal` in manual mode — the call order IS the submit order.
+      const notifiedTypes: string[] = []
+      notify = vi.fn(async (msg: { title: string }) => {
+        notifiedTypes.push(msg.title)
+        return true
+      })
 
       await executeSupportAgentRun(
         withRun(
@@ -905,9 +966,13 @@ describe('executeSupportAgentRun', () => {
         ticketId,
       )
 
+      // A crash between the two must leave money-with-no-email (recoverable by hand), never a
+      // customer-facing promise with no refund behind it.
+      expect(notifiedTypes).toEqual(['New refund proposal', 'New support_reply proposal'])
+
       const rows = await proposalRows(ticketId)
-      expect(rows.map((r) => r.type)).toEqual(['support_reply', 'refund'])
-      const refundRow = rows[1]!
+      expect(rows.map((r) => r.type)).toEqual(['refund', 'support_reply'])
+      const refundRow = rows.find((r) => r.type === 'refund')!
       expect(refundRow.ticketId).toBe(ticketId)
       // The Task-8 accumulation bound reads `proposals.order_id` — an unset one makes prior
       // refunds invisible to it.
@@ -924,6 +989,21 @@ describe('executeSupportAgentRun', () => {
         openCjDispute: false,
         threadSnapshotAt: minutesAgo(30).toISOString(),
       })
+    })
+
+    it('fails closed with the epoch when the ticket has no inbound message to snapshot', async () => {
+      const ticketId = await seedTicket({ lastInboundAt: null })
+
+      await executeSupportAgentRun(withRun(succeededResult(proposeOutput())), ticketId)
+
+      const [row] = await proposalRows(ticketId)
+      // Every conceivable later inbound reads as newer than this, so the apply staleness guard
+      // treats the draft as stale rather than waving it through.
+      expect((row!.payload as { threadSnapshotAt: string }).threadSnapshotAt).toBe('1970-01-01T00:00:00.000Z')
+      const ticket = await ticketById(ticketId)
+      // The message-time watermark is NOT advanced to the epoch — there was nothing to advance it to.
+      expect(ticket.lastAgentPromptedAt).toBeNull()
+      expect(ticket.lastAgentFinishedAt).toEqual(NOW)
     })
 
     it('stores the NFKC-normalized body that was actually screened, not the raw model output', async () => {
@@ -979,9 +1059,9 @@ describe('executeSupportAgentRun', () => {
       const ticket = await ticketById(ticketId)
       expect(ticket.status).toBe('resolved')
       expect(ticket.escalationReason).toBeNull()
-      const skips = await auditRows(AGENT_RUN_SKIPPED_ACTION, ticketId)
-      expect(skips).toHaveLength(1)
-      expect(skips[0]!.detail).toMatchObject({ reason: 'escalate_lost_race' })
+      // Its own action, not the generic claim skip: this one happened after a run was paid for.
+      expect(await auditRows(AGENT_ESCALATE_LOST_RACE_ACTION, ticketId)).toHaveLength(1)
+      expect(await auditRows(AGENT_RUN_SKIPPED_ACTION, ticketId)).toEqual([])
     })
   })
 
@@ -1156,6 +1236,36 @@ describe('executeSupportAgentRun', () => {
       // Each SDK call records its own run row rather than overwriting the dead attempt's.
       expect(runIds[1]).not.toBe(runIds[0])
       expect(await runRows(ticketId)).toHaveLength(2)
+    })
+
+    // The other shape resume failure arrives in: no HarnessResult at all. A throw out of the
+    // runner on a RESUMED attempt is the strongest form of "died before the first assistant
+    // message", so it must retry rather than burn the ticket's one remaining failure budget.
+    it('a THROW on a resumed attempt is treated as resume failure and retried fresh', async () => {
+      const ticketId = await seedTicket({ agentSessionId: 'session-live' })
+      sessionEntries = [{ uuid: 'e1' } as unknown as SessionStoreEntry]
+      let call = 0
+      runFn = vi.fn(async (_deps: unknown, input: SupportRunInput) => {
+        contexts.push(input.ctx)
+        runIds.push(input.runId)
+        call += 1
+        if (call === 1) throw new Error('could not materialize session')
+        return succeededResult({ outcome: 'no_action', rationale: 'ok' }, { sessionId: 'session-fresh' })
+      })
+
+      await executeSupportAgentRun(makeDeps({ runFn: runFn as unknown as SupportAgentJobDeps['runFn'] }), ticketId)
+
+      expect(runFn).toHaveBeenCalledTimes(2)
+      expect(contexts[1]!.resumeSessionId).toBeNull()
+      expect(contexts[1]!.isResume).toBe(false)
+      const resumeAlerts = alert.mock.calls.filter((c) => c[1] === 'support_resume_failed')
+      expect(resumeAlerts).toHaveLength(1)
+      expect(resumeAlerts[0]![2]).toMatchObject({ error: 'could not materialize session' })
+      const ticket = await ticketById(ticketId)
+      expect(ticket.agentFailureCount).toBe(0)
+      expect(ticket.agentSessionId).toBe('session-fresh')
+      expect(ticket.lastAgentFinishedAt).toEqual(NOW)
+      expect(await auditRows(AGENT_RUN_FAILED_ACTION, ticketId)).toEqual([])
     })
 
     it("only the resume retry's failure enters the failure path", async () => {
