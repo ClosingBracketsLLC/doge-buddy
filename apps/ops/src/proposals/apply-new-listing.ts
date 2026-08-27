@@ -2,7 +2,7 @@ import { centsToUsd, NewListingPayloadSchema } from '@doge-buddy/core'
 import { auditLog, products, productVariants, supplierVariantMappings } from '@doge-buddy/db'
 import { eq, sql } from 'drizzle-orm'
 import { applyProposalTransition } from './transitions.ts'
-import { proposalHandle, type ApplyProposalDeps, type ProposalRow } from './run-apply.ts'
+import { proposalHandle, type ApplyProposalDeps, type ProposalRow } from './apply-shared.ts'
 
 /**
  * `new_listing` proposal executor (Task 14): turns an `approved`/`applying` new_listing proposal
