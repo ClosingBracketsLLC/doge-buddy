@@ -95,10 +95,11 @@ describe('support validator', () => {
       expect(result.ok).toBe(false)
     })
 
-    it('accepts an ordinary plain-text body', async () => {
+    it('accepts an ordinary plain-text body, returning the (unchanged) normalizedBody', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(db, ticketId, 'Thanks for reaching out, we will look into it.', noRefund)
-      expect(result).toEqual({ ok: true })
+      const body = 'Thanks for reaching out, we will look into it.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
   })
 
@@ -137,14 +138,14 @@ describe('support validator', () => {
       await seedRefundProposal({ ticketId, status: 'pending', amountCents: 500 })
       const body = 'Good news — your refund has been processed today.'
       const result = await validateReplyBody(db, ticketId, body, noRefund)
-      expect(result).toEqual({ ok: true })
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     it('the same body passes when hasRefundInOutput is true (no sibling needed)', async () => {
       const ticketId = await seedTicket()
       const body = 'Good news — your refund has been processed today.'
       const result = await validateReplyBody(db, ticketId, body, { hasRefundInOutput: true, trackingUrl: null })
-      expect(result).toEqual({ ok: true })
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     it('a sibling proposal in a non-live status (rejected) does not excuse the promised-action hit', async () => {
@@ -158,29 +159,26 @@ describe('support validator', () => {
 
     it('a body with no action/promise proximity passes', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(
-        db,
-        ticketId,
-        'Thanks so much for your patience while our team looks into this.',
-        noRefund,
-      )
-      expect(result).toEqual({ ok: true })
+      const body = 'Thanks so much for your patience while our team looks into this.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     // I3 (ruled): extended ACTION/PROMISE token families — natural phrasings the reviewer found
     // that the original token lists missed. Each MUST be caught when there's no refund object and
-    // no live sibling proposal.
+    // no live sibling proposal. (N2 review swapped bare `i've`/`funds` for `gone ahead and`/
+    // `funds back` — see the two affected phrases' comments below and the validator's doc comments.)
     const mustCatchPhrases = [
       'You have been refunded $19.99 to your original payment method.',
       "We've refunded your order in full.",
-      "I've gone ahead and refunded you.",
+      "I've gone ahead and refunded you.", // caught via "gone ahead and" (PROMISE), not bare "i've"
       'Your refund is complete.',
       'Refund complete — expect it in 3-5 days.',
       'Your refund is on the way.',
       'We have cancelled your order.',
       'Your order has been cancelled.',
       'A replacement has shipped.',
-      'Expect the funds back in 5 business days.',
+      'Expect the funds back in 5 business days.', // caught via "funds back" (ACTION), not bare "funds"
     ]
     for (const phrase of mustCatchPhrases) {
       it(`"${phrase}" is caught by the extended promised-action screen`, async () => {
@@ -195,19 +193,77 @@ describe('support validator', () => {
     // ACTION+PROMISE proximity under the enumerated token screen — it stays uncaught.
     it('"Consider it refunded." is NOT caught (enumerated screen, accepted gap)', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(db, ticketId, 'Consider it refunded.', noRefund)
-      expect(result).toEqual({ ok: true })
+      const body = 'Consider it refunded.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     it('the extended tokens do not false-positive on ordinary policy language', async () => {
       const ticketId = await seedTicket()
+      const body = 'We have received your message and will take a look shortly.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    // N2 (ruled): dropped bare `i've` from PROMISE and bare `funds` from ACTION — a re-review found
+    // they false-positived ordinary refund-denial and diagnostic-question replies (7 of 13
+    // realistic non-promise replies were failing). `gone ahead and` and `funds back` (added above)
+    // still catch the two phrases they were meant for (see mustCatchPhrases). These seven, verbatim
+    // from the reviewer, must now behave as ruled: five PASS, two are accepted false positives
+    // (still CAUGHT — each has an unrelated PROMISE token, `we have`, genuinely in-window with an
+    // ACTION token, which the enumerated screen can't distinguish from a real promise).
+    it('"I\'ve reviewed your order and unfortunately we can\'t offer a refund under our 30-day policy." passes (denial, not a promise)', async () => {
+      const ticketId = await seedTicket()
+      const body = "I've reviewed your order and unfortunately we can't offer a refund under our 30-day policy."
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    it('"I\'ve attached our refund policy for reference." passes', async () => {
+      const ticketId = await seedTicket()
+      const body = "I've attached our refund policy for reference."
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    it('"I\'ve asked our warehouse about a replacement and will follow up." passes', async () => {
+      const ticketId = await seedTicket()
+      const body = "I've asked our warehouse about a replacement and will follow up."
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    it('"We have received your request for a replacement and will review it." is CAUGHT (accepted false positive: "we have" + "replacement" in-window)', async () => {
+      const ticketId = await seedTicket()
       const result = await validateReplyBody(
         db,
         ticketId,
-        'We have received your message and will take a look shortly.',
+        'We have received your request for a replacement and will review it.',
         noRefund,
       )
-      expect(result).toEqual({ ok: true })
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('promised_action')
+    })
+
+    it('"We have no record of a refund request on this order." is CAUGHT (accepted false positive: "we have" + "refund" in-window)', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, 'We have no record of a refund request on this order.', noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('promised_action')
+    })
+
+    it('"Could you confirm whether the funds have been taken from your account?" passes (no ACTION token once bare funds is dropped)', async () => {
+      const ticketId = await seedTicket()
+      const body = 'Could you confirm whether the funds have been taken from your account?'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    it('"I\'ve checked with the carrier; the funds are still held by your bank." passes', async () => {
+      const ticketId = await seedTicket()
+      const body = "I've checked with the carrier; the funds are still held by your bank."
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
   })
 
@@ -261,11 +317,9 @@ describe('support validator', () => {
     it('tracking URL byte-equal to opts.trackingUrl passes even off the dogebuddy.com hostname', async () => {
       const ticketId = await seedTicket()
       const trackingUrl = 'https://carrier.example.com/trk?id=ABC123'
-      const result = await validateReplyBody(db, ticketId, `Track it here: ${trackingUrl}`, {
-        hasRefundInOutput: false,
-        trackingUrl,
-      })
-      expect(result).toEqual({ ok: true })
+      const body = `Track it here: ${trackingUrl}`
+      const result = await validateReplyBody(db, ticketId, body, { hasRefundInOutput: false, trackingUrl })
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     it('an off-by-one mismatch against opts.trackingUrl fails', async () => {
@@ -302,8 +356,9 @@ describe('support validator', () => {
 
     it('support@dogebuddy.com passes', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(db, ticketId, 'You can also reach us at support@dogebuddy.com any time.', noRefund)
-      expect(result).toEqual({ ok: true })
+      const body = 'You can also reach us at support@dogebuddy.com any time.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     it('+1 (888) 555-0142 fails', async () => {
@@ -320,57 +375,95 @@ describe('support validator', () => {
       expect((result as { code: string }).code).toBe('contact_channel')
     })
 
+    // N1 (ruled): a standalone (non-alphanumeric-bounded) run of EXACTLY 10 or 11 digits is
+    // phone-like even with NO leading +/( and NO interior separators at all — the old
+    // separator-or-prefix rule alone let these straight through.
+    it('"Please call 8885550142 for faster service." fails (standalone 10-digit run)', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, 'Please call 8885550142 for faster service.', noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('contact_channel')
+    })
+
+    it('"Call 18885550142 anytime." fails (standalone 11-digit run)', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, 'Call 18885550142 anytime.', noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('contact_channel')
+    })
+
+    it('a 10-digit run embedded in an alphanumeric reference id passes (bounded by a letter, not standalone)', async () => {
+      const ticketId = await seedTicket()
+      const body = 'Your reference is REF1234567890 for tracking.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
     it('"order #12345" passes (digits < 7 with separators)', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(db, ticketId, 'Please reference order #12345 when you write back.', noRefund)
-      expect(result).toEqual({ ok: true })
+      const body = 'Please reference order #12345 when you write back.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     // I2 ruling: a single unseparated digit run with no leading +/( is not phone-like, no matter
-    // how long — it's an order/tracking number, not a phone number.
+    // how long — it's an order/tracking number, not a phone number. (8 digits — N1's 10/11-digit
+    // standalone rule doesn't apply either.)
     it('"Order 10023481 shipped" passes (unseparated digit run, no leading +/()', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(db, ticketId, 'Order 10023481 shipped', noRefund)
-      expect(result).toEqual({ ok: true })
+      const body = 'Order 10023481 shipped'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     // I2 ruling: a bare alphanumeric tracking token (letters interleaved with digits) is not
-    // phone-like — the embedded unseparated digit run alone doesn't qualify either.
+    // phone-like — the embedded unseparated digit run alone doesn't qualify either. N1's
+    // standalone-run rule also doesn't apply: the 11-digit run is bounded by a letter ('A'), not
+    // non-alphanumeric characters.
     it('"Your tracking number is 1Z999AA10123456784." passes', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(db, ticketId, 'Your tracking number is 1Z999AA10123456784.', noRefund)
-      expect(result).toEqual({ ok: true })
+      const body = 'Your tracking number is 1Z999AA10123456784.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     it('ISO dates "Ordered on 2024-01-15 and shipped 2024-01-18." pass (excluded explicitly)', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(db, ticketId, 'Ordered on 2024-01-15 and shipped 2024-01-18.', noRefund)
-      expect(result).toEqual({ ok: true })
+      const body = 'Ordered on 2024-01-15 and shipped 2024-01-18.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    // ALSO (a): ISO dates are exempted digit-by-digit (a span-based exemption), not by requiring
+    // the WHOLE phone-candidate to exactly equal one date — two adjacent dates joined by a single
+    // space (which PHONE_RE's own character class allows, merging them into ONE candidate match)
+    // still have every digit correctly excluded.
+    it('"Window: 2024-01-15 2024-01-18" passes (two adjacent ISO dates merged into one phone-regex candidate)', async () => {
+      const ticketId = await seedTicket()
+      const body = 'Window: 2024-01-15 2024-01-18'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     it('a long digit run inside an allowed dogebuddy.com URL path passes (allowedSpans-aware)', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(
-        db,
-        ticketId,
-        'Your tracking link: https://dogebuddy.com/track/9405511899223197428490',
-        noRefund,
-      )
-      expect(result).toEqual({ ok: true })
+      const body = 'Your tracking link: https://dogebuddy.com/track/9405511899223197428490'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
     it('a byte-equal tracking URL containing separated digits passes (allowedSpans exempts it from the phone screen too)', async () => {
       const ticketId = await seedTicket()
       const trackingUrl = 'https://carrier.example.com/trk?ref=1-800-555-0199#nums=LZ123456789CN'
-      const result = await validateReplyBody(db, ticketId, `Track it here: ${trackingUrl}`, {
-        hasRefundInOutput: false,
-        trackingUrl,
-      })
-      expect(result).toEqual({ ok: true })
+      const body = `Track it here: ${trackingUrl}`
+      const result = await validateReplyBody(db, ticketId, body, { hasRefundInOutput: false, trackingUrl })
+      expect(result).toEqual({ ok: true, normalizedBody: body })
     })
   })
 
   // -- validateRefundIntent --
+  // (validateRefundIntent never populates normalizedBody — it screens no reply body — so its
+  // `{ ok: true }` assertions below are unchanged by the normalizedBody addition.)
 
   describe('validateRefundIntent', () => {
     it('fails refund_unverified_order when ticket.orderId is null', async () => {
@@ -638,7 +731,7 @@ describe('support validator', () => {
       expect(result.ok).toBe(false)
     })
 
-    it('passes an escalate outcome straight through with no reply/refund checks', async () => {
+    it('passes an escalate outcome straight through with no reply/refund checks (no normalizedBody — no reply body involved)', async () => {
       const ticketId = await seedTicket()
       const result = await validateSupportOutput(
         db,
@@ -648,7 +741,7 @@ describe('support validator', () => {
       expect(result).toEqual({ ok: true })
     })
 
-    it('passes a no_action outcome straight through', async () => {
+    it('passes a no_action outcome straight through (no normalizedBody)', async () => {
       const ticketId = await seedTicket()
       const result = await validateSupportOutput(
         db,
@@ -687,21 +780,22 @@ describe('support validator', () => {
       expect((result as { code: string }).code).toBe('refund_exceeds_total')
     })
 
-    it('happy path: propose with a clean reply and a valid refund passes end to end', async () => {
+    it('happy path: propose with a clean reply and a valid refund passes end to end, returning normalizedBody', async () => {
       const orderId = await seedOrder(2000)
       const ticketId = await seedTicket({ orderId, customerEmail: 'customer@example.com' })
       await seedInboundMessage(ticketId, { authResults: 'dmarc=pass' })
+      const replyBody = 'Thanks for reaching out — we have processed a refund pending approval.'
       const result = await validateSupportOutput(
         db,
         { id: ticketId, orderId, customerEmail: 'customer@example.com' },
         {
           outcome: 'propose',
-          reply: { body: 'Thanks for reaching out — we have processed a refund pending approval.' },
+          reply: { body: replyBody },
           refund: { amountCents: 500, reason: 'damaged', openCjDispute: false },
           rationale: 'x',
         },
       )
-      expect(result).toEqual({ ok: true })
+      expect(result).toEqual({ ok: true, normalizedBody: replyBody })
     })
 
     // m7: validateSupportOutput's optional 4th trackingUrl param threads through to
@@ -709,13 +803,14 @@ describe('support validator', () => {
     it('threads an explicit trackingUrl param through to the reply-body URL/contact screens', async () => {
       const ticketId = await seedTicket({ customerEmail: 'customer@example.com' })
       const trackingUrl = 'https://carrier.example.com/trk?id=XYZ789'
+      const replyBody = `Track it here: ${trackingUrl}`
       const result = await validateSupportOutput(
         db,
         { id: ticketId, orderId: null, customerEmail: 'customer@example.com' },
-        { outcome: 'propose', reply: { body: `Track it here: ${trackingUrl}` }, rationale: 'x' },
+        { outcome: 'propose', reply: { body: replyBody }, rationale: 'x' },
         trackingUrl,
       )
-      expect(result).toEqual({ ok: true })
+      expect(result).toEqual({ ok: true, normalizedBody: replyBody })
     })
 
     it('without an explicit trackingUrl argument, the same off-domain URL fails (default null, unchanged behavior)', async () => {

@@ -5,7 +5,14 @@ import type { SupportOutput } from '../agents/support-output-schema.ts'
 type Db = ReturnType<typeof createDb>['db']
 
 export type ValidationFailure = { ok: false; code: string; detail: string }
-export type ValidationResult = { ok: true } | ValidationFailure
+/**
+ * `normalizedBody` is populated on every `ok:true` result from `validateReplyBody`/
+ * `validateSupportOutput` — the NFKC-normalized body that was actually screened. Downstream
+ * callers (e.g. the send path) should store/send exactly this string, not the raw agent output,
+ * to avoid a screened-vs-delivered divergence. `validateRefundIntent` never populates it — it
+ * doesn't screen a reply body.
+ */
+export type ValidationResult = { ok: true; normalizedBody?: string } | ValidationFailure
 
 function fail(code: string, detail: string): ValidationFailure {
   return { ok: false, code, detail }
@@ -27,13 +34,19 @@ const HTML_TAG_RE = /<(?!https?:\/\/)[a-z!/]/i
 /** Verbs/nouns describing an ACTION that resolves the customer's issue. Includes both active
  * ("cancel your order") and passive/perfect ("order has been cancelled") phrasings for
  * cancellation, and the shipped-replacement completion phrase — natural ways a drafted reply
- * reports an action as done, not just requested. */
+ * reports an action as done, not just requested. `funds back` (not bare `funds`, dropped after
+ * N2 review — see PROMISE_RE below) is dual-listed here and in PROMISE_RE so "Expect the funds
+ * back..." is caught without a bare `funds` token false-positiving on ordinary sentences that just
+ * happen to mention funds (a chargeback question, a "have the funds arrived" check-in). */
 const ACTION_RE =
-  /refund(ed)?|reimburs\w*|credit(ed)?|store credit|money back|compensat\w*|replacement|reship\w*|resend|cancel\w* (your|the) order|order (has been|was|is) cancel\w*|replacement has (been )?shipped|payment (returned|reversed)|funds/gi
+  /refund(ed)?|reimburs\w*|credit(ed)?|store credit|money back|compensat\w*|replacement|reship\w*|resend|cancel\w* (your|the) order|order (has been|was|is) cancel\w*|replacement has (been )?shipped|payment (returned|reversed)|funds back/gi
 /** Words that PROMISE the action already happened or is imminent — the combination is what makes
- * a drafted reply a commitment rather than an explanation of policy. */
+ * a drafted reply a commitment rather than an explanation of policy. `gone ahead and` (not bare
+ * `i've`, dropped after N2 review) catches "I've gone ahead and refunded you." without `i've`
+ * alone false-positiving on ordinary first-person sentences ("I've reviewed your order...",
+ * "I've attached our policy...") that never actually promise anything. */
 const PROMISE_RE =
-  /issued|processed|sent|approved|applied|on its way|on the way|within \d+ (business )?days|has been|have been|we have|we've|i've|is complete|has shipped|expect (it|the funds|your (refund|money))|funds back|will be/gi
+  /issued|processed|sent|approved|applied|on its way|on the way|within \d+ (business )?days|has been|have been|we have|we've|gone ahead and|is complete|has shipped|expect (it|the funds|your (refund|money))|funds back|will be/gi
 /** How close an ACTION token and a PROMISE token must be (in whitespace-normalized chars) to
  * count as one promised-action hit. */
 const PROMISE_PROXIMITY_CHARS = 200
@@ -62,10 +75,23 @@ const ALLOWED_EMAIL_SUFFIX = '@dogebuddy.com'
  * and long unseparated digit runs (tracking numbers, `1Z999AA10123456784`) from tripping it. */
 const PHONE_RE = /[+(]?\d[\d\s().-]{6,}\d/g
 const PHONE_MIN_DIGITS = 7
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+/** ISO date substrings (`2024-01-15`) anywhere in the body — exempted digit-by-digit (a per-span
+ * exemption, not a whole-candidate-match check) so a phone-regex candidate that MERGES two
+ * adjacent dates through a single connecting space (`2024-01-15 2024-01-18` — the space is inside
+ * PHONE_RE's own character class, so it's one combined match) still has every one of its digits
+ * correctly excluded, not just an isolated single-date candidate. */
+const ISO_DATE_SPAN_RE = /\d{4}-\d{2}-\d{2}/g
 /** A separator character INSIDE a candidate match (space, parens, dot, dash) — distinct from a
  * leading `+`/`(`, which `isPhoneLikeCandidate` checks separately. */
 const PHONE_SEPARATOR_RE = /[\s().-]/
+/** A standalone run of EXACTLY 10 or 11 digits, bounded by non-alphanumeric characters (or string
+ * start/end) on both sides — the shape of a US phone number (with or without country code) typed
+ * with no separators or leading `+`/( at all, e.g. `8885550142`. Lookaround-anchored on both ends
+ * so it can never match a sub-run within a longer digit blob (a 22-digit tracking number, where no
+ * 10/11-length window is bounded by non-digits on both sides) or a run embedded in an alphanumeric
+ * id (`1Z999AA10123456784`, where the run is bounded by a letter). Independent of, and in addition
+ * to, the separator/prefix rule in `isPhoneLikeCandidate`. */
+const STANDALONE_DIGIT_RUN_RE = /(?<![a-zA-Z0-9])\d{10,11}(?![a-zA-Z0-9])/g
 
 interface Span {
   start: number
@@ -209,14 +235,29 @@ function checkUrlsAndDomains(body: string, urlData: UrlScreenData): ValidationRe
   return { ok: true }
 }
 
-/** A phone-candidate match is only actually phone-like when: it has ≥7 digits, it is not an
- * ISO date (`2024-01-15`), and it either starts with `+`/`(` or contains at least one separator
- * between digit groups — a bare unseparated digit run (`10023481`, or the digit run embedded in
- * `1Z999AA10123456784`) is an order/tracking number, not a phone number, no matter how long. */
-function isPhoneLikeCandidate(raw: string): boolean {
-  const digitCount = (raw.match(/\d/g) ?? []).length
-  if (digitCount < PHONE_MIN_DIGITS) return false
-  if (ISO_DATE_RE.test(raw)) return false
+/** Counts the digits inside `raw` (a match starting at `matchStart` in the full body) that do NOT
+ * fall inside any of `excludeSpans` (ISO-date occurrences). Per-digit exemption rather than a
+ * whole-match check: a candidate that merges two ISO dates through a connecting separator still
+ * has every one of its digits correctly excluded, not just a candidate that IS a single date. */
+function digitsExcludingSpans(raw: string, matchStart: number, excludeSpans: Span[]): number {
+  let count = 0
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]!
+    if (ch < '0' || ch > '9') continue
+    const pos = matchStart + i
+    if (excludeSpans.some((s) => pos >= s.start && pos < s.end)) continue
+    count++
+  }
+  return count
+}
+
+/** A phone-candidate match is only actually phone-like when it has ≥7 digits OUTSIDE any ISO-date
+ * span, AND it either starts with `+`/`(` or contains at least one separator between digit groups
+ * — a bare unseparated digit run (`10023481`, or the digit run embedded in `1Z999AA10123456784`)
+ * is an order/tracking number, not a phone number, no matter how long. (Bare unseparated 10/11-
+ * digit runs ARE still caught, but by the separate `STANDALONE_DIGIT_RUN_RE` check — see N1.) */
+function isPhoneLikeCandidate(raw: string, effectiveDigitCount: number): boolean {
+  if (effectiveDigitCount < PHONE_MIN_DIGITS) return false
 
   const hasLeadingPrefix = raw[0] === '+' || raw[0] === '('
   const hasSeparator = PHONE_SEPARATOR_RE.test(raw)
@@ -234,6 +275,8 @@ function checkContact(body: string, allowedUrlSpans: Span[]): ValidationResult {
     }
   }
 
+  const isoDateSpans = findMatches(ISO_DATE_SPAN_RE, body)
+
   const phoneRe = new RegExp(PHONE_RE)
   phoneRe.lastIndex = 0
   while ((m = phoneRe.exec(body))) {
@@ -242,9 +285,25 @@ function checkContact(body: string, allowedUrlSpans: Span[]): ValidationResult {
     const end = start + raw.length
     // Digits inside an allowed URL (tracking number in a path/query) are not a phone number.
     if (overlapsAnySpan(start, end, allowedUrlSpans)) continue
-    if (isPhoneLikeCandidate(raw)) {
+    const effectiveDigits = digitsExcludingSpans(raw, start, isoDateSpans)
+    if (isPhoneLikeCandidate(raw, effectiveDigits)) {
       return fail('contact_channel', `phone-like token in reply body: ${raw}`)
     }
+  }
+
+  // N1: a standalone (non-alphanumeric-bounded) run of exactly 10 or 11 digits — e.g.
+  // `8885550142` or `18885550142` typed with no separators and no leading +/( at all — is still a
+  // phone number even though it trips neither the digit-count-and-separator rule above nor the
+  // "long unseparated run" exemption (that exemption is for tracking/order numbers of OTHER
+  // lengths, or ones embedded in an alphanumeric id).
+  const standaloneRe = new RegExp(STANDALONE_DIGIT_RUN_RE)
+  standaloneRe.lastIndex = 0
+  while ((m = standaloneRe.exec(body))) {
+    const raw = m[0]
+    const start = m.index
+    const end = start + raw.length
+    if (overlapsAnySpan(start, end, allowedUrlSpans)) continue
+    return fail('contact_channel', `phone-like token in reply body: ${raw}`)
   }
 
   return { ok: true }
@@ -259,6 +318,9 @@ function checkContact(body: string, allowedUrlSpans: Span[]): ValidationResult {
  * reported as `contact_channel`, not misclassified as a stray bare-domain `url_not_allowed` —
  * both screens still independently catch every bypass either way, this only decides which failure
  * code comes back when a body trips both.
+ *
+ * On success, returns `{ ok: true, normalizedBody }` — the NFKC-normalized body that was actually
+ * screened, so a caller that sends/stores the reply sends exactly what was checked.
  */
 export async function validateReplyBody(
   db: Db,
@@ -290,7 +352,10 @@ export async function validateReplyBody(
   const contactResult = checkContact(body, urlData.allowedSpans)
   if (!contactResult.ok) return contactResult
 
-  return checkUrlsAndDomains(body, urlData)
+  const urlResult = checkUrlsAndDomains(body, urlData)
+  if (!urlResult.ok) return urlResult
+
+  return { ok: true, normalizedBody: body }
 }
 
 /**
@@ -348,7 +413,8 @@ export async function validateRefundIntent(
 /**
  * Composes the two checks for one agent output. Only the `propose` outcome carries anything sent
  * to a customer or applied to an order, so `escalate`/`no_action` pass straight through — those
- * outcomes take no customer-facing or financial action for this to screen.
+ * outcomes take no customer-facing or financial action for this to screen (and so return no
+ * `normalizedBody`: there is no reply body involved).
  *
  * `trackingUrl` defaults to null (no off-domain tracking link exempted) — callers that know the
  * ticket's real tracking URL (e.g. the route in Task 18) should pass it through so a legitimate
@@ -375,5 +441,5 @@ export async function validateSupportOutput(
     if (!refundResult.ok) return refundResult
   }
 
-  return { ok: true }
+  return { ok: true, normalizedBody: replyResult.normalizedBody }
 }
