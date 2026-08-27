@@ -35,18 +35,27 @@ const HTML_TAG_RE = /<(?!https?:\/\/)[a-z!/]/i
  * ("cancel your order") and passive/perfect ("order has been cancelled") phrasings for
  * cancellation, and the shipped-replacement completion phrase — natural ways a drafted reply
  * reports an action as done, not just requested. `funds back` (not bare `funds`, dropped after
- * N2 review — see PROMISE_RE below) is dual-listed here and in PROMISE_RE so "Expect the funds
- * back..." is caught without a bare `funds` token false-positiving on ordinary sentences that just
- * happen to mention funds (a chargeback question, a "have the funds arrived" check-in). */
+ * N2 review — see PROMISE_RE below) lives ONLY here, not in PROMISE_RE (round-3 cleanup — see
+ * PROMISE_RE's doc comment for why): "Expect the funds back..." is still caught via this ACTION
+ * token overlapping PROMISE_RE's `expect (...the funds...)`, without a bare `funds` token
+ * false-positiving on ordinary sentences that just happen to mention funds (a chargeback question,
+ * a "have the funds arrived" check-in). */
 const ACTION_RE =
   /refund(ed)?|reimburs\w*|credit(ed)?|store credit|money back|compensat\w*|replacement|reship\w*|resend|cancel\w* (your|the) order|order (has been|was|is) cancel\w*|replacement has (been )?shipped|payment (returned|reversed)|funds back/gi
 /** Words that PROMISE the action already happened or is imminent — the combination is what makes
  * a drafted reply a commitment rather than an explanation of policy. `gone ahead and` (not bare
  * `i've`, dropped after N2 review) catches "I've gone ahead and refunded you." without `i've`
  * alone false-positiving on ordinary first-person sentences ("I've reviewed your order...",
- * "I've attached our policy...") that never actually promise anything. */
+ * "I've attached our policy...") that never actually promise anything.
+ *
+ * Deliberately does NOT include `funds back` (round-3 cleanup): that phrase is an ACTION token
+ * only. Dual-listing it here too meant it matched itself as its own "promise" at gap 0, so ANY
+ * mention of `funds back` self-triggered regardless of context — including a plain question like
+ * "Would you like the funds back on your card?", which promises nothing. `expect (it|the
+ * funds|...)` below still catches the one phrase this token pair was added for ("Expect the funds
+ * back in 5 business days.") via the ACTION `funds back` overlapping THIS token's `the funds`. */
 const PROMISE_RE =
-  /issued|processed|sent|approved|applied|on its way|on the way|within \d+ (business )?days|has been|have been|we have|we've|gone ahead and|is complete|has shipped|expect (it|the funds|your (refund|money))|funds back|will be/gi
+  /issued|processed|sent|approved|applied|on its way|on the way|within \d+ (business )?days|has been|have been|we have|we've|gone ahead and|is complete|has shipped|expect (it|the funds|your (refund|money))|will be/gi
 /** How close an ACTION token and a PROMISE token must be (in whitespace-normalized chars) to
  * count as one promised-action hit. */
 const PROMISE_PROXIMITY_CHARS = 200
@@ -79,8 +88,14 @@ const PHONE_MIN_DIGITS = 7
  * exemption, not a whole-candidate-match check) so a phone-regex candidate that MERGES two
  * adjacent dates through a single connecting space (`2024-01-15 2024-01-18` — the space is inside
  * PHONE_RE's own character class, so it's one combined match) still has every one of its digits
- * correctly excluded, not just an isolated single-date candidate. */
-const ISO_DATE_SPAN_RE = /\d{4}-\d{2}-\d{2}/g
+ * correctly excluded, not just an isolated single-date candidate.
+ *
+ * Digit-anchored on both ends (`(?<!\d)` / `(?!\d)`) — WITHOUT this, an unanchored match can land
+ * on a 4-2-2 SLICE of a longer, non-date digit-dash run (a phone number regrouped as 4-2-2, e.g.
+ * `5551-23-4567` or `8885-55-0142`), wrongly exempting most of its digits and letting it slip the
+ * phone screen. Anchoring means the match only fires on a digit run that IS actually 4-2-2 shaped
+ * end to end, not a coincidental 4-2-2 prefix/slice of something longer. */
+const ISO_DATE_SPAN_RE = /(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)/g
 /** A separator character INSIDE a candidate match (space, parens, dot, dash) — distinct from a
  * leading `+`/`(`, which `isPhoneLikeCandidate` checks separately. */
 const PHONE_SEPARATOR_RE = /[\s().-]/

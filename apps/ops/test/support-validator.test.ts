@@ -265,6 +265,25 @@ describe('support validator', () => {
       const result = await validateReplyBody(db, ticketId, body, noRefund)
       expect(result).toEqual({ ok: true, normalizedBody: body })
     })
+
+    // Round-3 cleanup (ruled): `funds back` was dual-listed in ACTION and PROMISE, so it matched
+    // itself as its own "promise" at gap 0 — ANY mention of "funds back" self-triggered regardless
+    // of context, including a plain question that promises nothing. Dropped from PROMISE_RE (kept
+    // in ACTION_RE only); "Expect the funds back..." (below, still in mustCatchPhrases) stays
+    // caught via the ACTION token overlapping PROMISE_RE's `expect (...the funds...)`.
+    it('"Would you like the funds back on your card?" passes (funds back alone no longer self-matches as a promise)', async () => {
+      const ticketId = await seedTicket()
+      const body = 'Would you like the funds back on your card?'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    it('"Can I get the funds back today?" passes', async () => {
+      const ticketId = await seedTicket()
+      const body = 'Can I get the funds back today?'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
   })
 
   // -- URL / domain screen --
@@ -392,6 +411,23 @@ describe('support validator', () => {
       expect((result as { code: string }).code).toBe('contact_channel')
     })
 
+    // Round-3 fix: ISO_DATE_SPAN_RE was unanchored, so it could match a 4-2-2 SLICE of a longer,
+    // non-date digit-dash run (a phone number regrouped as 4-2-2), wrongly exempting most of its
+    // digits and letting the whole thing slip the phone screen. Now digit-anchored on both ends.
+    it('"Call 5551-23-4567 today" fails (4-2-2-regrouped phone number, not a real ISO date)', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, 'Call 5551-23-4567 today', noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('contact_channel')
+    })
+
+    it('"Reach me at +1 8885-55-0142" fails (4-2-2-regrouped phone number with country code)', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, 'Reach me at +1 8885-55-0142', noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('contact_channel')
+    })
+
     it('a 10-digit run embedded in an alphanumeric reference id passes (bounded by a letter, not standalone)', async () => {
       const ticketId = await seedTicket()
       const body = 'Your reference is REF1234567890 for tracking.'
@@ -441,6 +477,13 @@ describe('support validator', () => {
     it('"Window: 2024-01-15 2024-01-18" passes (two adjacent ISO dates merged into one phone-regex candidate)', async () => {
       const ticketId = await seedTicket()
       const body = 'Window: 2024-01-15 2024-01-18'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    it('"Dates: 2024-01-15 2024-01-18 2024-01-20" passes (three adjacent ISO dates merged into one candidate)', async () => {
+      const ticketId = await seedTicket()
+      const body = 'Dates: 2024-01-15 2024-01-18 2024-01-20'
       const result = await validateReplyBody(db, ticketId, body, noRefund)
       expect(result).toEqual({ ok: true, normalizedBody: body })
     })
