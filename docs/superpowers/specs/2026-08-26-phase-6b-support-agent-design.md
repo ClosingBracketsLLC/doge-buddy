@@ -78,9 +78,19 @@ status = 'triaged' AND agent_failure_count < 2 AND (
      last_agent_run_at IS NULL
   OR last_inbound_at > last_agent_run_at                       -- new work
   OR (last_agent_run_at < now() - interval '20 minutes'        -- stuck-run recovery:
-      AND (last_agent_prompted_at IS NULL                      --   claimed but never finished
-           OR last_agent_prompted_at < last_agent_run_at)))    --   (e.g. hard-killed twice)
+      AND (last_agent_finished_at IS NULL                      --   claimed but never concluded
+           OR last_agent_finished_at < last_agent_run_at)))    --   (e.g. hard-killed twice)
 ```
+
+*(Amended 2026-08-27, implementation review: the gate originally compared
+`last_agent_prompted_at` — a MESSAGE-time watermark — to the wall-clock claim stamp, which is
+true after every successful run: ordinary follow-ups would falsely escalate `agent_failed` and
+idle tickets would re-run every 20 minutes. `last_agent_finished_at` is a wall-clock completion
+stamp written on every authoritative outcome; both sides of the stuck comparison now live in the
+same time space. Additionally, the failure counter increments ONLY when the stuck branch is what
+authorized the claim — never on a legitimate new-inbound claim — and the ≥2 stuck-escalation
+commits INSIDE the claim transaction, so a hard-kill between claim and escalation cannot strand
+the ticket.)*
 
 The stuck-recovery branch exists because a Railway hard-kill on both pg-boss attempts expires the
 job without any handler code running — without it the claim stamp would deselect the ticket
@@ -117,12 +127,14 @@ derived invariant also catches sibling-invalidation and any future leak into thi
    **`threadSnapshotAt`** (see §3/§4 — the staleness + prompt watermark).
 5. Resume pre-flight + SDK run (§2, §3).
 
-**Two watermarks, deliberately distinct:** `last_agent_run_at` (stamped at claim, before the SDK
-call) is ONLY the loop/claim guard. `last_agent_prompted_at` (set to `threadSnapshotAt` ONLY
+**Three timestamps, deliberately distinct:** `last_agent_run_at` (stamped at claim, before the
+SDK call) is ONLY the loop/claim guard. `last_agent_prompted_at` (set to `threadSnapshotAt` ONLY
 when a run produces an authoritative result) is the prompt/staleness watermark — a crashed or
 failed attempt never advances it, so a retry's prompt still includes the messages the dead
-attempt never processed. (A single column can't do both: stamped-at-claim would make every
-resume prompt empty and every retry blind.)
+attempt never processed. `last_agent_finished_at` (wall-clock, stamped on every authoritative
+outcome) is the stuck-gate's completion marker. (One column can't serve these roles: a
+claim-stamped watermark makes every resume prompt empty; a message-time watermark compared to
+wall clock makes every completed run look stuck.)
 
 **Ticket transitions** (all guarded `UPDATE … WHERE status = $expected`, 6A convention). Every
 transition INTO `escalated` sets `escalation_reason` and handles `escalation_notified_at` as
@@ -148,10 +160,11 @@ Inbound while `awaiting_approval`: 6A ingest does NOT reopen that status; the pe
 stays the pivot, and §4's staleness guard + conditional flip + 6A reopen jointly cover every
 arrival window (§4 dovetail note).
 
-- **Migration (one, additive):** `support_tickets` += `last_agent_run_at timestamptz`,
-  `last_agent_prompted_at timestamptz`, `agent_failure_count int not null default 0`;
-  `support_messages` += `auth_results text` (§3 refund gate); new table `agent_session_entries`
-  (§2).
+- **Migrations (additive):** `support_tickets` += `last_agent_run_at timestamptz`,
+  `last_agent_prompted_at timestamptz`, `last_agent_finished_at timestamptz` (wall-clock
+  completion stamp — set to now() on EVERY authoritative outcome incl. no_action; the stuck
+  gate's other half), `agent_failure_count int not null default 0`; `support_messages` +=
+  `auth_results text` (§3 refund gate); new table `agent_session_entries` (§2).
 
 **Budgets:** model `claude-sonnet-5`, `maxTurns: 15`, `maxBudgetUsd: 0.50` (parent), watchdog
 5 min (AbortController). Escalations the agent triggers ride 6A's per-cycle collapse + max-10/day
