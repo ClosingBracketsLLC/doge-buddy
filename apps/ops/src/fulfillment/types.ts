@@ -10,4 +10,6 @@ export type SendOpts = {
   retryBackoff?: boolean
   retryDelay?: number
   startAfter?: number
+  /** Per-send job expiry (`support.agent-run` pins 600s, above its 300s SDK watchdog). */
+  expireInSeconds?: number
 }
