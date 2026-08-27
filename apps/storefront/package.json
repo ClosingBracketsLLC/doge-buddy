@@ -16,6 +16,7 @@
   },
   "prettier": "@shopify/prettier-config",
   "dependencies": {
+    "@doge-buddy/core": "workspace:*",
     "@shopify/hydrogen": "2026.4.5",
     "graphql": "^16.10.0",
     "graphql-tag": "^2.12.6",
