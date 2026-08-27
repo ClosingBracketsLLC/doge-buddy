@@ -69,7 +69,16 @@ interface RawGmailMessage {
   payload?: GmailMessagePayload
 }
 
-type Endpoint = 'listHistory' | 'getMessage' | 'other'
+/**
+ * `send` is its own endpoint kind purely so the retry logic can EXCLUDE it (Task 15 review, M4):
+ * `messages.send` is the one non-idempotent call in this client, and a transport-level failure
+ * (timeout, 5xx) does not mean Gmail failed to queue the message — it means we stopped waiting for
+ * the answer. An HTTP-layer retry there can put two copies in the customer's inbox from inside a
+ * single `sendReply` call, which the caller's `X-DogeBuddy-Proposal` marker cannot detect or undo
+ * (both copies carry it). The executor's own crash-recovery re-entry IS the send's retry layer —
+ * it re-reads the thread first, so it can tell "already sent" from "never sent"; this layer cannot.
+ */
+type Endpoint = 'listHistory' | 'getMessage' | 'send' | 'other'
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -195,7 +204,9 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
         // one jittered retry (sharing the same retry budget as the 5xx path — no more attempts
         // than a garden-variety server error gets), then throw as a GmailApiError so callers don't
         // need to special-case a raw DOMException on top of the existing error taxonomy.
-        if (isTimeoutError(err) && !attemptedServerRetry) {
+        // `endpoint !== 'send'`: a timed-out send may well have been queued by Gmail already —
+        // retrying it here would double-send inside one call. See the `Endpoint` type's note.
+        if (isTimeoutError(err) && !attemptedServerRetry && endpoint !== 'send') {
           attemptedServerRetry = true
           await sleep(jitterDelayMs())
           continue
@@ -235,7 +246,9 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
       }
 
       if (status >= 500 && status < 600) {
-        if (!attemptedServerRetry) {
+        // Same exclusion as the timeout path above: a 5xx on `messages.send` is not proof the
+        // message was not queued, so this layer never retries it.
+        if (!attemptedServerRetry && endpoint !== 'send') {
           attemptedServerRetry = true
           await sleep(jitterDelayMs())
           continue
@@ -345,7 +358,7 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
         extraHeaders: r.extraHeaders,
       })
 
-      const result = (await request('POST', '/messages/send', [], 'other', { raw, threadId: r.threadId })) as {
+      const result = (await request('POST', '/messages/send', [], 'send', { raw, threadId: r.threadId })) as {
         id: string
         threadId: string
       }

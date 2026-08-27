@@ -25,7 +25,15 @@ const MODE_KEYS: Record<ProposalType, SettingKey & `workflow.${string}.mode`> = 
   deprecate_product: 'workflow.deprecation.mode',
 }
 
-export const PROPOSAL_RETRY_OPTS = { retryLimit: 5, retryBackoff: true, retryDelay: 30 }
+/**
+ * `expireInSeconds: 600` (Task 15 review, M5): without an explicit expiry, a `proposal.apply` job
+ * whose worker is hard-killed mid-run sits on pg-boss's default expiry before it can be retried,
+ * widening the window in which a second handler could pick the same proposal up while the first
+ * one's effects are still in flight. Ten minutes sits well above any real apply's runtime (the
+ * `support_reply` executor's slowest path is a handful of Gmail calls) while bounding that window
+ * — the same reasoning `support.agent-run`'s own 600s expiry documents.
+ */
+export const PROPOSAL_RETRY_OPTS = { retryLimit: 5, retryBackoff: true, retryDelay: 30, expireInSeconds: 600 }
 
 export function enqueueProposalApply(
   enqueue: (name: string, data: object, opts?: SendOpts) => Promise<void>,

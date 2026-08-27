@@ -161,7 +161,7 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
     expect(deps.enqueue).toHaveBeenCalledWith(
       'proposal.apply',
       { proposalId: row.id },
-      { retryLimit: 5, retryBackoff: true, retryDelay: 30, singletonKey: row.id },
+      { retryLimit: 5, retryBackoff: true, retryDelay: 30, expireInSeconds: 600, singletonKey: row.id },
     )
 
     const auditRows = await auditRowsFor(row.id, 'proposal.approve')
@@ -480,7 +480,7 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
     expect(deps.enqueue).toHaveBeenCalledWith(
       'proposal.apply',
       { proposalId: row!.id },
-      { retryLimit: 5, retryBackoff: true, retryDelay: 30, singletonKey: row!.id },
+      { retryLimit: 5, retryBackoff: true, retryDelay: 30, expireInSeconds: 600, singletonKey: row!.id },
     )
 
     const auditRows = await auditRowsFor(row!.id, 'proposal.apply_resent')

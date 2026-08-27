@@ -387,6 +387,53 @@ describe('createGmailClient', () => {
     expect(calls).toBe(2)
   })
 
+  it('sendReply is EXCLUDED from the timeout retry: a timed-out send is attempted exactly once', async () => {
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      calls++
+      throw Object.assign(new Error('timed out'), { name: 'TimeoutError' })
+    }) as unknown as typeof fetch
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await expect(
+      client.sendReply({
+        threadId: 'thread-100',
+        to: 'jane@example.com',
+        subject: 'Broken leash',
+        inReplyTo: '<abc@mail.example.com>',
+        references: '<abc@mail.example.com>',
+        bodyText: 'test',
+      }),
+    ).rejects.toMatchObject({ name: 'GmailApiError', status: 0, reason: 'timeout' })
+    // A timed-out send may already be queued at Gmail; retrying here would put two copies in the
+    // customer's inbox from inside one call, and both would carry the same recovery marker.
+    expect(calls).toBe(1)
+  })
+
+  it('sendReply is EXCLUDED from the 5xx retry: a 503 on send is attempted exactly once', async () => {
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      calls++
+      return new Response(
+        JSON.stringify({ error: { code: 503, message: 'Backend Error', errors: [{ reason: 'backendError' }] } }),
+        { status: 503 },
+      )
+    }) as unknown as typeof fetch
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await expect(
+      client.sendReply({
+        threadId: 'thread-100',
+        to: 'jane@example.com',
+        subject: 'Broken leash',
+        inReplyTo: '<abc@mail.example.com>',
+        references: '<abc@mail.example.com>',
+        bodyText: 'test',
+      }),
+    ).rejects.toMatchObject({ name: 'GmailApiError', status: 503 })
+    expect(calls).toBe(1)
+  })
+
   it('a fetch rejecting with any other error name (e.g. AbortError) propagates unchanged, with NO retry — the client accepts no caller signal, so this is an unknown error', async () => {
     let calls = 0
     const original = Object.assign(new Error('aborted'), { name: 'AbortError' })

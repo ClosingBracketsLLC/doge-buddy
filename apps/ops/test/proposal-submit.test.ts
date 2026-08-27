@@ -160,7 +160,7 @@ describe('submitProposal', () => {
       expect(enqueue).toHaveBeenCalledWith(
         'proposal.apply',
         { proposalId: result.id },
-        { retryLimit: 5, retryBackoff: true, retryDelay: 30, singletonKey: result.id },
+        { retryLimit: 5, retryBackoff: true, retryDelay: 30, expireInSeconds: 600, singletonKey: result.id },
       )
 
       const auditRows = await db

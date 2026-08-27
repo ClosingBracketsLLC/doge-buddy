@@ -7,10 +7,12 @@ import {
   PROPOSAL_APPLIED_ACTION,
   PROPOSAL_APPLY_FAILED_ACTION,
   STALE_APPLY_ERROR,
+  THREAD_TOO_BUSY_ERROR,
   applySupportReply,
 } from '../src/proposals/apply-support-reply.ts'
 import type { ApplyProposalDeps, ProposalShopifyOps } from '../src/proposals/apply-shared.ts'
 import { executeApplyProposal } from '../src/proposals/run-apply.ts'
+import { selectAndEnqueueAgentRuns } from '../src/support/agent-select.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -127,6 +129,7 @@ describe('applySupportReply', () => {
       subject?: string | null
       rfcMessageIdOnLatest?: boolean
       lastAgentRunAt?: Date | null
+      lastAgentFinishedAt?: Date | null
     } = {},
   ): Promise<SeededThread> {
     const count = opts.count ?? 1
@@ -155,6 +158,7 @@ describe('applySupportReply', () => {
         status: opts.status ?? 'awaiting_approval',
         lastInboundAt: latest.sentAt,
         lastAgentRunAt: opts.lastAgentRunAt ?? new Date(latest.sentAt.getTime() + 60_000),
+        lastAgentFinishedAt: opts.lastAgentFinishedAt ?? null,
       })
       .returning({ id: supportTickets.id })
 
@@ -502,6 +506,132 @@ describe('applySupportReply', () => {
     expect((await readProposal(proposal.id)).status).toBe('applied')
   })
 
+  /** Puts `n` messages on the Gmail thread that ingest has NOT recorded yet — i.e. exactly the
+   * candidates the recovery scan must examine. */
+  function addUnrecordedThreadMessages(threadId: string, n: number): void {
+    for (let i = 0; i < n; i += 1) {
+      gmail.receiveInbound({
+        from: CUSTOMER,
+        to: [SUPPORT_ADDRESS],
+        subject: SUBJECT,
+        bodyText: `unrecorded ${i}`,
+        threadId,
+      })
+    }
+  }
+
+  /** A prior attempt's marked send, sitting on the thread exactly as a crash would have left it. */
+  async function priorMarkedSend(thread: SeededThread, proposalId: string) {
+    const latest = thread.inbound[thread.inbound.length - 1]!
+    return gmail.sendReply({
+      threadId: thread.threadId,
+      to: CUSTOMER,
+      subject: SUBJECT,
+      inReplyTo: latest.rfcMessageId,
+      references: latest.rfcMessageId,
+      bodyText: REPLY_BODY,
+      extraHeaders: { 'X-DogeBuddy-Proposal': proposalId },
+    })
+  }
+
+  it('recovery: finds its own marker behind 21 newer unrecorded messages — the scan is not silently capped', async () => {
+    const thread = await seedThread()
+    const proposal = await seedProposal(thread.ticketId, thread.inbound[0]!.sentAt)
+    const priorSend = await priorMarkedSend(thread, proposal.id)
+    // 21 > the old 20-message slice: with that cap the scan never reached our own send, reported
+    // "nothing sent", and mailed the customer a second copy (the reviewer's reproduction).
+    addUnrecordedThreadMessages(thread.threadId, 21)
+
+    await applySupportReply(makeDeps(), proposal)
+
+    expect(gmail.sentMessages()).toHaveLength(1)
+    const outbound = (await readMessages(thread.ticketId)).filter((m) => m.direction === 'outbound')
+    expect(outbound).toHaveLength(1)
+    expect(outbound[0]!.gmailMessageId).toBe(priorSend.id)
+    expect((await readProposal(proposal.id)).status).toBe('applied')
+  })
+
+  it('recovery: a thread with more candidates than the scan limit THROWS rather than sending blind', async () => {
+    const thread = await seedThread()
+    const proposal = await seedProposal(thread.ticketId, thread.inbound[0]!.sentAt)
+    addUnrecordedThreadMessages(thread.threadId, 51)
+
+    await expect(applySupportReply(makeDeps(), proposal)).rejects.toThrow(THREAD_TOO_BUSY_ERROR)
+
+    // Erring toward "retry" costs a delay; erring toward "send" costs the customer a duplicate.
+    expect(gmail.sentMessages()).toHaveLength(0)
+    expect((await readProposal(proposal.id)).status).toBe('applying')
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('recovery runs BEFORE the staleness guard: a crashed-after-send re-entry with a newer inbound completes instead of refusing', async () => {
+    const thread = await seedThread()
+    const latest = thread.inbound[0]!
+    const snapshotAt = latest.sentAt
+    const proposal = await seedProposal(thread.ticketId, snapshotAt)
+    const priorSend = await priorMarkedSend(thread, proposal.id)
+
+    // The crash window did its worst: the customer wrote again AND ingest recorded it before this
+    // re-entry. The reply is already in their inbox — a "was NOT sent" refusal here would be a lie.
+    const newerSentAt = new Date(snapshotAt.getTime() + 5_000)
+    await db.insert(supportMessages).values({
+      ticketId: thread.ticketId,
+      gmailMessageId: `${thread.threadId}-post-send`,
+      direction: 'inbound',
+      fromEmail: CUSTOMER,
+      bodyText: 'one more thing',
+      rfcMessageId: `<${thread.threadId}-post-send@mock.gmail>`,
+      sentAt: newerSentAt,
+    })
+    await db
+      .update(supportTickets)
+      .set({ lastInboundAt: newerSentAt })
+      .where(eq(supportTickets.id, thread.ticketId))
+
+    await applySupportReply(makeDeps(), proposal)
+
+    expect(gmail.sentMessages()).toHaveLength(1)
+    const applied = await readProposal(proposal.id)
+    expect(applied.status).toBe('applied')
+    expect(applied.applyError).toBeNull()
+    const outbound = (await readMessages(thread.ticketId)).filter((m) => m.direction === 'outbound')
+    expect(outbound).toHaveLength(1)
+    expect(outbound[0]!.gmailMessageId).toBe(priorSend.id)
+    // No owner page claiming it didn't send, and no re-draft enqueue — the send happened.
+    expect(notify).not.toHaveBeenCalled()
+    expect(enqueue).not.toHaveBeenCalled()
+    // The newer message still needs an answer, so the ticket goes back to the agent.
+    expect((await readTicket(thread.ticketId)).status).toBe('triaged')
+  })
+
+  it('recovery after a crash between the flip and the applied transition completes to applied, not a false failure', async () => {
+    const thread = await seedThread({ status: 'awaiting_approval' })
+    const proposal = await seedProposal(thread.ticketId, thread.inbound[0]!.sentAt)
+    const priorSend = await priorMarkedSend(thread, proposal.id)
+    // Prior attempt got all the way through the outbound row AND the flip, then died.
+    await db.insert(supportMessages).values({
+      ticketId: thread.ticketId,
+      gmailMessageId: priorSend.id,
+      direction: 'outbound',
+      fromEmail: SUPPORT_ADDRESS,
+      bodyText: REPLY_BODY,
+      sentAt: new Date(thread.inbound[0]!.sentAt.getTime() + 1000),
+    })
+    await db
+      .update(supportTickets)
+      .set({ status: 'waiting_on_customer' })
+      .where(eq(supportTickets.id, thread.ticketId))
+
+    await applySupportReply(makeDeps(), proposal)
+
+    expect(gmail.sentMessages()).toHaveLength(1)
+    expect((await readProposal(proposal.id)).status).toBe('applied')
+    expect((await readMessages(thread.ticketId)).filter((m) => m.direction === 'outbound')).toHaveLength(1)
+    // The ticket already parked on the customer; recovery leaves that alone.
+    expect((await readTicket(thread.ticketId)).status).toBe('waiting_on_customer')
+    expect(notify).not.toHaveBeenCalled()
+  })
+
   it("recovery: the owner's own unmarked reply in the crash window is NOT mistaken for ours — the approved draft still sends", async () => {
     const thread = await seedThread()
     const latest = thread.inbound[0]!
@@ -564,6 +694,90 @@ describe('applySupportReply', () => {
     expect((await readTicket(thread.ticketId)).status).toBe('triaged')
   })
 
+  it('inbound during apply: the triaged hand-back clears the claim stamp, so selection can actually pick the ticket up again', async () => {
+    // The nasty timing: the message reached Gmail BEFORE the agent claimed the ticket, but ingest
+    // only recorded it during this apply. So last_inbound_at < last_agent_run_at — selection's
+    // "new inbound" branch never fires — and the run FINISHED, so the stuck branch never fires
+    // either. Without clearing the stamp the ticket sits in `triaged` forever, unselectable.
+    const thread = await seedThread()
+    const latest = thread.inbound[0]!
+    const snapshotAt = latest.sentAt
+    const claimAt = new Date(snapshotAt.getTime() + 60_000)
+    await db
+      .update(supportTickets)
+      .set({ lastAgentRunAt: claimAt, lastAgentFinishedAt: new Date(claimAt.getTime() + 1_000) })
+      .where(eq(supportTickets.id, thread.ticketId))
+    const proposal = await seedProposal(thread.ticketId, snapshotAt)
+
+    const arrivalAt = new Date(snapshotAt.getTime() + 1_000) // newer than the snapshot, OLDER than the claim
+    const racingGmail: GmailClient = {
+      ...gmail,
+      sendReply: async (r) => {
+        const result = await gmail.sendReply(r)
+        await db.insert(supportMessages).values({
+          ticketId: thread.ticketId,
+          gmailMessageId: `${thread.threadId}-late-ingest`,
+          direction: 'inbound',
+          fromEmail: CUSTOMER,
+          bodyText: 'sent before the claim, ingested during the apply',
+          sentAt: arrivalAt,
+        })
+        await db
+          .update(supportTickets)
+          .set({ lastInboundAt: arrivalAt })
+          .where(eq(supportTickets.id, thread.ticketId))
+        return result
+      },
+    }
+
+    await applySupportReply(makeDeps({ gmail: racingGmail }), proposal)
+
+    const ticket = await readTicket(thread.ticketId)
+    expect(ticket.status).toBe('triaged')
+    expect(ticket.lastAgentRunAt).toBeNull()
+
+    // The real selection predicate must now pick it up — the point of the clear.
+    const selectedIds: string[] = []
+    await selectAndEnqueueAgentRuns({
+      db,
+      enqueue: async (_name, data) => {
+        selectedIds.push((data as { ticketId: string }).ticketId)
+      },
+      alert: vi.fn(async () => {}),
+      now: () => new Date(claimAt.getTime() + 5 * 60_000),
+    })
+    expect(selectedIds).toContain(thread.ticketId)
+  })
+
+  it('double delivery: two sequential proposal.apply runs for the same proposal send exactly once', async () => {
+    const thread = await seedThread()
+    const [row] = await db
+      .insert(proposals)
+      .values({
+        type: 'support_reply',
+        status: 'approved',
+        summary: `Reply: ${SUBJECT}`,
+        payload: {
+          type: 'support_reply',
+          ticketId: thread.ticketId,
+          body: REPLY_BODY,
+          threadSnapshotAt: thread.inbound[0]!.sentAt.toISOString(),
+        },
+        sourceWorkflow: 'support',
+        ticketId: thread.ticketId,
+      })
+      .returning()
+
+    await executeApplyProposal(makeDeps(), row!.id)
+    // pg-boss's singletonKey dedupes concurrent deliveries; a *sequential* redelivery (retry after
+    // a completed-but-unacked run) still reaches the shell, which must refuse it.
+    await executeApplyProposal(makeDeps(), row!.id)
+
+    expect(gmail.sentMessages()).toHaveLength(1)
+    expect((await readMessages(thread.ticketId)).filter((m) => m.direction === 'outbound')).toHaveLength(1)
+    expect((await readProposal(row!.id)).status).toBe('applied')
+  })
+
   it('references: caps at the last 20 thread ids and always ends with the In-Reply-To target', async () => {
     const thread = await seedThread({ count: 23 })
     const latest = thread.inbound[22]!
@@ -577,8 +791,10 @@ describe('applySupportReply', () => {
       .split(' ')
     expect(refs).toHaveLength(20)
     expect(refs[19]).toBe(latest.rfcMessageId)
-    // Oldest-first ordering, tail-anchored: ids 4..23 of the thread survive the cap.
-    expect(refs[0]).toBe(thread.inbound[3]!.rfcMessageId)
+    // RFC 5322 §3.6.4 trimming: the thread ROOT is kept (dropping it can split a long thread into
+    // a second conversation in the customer's client), then the newest 19.
+    expect(refs[0]).toBe(thread.inbound[0]!.rfcMessageId)
+    expect(refs[1]).toBe(thread.inbound[4]!.rfcMessageId)
   })
 
   it('a proposal whose ticket vanished fails terminally rather than retrying forever', async () => {

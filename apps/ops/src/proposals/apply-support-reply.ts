@@ -1,4 +1,4 @@
-import { SupportReplyPayloadSchema } from '@doge-buddy/core'
+import { SupportReplyPayloadSchema, type SupportReplyPayload } from '@doge-buddy/core'
 import { auditLog, supportMessages, supportTickets } from '@doge-buddy/db'
 import { PROPOSAL_MARKER_HEADER, isMessageGone, type GmailClient } from '@doge-buddy/gmail'
 import { and, asc, eq, lte } from 'drizzle-orm'
@@ -15,18 +15,32 @@ export const STALE_APPLY_ERROR = 'stale: newer customer message'
 
 /**
  * References cap (spec §4.3, "the last ~20"). A long thread's full id list would bloat every
- * header; twenty is plenty for any mail client's threading and keeps the header bounded.
+ * header; twenty is plenty for any mail client's threading and keeps the header bounded. When the
+ * list is longer, RFC 5322 §3.6.4's own trimming guidance applies — see `buildReferences`.
  */
 const REFERENCES_CAP = 20
 
 /**
- * Ceiling on the recovery scan's `getMessage` calls. The scan walks newest-first and stops at the
- * first marker match, so our own send — always among the newest messages on the thread, since the
- * staleness guard above has already returned if anything newer arrived — is found within the first
- * couple of fetches in practice. The cap is what keeps a pathological thread from turning one
- * apply into an unbounded burst of Gmail calls.
+ * Safety valve on the recovery scan — deliberately NOT a silent cap (fix round 1, CRITICAL 1).
+ *
+ * An earlier version took `.slice(-20)` of the candidate list, which silently dropped our own
+ * marked send whenever more than twenty unrecorded messages sat newer than it on the thread: the
+ * scan then reported "nothing sent" and the customer got a second copy (reproduced). A scan that
+ * cannot see every candidate cannot answer the only question it is asked.
+ *
+ * So: every candidate is scanned, and candidates are naturally a small slice of any thread (known
+ * inbound ids are excluded, and those are the bulk). If a thread ever exceeds this many candidates,
+ * that is not a case to guess at — it THROWS, and the job retries. Erring toward "retry" costs a
+ * delay; erring toward "send" costs the customer a duplicate.
  */
-const RECOVERY_SCAN_CAP = 20
+const RECOVERY_SCAN_LIMIT = 50
+
+/** Thrown (never returned) when the thread carries more unverifiable messages than the scan will
+ * examine — the job retries rather than sending blind. */
+export const THREAD_TOO_BUSY_ERROR = 'thread too busy to verify prior send — retrying'
+
+type TicketRow = typeof supportTickets.$inferSelect
+type MessageRow = typeof supportMessages.$inferSelect
 
 /**
  * `support_reply` proposal executor (Task 15, spec §4): turns an owner-approved reply draft into a
@@ -39,7 +53,7 @@ const RECOVERY_SCAN_CAP = 20
  *
  *  1. **A double send.** Gmail has no idempotency keys, so the send itself cannot be made
  *     idempotent — instead every reply carries `X-DogeBuddy-Proposal: <proposalId>`, and a
- *     re-entered apply reads the thread back looking for its own marker before sending anything.
+ *     re-entered apply reads the thread back looking for its own marker before doing anything else.
  *     Deliberately NOT `internalDate > decided_at`: Gmail is also the owner's manual channel, and
  *     their own hand-sent reply in the crash window must not be mistaken for ours (which would
  *     silently drop the approved draft while marking the proposal applied).
@@ -49,10 +63,23 @@ const RECOVERY_SCAN_CAP = 20
  *     inbound newer than the payload's `threadSnapshotAt` aborts the send outright and hands the
  *     ticket back to the agent.
  *
- * Every refusal below is TERMINAL (`applying -> failed` + audit + owner notify + return), never a
- * throw: none of them get better on a retry, and the owner tapped Approve on their phone — a
- * silent, log-only failure of an approved send is not acceptable (house `alert()` never reaches
- * Telegram; `notify()` does).
+ * **Step order (spec §4, amended fix round 1 — IMPORTANT 2):** the marker recovery scan runs
+ * FIRST, before the ticket-status pre-check and before the staleness guard. A completed send is a
+ * fait accompli: once the customer has the mail, the only correct continuation is the post-send
+ * bookkeeping (all of it idempotent and guarded), never a refusal claiming it never sent. Refusing
+ * there would leave the proposal `failed` and page the owner about a reply that is already sitting
+ * in the customer's inbox. Only the two checks that make recovery itself impossible — a missing
+ * ticket, an unconfigured Gmail client — run ahead of the scan.
+ *
+ * Full order: load + recovery-blocking checks -> RECOVERY SCAN (hit -> post-send, done) ->
+ * ticket-status pre-check -> customer email / rfc id pre-checks -> staleness -> send -> post-send.
+ *
+ * **Refusals vs throws.** Every *refusal* is terminal (`applying -> failed` + audit + owner
+ * `notify()` + return, never a throw): none of them get better on a retry, and the owner tapped
+ * Approve on their phone — a silent, log-only failure of an approved send is unacceptable (house
+ * `alert()` never reaches Telegram; `notify()` does). Throws are reserved for the opposite case —
+ * a state this run could not *establish* (an unreadable thread, an over-busy thread, a failed
+ * send). Those must retry, because the alternative is sending blind.
  */
 export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRow): Promise<void> {
   const { db } = deps
@@ -64,20 +91,19 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
   if (!ticket) {
     // Not one of the spec's listed pre-checks, but terminal for the same reason they are: a ticket
     // row that no longer exists will never come back, so throwing would only burn the retry budget
-    // before dead-lettering to the same `failed` state this reaches directly.
+    // before dead-lettering to the same `failed` state this reaches directly. Ahead of the scan
+    // because there is no thread id to scan without it.
     await failTerminal(deps, row, payload.ticketId, 'ticket not found')
     return
   }
 
-  // Chronological, both directions — this same list is the staleness input, the threading input,
-  // and the recovery scan's "which ids do we already know about" input.
+  // Chronological, both directions — this same list is the recovery scan's "which ids are already
+  // known inbound" input, the staleness input, and the threading input.
   const messages = await db
     .select()
     .from(supportMessages)
     .where(eq(supportMessages.ticketId, ticket.id))
     .orderBy(asc(supportMessages.sentAt), asc(supportMessages.createdAt))
-
-  // --- Step 1: hard pre-checks (spec §4.1), in the spec's order ---
 
   if (deps.gmail === null) {
     await failTerminal(deps, row, ticket.id, 'gmail not configured')
@@ -85,10 +111,21 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
   }
   const gmail: GmailClient = deps.gmail
 
+  // --- Recovery scan (spec §4.4), FIRST — see the step-order note above ---
+
+  const recoveredId = await findAlreadySentMessageId(gmail, messages, ticket.gmailThreadId, proposalId)
+  if (recoveredId !== null) {
+    await completeSend(deps, row, ticket, payload, threadSnapshotAt, recoveredId, true)
+    return
+  }
+
+  // --- Hard pre-checks (spec §4.1) ---
+
   if (ticket.status !== 'awaiting_approval') {
     // A rejected-sibling or escalated ticket must not accept a late Approve tap — the action token
     // in the owner's Telegram message stays live until it expires, so this status check is the
-    // thing that actually enforces §1's sibling-invalidation rule at send time.
+    // thing that actually enforces §1's sibling-invalidation rule at send time. Reached only when
+    // the scan proved nothing was sent, so refusing here cannot contradict a real send.
     await failTerminal(deps, row, ticket.id, 'ticket no longer awaiting approval')
     return
   }
@@ -112,7 +149,7 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
     return
   }
 
-  // --- Step 2: staleness guard (spec §4.2) ---
+  // --- Staleness guard (spec §4.2) ---
 
   const newerInbound = messages.find(
     (m) => m.direction === 'inbound' && m.sentAt !== null && m.sentAt > threadSnapshotAt,
@@ -159,29 +196,39 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
     return
   }
 
-  // --- Step 3: send recovery (spec §4.4) ---
+  // --- The send (spec §4.3) ---
 
-  let sentMessageId = await findAlreadySentMessageId(gmail, messages, ticket.gmailThreadId, proposalId)
-  const recovered = sentMessageId !== null
+  const sent = await gmail.sendReply({
+    threadId: ticket.gmailThreadId,
+    to: customerEmail,
+    subject: ticket.subject ?? '(no subject)',
+    inReplyTo,
+    references: buildReferences(messages, inReplyTo).join(' '),
+    bodyText: payload.body,
+    // The send-recovery marker. Everything above this line can be re-run for free; from here on
+    // the customer has the mail, and only this header can prove it on a re-entry.
+    extraHeaders: { [PROPOSAL_MARKER_HEADER]: proposalId },
+  })
 
-  // --- Step 4: the send (spec §4.3) ---
+  await completeSend(deps, row, ticket, payload, threadSnapshotAt, sent.id, false)
+}
 
-  if (sentMessageId === null) {
-    const sent = await gmail.sendReply({
-      threadId: ticket.gmailThreadId,
-      to: customerEmail,
-      subject: ticket.subject ?? '(no subject)',
-      inReplyTo,
-      references: buildReferences(messages, inReplyTo).join(' '),
-      bodyText: payload.body,
-      // The send-recovery marker. Everything above this line can be re-run for free; from here on
-      // the customer has the mail, and only this header can prove it on a re-entry.
-      extraHeaders: { [PROPOSAL_MARKER_HEADER]: proposalId },
-    })
-    sentMessageId = sent.id
-  }
-
-  // --- Step 5: post-send bookkeeping (spec §4.5) ---
+/**
+ * Post-send bookkeeping (spec §4.5) — the tail shared by a fresh send and a recovered one.
+ *
+ * Every write here is idempotent or guarded, which is what makes it safe as the recovery path's
+ * landing point: a re-entry that finds its own marker runs exactly this and nothing else.
+ */
+async function completeSend(
+  deps: ApplyProposalDeps,
+  row: ProposalRow,
+  ticket: TicketRow,
+  payload: SupportReplyPayload,
+  threadSnapshotAt: Date,
+  sentMessageId: string,
+  recovered: boolean,
+): Promise<void> {
+  const { db } = deps
 
   // Ingest's poll will see this same SENT message and run its own insert; whichever writer gets
   // there first wins and exactly ONE outbound row survives (6A's invariant). `rfcMessageId` is
@@ -201,7 +248,9 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
 
   // The conditional flip: park on the customer ONLY if the thread still looks the way it did when
   // the owner approved. `last_inbound_at <= threadSnapshotAt` is the same watermark the staleness
-  // guard used, re-evaluated now to catch a message that landed DURING this apply.
+  // guard used, re-evaluated now to catch a message that landed DURING this apply. Guarded on
+  // `awaiting_approval`, so a recovery landing here after the flip already happened (or after the
+  // owner escalated the ticket) matches 0 rows and leaves their status alone.
   const flipped = await db
     .update(supportTickets)
     .set({ status: 'waiting_on_customer' })
@@ -227,22 +276,27 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
       // AFTER the flip finds `waiting_on_customer` and takes 6A's normal reopen path (ingest flips
       // `resolved`/`waiting_on_customer` back to `new`). No arrival window strands a message.
       //
-      // No `last_agent_run_at` clear needed here, unlike the staleness path: this message arrived
-      // during the apply, i.e. strictly after the claim that produced the draft, so
-      // `last_inbound_at > last_agent_run_at` already holds and the re-run's CAS authorizes itself.
+      // `last_agent_run_at: null` here for the same reason the staleness path clears it (fix round
+      // 1, IMPORTANT 3) — and the reason is ingestion time, not arrival time. A message can reach
+      // Gmail BEFORE the claim and still be ingested during this apply, which leaves
+      // `last_inbound_at < last_agent_run_at`: selection's `last_inbound_at > last_agent_run_at`
+      // branch never fires, and the stuck branch never fires either because that run FINISHED
+      // (`last_agent_finished_at` is past its claim). The ticket would sit in `triaged`,
+      // unselectable and unpaged, until a future inbound happened to arrive. Clearing the stamp
+      // restores "never run" and makes it selectable on the next cycle.
       await db
         .update(supportTickets)
-        .set({ status: 'triaged' })
+        .set({ status: 'triaged', lastAgentRunAt: null })
         .where(and(eq(supportTickets.id, ticket.id), eq(supportTickets.status, 'awaiting_approval')))
     }
   }
 
-  await applyProposalTransition(db, proposalId, 'applying', 'applied', { appliedAt: new Date() })
+  await applyProposalTransition(db, row.id, 'applying', 'applied', { appliedAt: new Date() })
   await db.insert(auditLog).values({
     actor: 'system',
     action: PROPOSAL_APPLIED_ACTION,
     entityType: 'proposal',
-    entityId: proposalId,
+    entityId: row.id,
     detail: { ticketId: ticket.id, gmailMessageId: sentMessageId, recovered },
   })
 }
@@ -257,13 +311,16 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
  * poll, which sees the SENT message within a minute — both put our sent id INTO `support_messages`,
  * so a crash after either one would leave a re-entry skipping the very message it is looking for
  * and sending the customer a second copy. Only INBOUND ids are excluded here instead: a customer's
- * own message can never carry our marker, and inbound is the bulk of any thread, so the scan stays
- * just as bounded as intended while actually closing the window. `RECOVERY_SCAN_CAP` + newest-first
- * iteration keeps the fetch count fixed regardless of thread length.
+ * own message can never carry our marker, and inbound is the bulk of any thread, so the candidate
+ * set stays as small as the original filter intended while actually closing the window.
+ *
+ * The candidate list is scanned in FULL (fix round 1, CRITICAL 1 — a truncated scan silently
+ * reported "not sent" and duplicated the reply); `RECOVERY_SCAN_LIMIT` is a throwing safety valve,
+ * not a slice. Iteration is newest-first purely so the common case exits after one fetch.
  */
 async function findAlreadySentMessageId(
   gmail: GmailClient,
-  messages: (typeof supportMessages.$inferSelect)[],
+  messages: MessageRow[],
   gmailThreadId: string,
   proposalId: string,
 ): Promise<string | null> {
@@ -271,13 +328,15 @@ async function findAlreadySentMessageId(
   const knownInboundIds = new Set(
     messages.filter((m) => m.direction === 'inbound').map((m) => m.gmailMessageId),
   )
-  const candidates = thread.messages
-    .map((m) => m.id)
-    .filter((id) => !knownInboundIds.has(id))
-    .slice(-RECOVERY_SCAN_CAP)
-    .reverse()
+  const candidates = thread.messages.map((m) => m.id).filter((id) => !knownInboundIds.has(id))
 
-  for (const id of candidates) {
+  if (candidates.length > RECOVERY_SCAN_LIMIT) {
+    // Refusing to guess: with this many unverifiable messages the scan cannot cheaply prove
+    // whether we already sent, and the wrong guess duplicates a customer-visible email.
+    throw new Error(THREAD_TOO_BUSY_ERROR)
+  }
+
+  for (const id of [...candidates].reverse()) {
     let meta
     try {
       meta = await gmail.getMessage(id, { format: 'metadata' })
@@ -294,12 +353,17 @@ async function findAlreadySentMessageId(
 }
 
 /**
- * `References` per spec §4.3: the thread's rfc ids oldest -> newest, capped to the last
- * `REFERENCES_CAP`, with the In-Reply-To target guaranteed last. The explicit re-anchoring matters
- * because the newest message on the thread is not necessarily the latest INBOUND one (the owner
- * may have hand-replied after it), and RFC 5322 threading expects the parent to be the final id.
+ * `References` per spec §4.3: the thread's rfc ids oldest -> newest with the In-Reply-To target
+ * guaranteed last. The explicit re-anchoring matters because the newest message on the thread is
+ * not necessarily the latest INBOUND one (the owner may have hand-replied after it), and RFC 5322
+ * threading expects the parent to be the final id.
+ *
+ * Trimming follows RFC 5322 §3.6.4 rather than a plain tail slice (fix round 1, M6): when the list
+ * is longer than `REFERENCES_CAP`, keep the FIRST id — the thread root, which is what mail clients
+ * group the conversation by — plus the newest `REFERENCES_CAP - 1`. A tail-only trim drops the root
+ * and can split a long thread into a second conversation in the customer's client.
  */
-function buildReferences(messages: (typeof supportMessages.$inferSelect)[], inReplyTo: string): string[] {
+function buildReferences(messages: MessageRow[], inReplyTo: string): string[] {
   const ordered: string[] = []
   const seen = new Set<string>([inReplyTo])
   for (const m of messages) {
@@ -308,7 +372,9 @@ function buildReferences(messages: (typeof supportMessages.$inferSelect)[], inRe
     ordered.push(m.rfcMessageId)
   }
   ordered.push(inReplyTo)
-  return ordered.slice(-REFERENCES_CAP)
+
+  if (ordered.length <= REFERENCES_CAP) return ordered
+  return [ordered[0]!, ...ordered.slice(-(REFERENCES_CAP - 1))]
 }
 
 /**
