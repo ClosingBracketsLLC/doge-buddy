@@ -237,9 +237,13 @@ requires `reply` — a refund the customer isn't told about is a bug).
 2. **Promised-action screen.** Reject when a promise-verb group and an action-object group
    co-occur within a **200-character window of the whitespace-normalized body**: action objects
    `refund|refunded|reimburs*|credit|credited|store credit|money back|compensat*|replacement|
-   reship*|resend|cancel* (your|the) order|payment (returned|reversed)`; promise verbs
-   `issued|processed|sent|approved|applied|on its way|within \d+ (business )?days|has been|
-   will be`. EXCEPTION: the screen passes when the output carries a `refund` object OR a live
+   reship*|resend|cancel* (your|the) order|order (has been|was|is) cancel*|replacement has
+   (been )?shipped|payment (returned|reversed)`; promise verbs
+   `issued|processed|sent|approved|applied|on its way|on the way|within \d+ (business )?days|
+   has been|have been|we have|we've|will be|is complete|has shipped|
+   expect (it|the funds|your (refund|money))|funds back`. *(Family extended 2026-08-27 after
+   implementation review showed the original list caught only stilted phrasings — "You have
+   been refunded", "Your refund is on the way", and passive cancellations all passed.)* EXCEPTION: the screen passes when the output carries a `refund` object OR a live
    (`pending`/`approved`/`applying`/`applied`) refund proposal exists for the same ticket (the
    two-proposal split means a legitimately refund-announcing draft's refund object lives in the
    SIBLING proposal — and the owner edit path (§5) re-runs this validator, which without the
@@ -259,9 +263,14 @@ requires `reply` — a refund the customer isn't told about is a bug).
    and `dogebuddy.com.evil.com` both fail). Anything else → reject. Tests: bare domain,
    endsWith-boundary, userinfo (`https://dogebuddy.com@evil.com`), lookalike subdomain chains.
 4. **Contact-channel screen:** email addr-specs in the body must be `@dogebuddy.com`;
-   phone-number-like tokens (7+ digits with separators) → reject. (The Telegram preview
-   truncates — §5 — so an off-platform contact channel buried in the tail would otherwise ship
-   sight-unseen.)
+   phone-number-like tokens → reject. Phone-like means 7+ digits unbroken by letters, with at
+   least one separator between digit groups OR a leading `+`/`(` — a bare digit run (order
+   number, tracking number `1Z999AA10123456784`) and ISO dates (`\d{4}-\d{2}-\d{2}`) are NOT
+   phone-like, and digits inside allowed-URL spans are skipped (the byte-equal tracking-URL
+   allowance in rule 3 would otherwise be unusable — carrier URLs embed 7+ digit runs by
+   construction). The contact screen runs BEFORE the URL screen; the body is NFKC-normalized
+   before all screens (confusable-dot domains). (The Telegram preview truncates — §5 — so an
+   off-platform contact channel buried in the tail would otherwise ship sight-unseen.)
 5. **Refund rules:** requires an ownership-VERIFIED linked order (`order_id` set — claimed,
    unverified is not good enough to move money); `orders.total_cents` non-NULL;
    `amountCents ≤ total_cents − Σ(amountCents of prior applied refund proposals for this
