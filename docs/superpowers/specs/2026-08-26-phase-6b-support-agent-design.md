@@ -61,11 +61,15 @@ mirror is deleted per-run (§2), the table is revisited when it matters).
 ## 1. Trigger + ticket lifecycle
 
 **New pg-boss job `support.agent-run`** (`{ ticketId }`, `singletonKey: ticketId`, queue created
-with **`policy: 'singleton'`** — the house rule for every singletonKey producer (`queue.ts`
-:149–176); pg-boss's default standard policy applies NO key constraint at all — `retryLimit: 1`,
-`retryDelay: 30`, `expireInSeconds: 600` (above the 300s watchdog)). The queue serializes
-per-ticket execution; the **guarded CAS claim below is the real per-ticket mutex** — a queued
-duplicate whose claim matches 0 rows exits as a no-op (audit `support.agent_run_skipped`).
+with **`policy: 'stately'`** — amended 2026-08-27: pg-boss's `singleton` policy indexes only
+ACTIVE jobs, so minute-cadence selection re-enqueuing an unclaimed ticket piled up unbounded
+queued duplicates (empirically confirmed); `stately` dedupes per (name, state, key) across
+created+active, bounding duplicates at one. The policy is applied via `updateQueue` after the
+idempotent create, per `registerCron`'s documented trap — `retryLimit: 1`, `retryDelay: 30`,
+`expireInSeconds: 600` (above the 300s watchdog). The queue serializes per-ticket execution; the
+**guarded CAS claim below is the real per-ticket mutex** — a queued duplicate whose claim
+matches 0 rows exits as a no-op (audit `support.agent_run_skipped`) **before any spend row is
+written**.
 
 **Selection is a fourth isolated stage of the poll cycle** (after ingest → triage → escalation
 notify), mirroring their never-throws contract: runs only when triage ran (skipped when ingest
@@ -100,26 +104,35 @@ if the increment brings it to ≥ 2, the job transitions `triaged → escalated`
 at count 2, excluded from selection with the ×2 net never having run.
 
 The selection stage ALSO performs the **orphan backstop**: any ticket in `awaiting_approval` with
-NO live (`pending`/`approved`/`applying`) support proposal AND `updated_at < now() − 15 minutes`
-→ `escalated`, reason `orphaned_awaiting_approval`, normal notify. This is deliberately derived,
+NO live (`pending`/`approved`/`applying`) support proposal AND
+`COALESCE(newest support-proposal created_at, last_agent_run_at, updated_at) < now() − 15 min`
+→ `escalated`, reason `orphaned_awaiting_approval`, normal notify, capped 10/cycle. (Anchor
+amended 2026-08-27: `updated_at` alone is bumped by every inbound message, so a chasing
+customer would reset the clock and starve the backstop exactly when it matters. Terminal
+proposal statuses — applied/rejected/failed — are deliberately orphan-ELIGIBLE: a lost flip
+race or crash window is precisely what this net exists to surface.) This is deliberately derived,
 not hooked: proposals flip `pending → expired` from THREE writers (the cron sweep, the admin
 proposals-page bulk flip, the action-route lazy flip) and hooking all of them is fragile; the
 derived invariant also catches sibling-invalidation and any future leak into this status. The
 15-minute grace covers §3's transition-before-submit window.
 
-**Job order (pinned — the ordering IS the correctness):**
+**Job order (pinned — the ordering IS the correctness; steps 2–3 moved AFTER the claim,
+amended 2026-08-27: spend rows written before the CAS meant every queued duplicate burned a
+budget slot as a no-op — a first-bring-up backlog could black out the whole day and falsely
+escalate `agent_run_cap` on tickets that never ran; counting after the claim but before the SDK
+call keeps the accounting fail-closed for actual model spend):**
 1. Kill levers (`killswitch.global`, `workflow.support.enabled`) / Gmail+Anthropic env absent →
    skip, no stamp.
-2. Load ticket; **per-ticket daily cap**: ≥ 3 `support.agent_run` audit rows for this ticket
-   since UTC midnight → transition `triaged → escalated` (reason `agent_run_cap`, notify) and
-   exit. Without this, one hostile sender ping-ponging a single ticket burns the global cap
-   (~$25/day at attacker cost zero) and blacks out the agent for real customers.
-3. **Global daily cap** `SUPPORT_AGENT_MAX_RUNS_PER_DAY = 50`: count + audit-row insert wrapped
-   in `pg_advisory_xact_lock` (the `agents/lifecycle.ts` pattern — this queue has no
-   single-caller guarantee, unlike triage's; plain check-then-act would overshoot during deploy
-   overlap). The audit row is `action: 'support.agent_run'`, `entityType: 'ticket'`,
-   `entityId: ticketId` — the same rows step 2's per-ticket count reads. At cap: exit WITHOUT
-   stamping (ticket stays selectable after midnight), one warning alert per UTC day.
+2. **Guarded CAS claim** (was step 4) — a CAS-rejected duplicate exits here, before any spend
+   row exists.
+3. **Caps, after the claim**, in one `pg_advisory_xact_lock` transaction (the
+   `agents/lifecycle.ts` pattern — this queue has no single-caller guarantee): per-ticket daily
+   cap ≥ 3 → guarded `triaged → escalated` (reason `agent_run_cap`, notify) and exit (the claim
+   stamp is irrelevant once escalated). Global cap `SUPPORT_AGENT_MAX_RUNS_PER_DAY = 50` → exit
+   without running (claim stamp stays; the 20-min stuck branch re-claims and re-checks — after
+   UTC midnight it proceeds), one warning alert per UTC day. Under cap: INSERT the spend audit
+   row (`action: 'support.agent_run'`, `entityType: 'ticket'`, `entityId: ticketId`) in the
+   same locked transaction, then proceed.
 4. **Guarded CAS claim** — the per-ticket mutex:
    `UPDATE support_tickets SET last_agent_run_at = now() WHERE id = $1 AND status = 'triaged'
    AND (<the selection predicate's watermark branch that selected it>) RETURNING id,
