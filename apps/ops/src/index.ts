@@ -15,6 +15,7 @@ import {
 } from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdapter } from '@doge-buddy/supplier'
 import { sweepOrphanRuns } from './agents/lifecycle.ts'
+import { createPgSessionStore } from './agents/session-store.ts'
 import { createAlerter, type AlertSeverity } from './alerts.ts'
 import { loadConfig } from './config.ts'
 import type { ReconcileDeps } from './fulfillment/run-reconcile.ts'
@@ -27,12 +28,13 @@ import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { sourcingWeeklyHandler } from './jobs/sourcing-weekly.ts'
+import { supportAgentRunHandler, SUPPORT_AGENT_QUEUE, type SupportAgentJobDeps } from './jobs/support-agent-run.ts'
 import { supportPollGmailHandler, SUPPORT_POLL_QUEUE, type SupportPollDeps } from './jobs/support-poll-gmail.ts'
 import { loadDotEnv } from './load-env.ts'
 import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
 import { createTelegramNotifier } from './notify/telegram.ts'
 import type { ProposalShopifyOps } from './proposals/run-apply.ts'
-import { registerCron, startQueue, type Queue } from './queue.ts'
+import { createQueueRetrying, registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
 import type { SourcingPipelineDeps } from './sourcing/pipeline.ts'
@@ -317,6 +319,36 @@ const gmailClient = config.gmail
     })
   : null
 const triageCall = config.anthropic ? createAnthropicTriageCall({ apiKey: config.anthropic.apiKey }) : null
+
+// `support.agent-run` (Phase 6B, Tasks 11-13): the per-ticket agent job the poll's 4th stage
+// (`support/agent-select.ts`) enqueues. `anthropicConfigured` mirrors the poll's own triage gate
+// just above (`Boolean(config.anthropic)`) — same env, same "armed or not" question, asked again
+// here because the job checks it independently at claim time (spec §1 step 1).
+const supportAgentDeps: SupportAgentJobDeps = {
+  db,
+  settings,
+  alert,
+  notify,
+  adminBaseUrl: config.adminBaseUrl!,
+  adapter: supplierAdapter,
+  enqueue,
+  sessionStore: createPgSessionStore(db),
+  anthropicConfigured: Boolean(config.anthropic),
+}
+// `policy: 'singleton'` is load-bearing here (house rule, queue.ts:149-176's doc comment): this
+// queue's sole producer (`enqueueSupportAgentRun`) sets `singletonKey: ticketId` on every send,
+// expecting pg-boss to keep at most one ACTIVE job per ticket at a time — the per-ticket mutex
+// `claimTicket`'s row lock inside the job then makes airtight. `createQueueRetrying` (not a bare
+// `boss.createQueue`) guards the same first-boot concurrent-DDL race as every other queue below.
+await createQueueRetrying(queue.boss, SUPPORT_AGENT_QUEUE, { name: SUPPORT_AGENT_QUEUE, policy: 'singleton' })
+// `batchSize: 1` is pinned explicitly (not just relying on pg-boss's own default of 1): the job's
+// `removeLocalSessionMirror()` does a best-effort `rm -rf` of the WHOLE shared SDK session-mirror
+// directory after every run, not just the run's own subdirectory — see that function's doc comment
+// in `jobs/support-agent-run.ts`. A batch >1 (or a second concurrent worker on this queue) would
+// let one run's cleanup delete another's live mirror out from under it.
+await queue.boss.work(SUPPORT_AGENT_QUEUE, { batchSize: 1 }, supportAgentRunHandler(supportAgentDeps))
+app.log.info(`${SUPPORT_AGENT_QUEUE} worker ARMED — singleton, batch size 1`)
+
 const supportPollDeps: SupportPollDeps = {
   db,
   gmail: gmailClient,
@@ -326,6 +358,7 @@ const supportPollDeps: SupportPollDeps = {
   notify,
   adminBaseUrl: config.adminBaseUrl!,
   triageCall,
+  enqueue,
 }
 await registerCron(queue.boss, SUPPORT_POLL_QUEUE, '* * * * *', supportPollGmailHandler(supportPollDeps), {
   policy: 'singleton',

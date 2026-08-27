@@ -57,8 +57,13 @@ const PROPOSAL_APPLY_QUEUE = 'proposal.apply'
  * raise a deadlock (40P01) or serialization failure (40001) on that DDL. Once the queue exists,
  * every future call is a fast no-op, so this only ever matters on first boot; retrying a few
  * times with a short backoff is safe and sufficient.
+ *
+ * Exported (Task 13) for `index.ts`'s own singleton-policy queue creations — house rule: every
+ * queue whose producer sets a `singletonKey` (e.g. `support.agent-run`) must be created through
+ * this retrying wrapper rather than a bare `boss.createQueue`, for the same first-boot DDL-race
+ * reason `startQueue`'s own singleton queues below use it.
  */
-async function createQueueRetrying(boss: PgBoss, name: string, options?: PgBoss.Queue): Promise<void> {
+export async function createQueueRetrying(boss: PgBoss, name: string, options?: PgBoss.Queue): Promise<void> {
   const RETRYABLE_CODES = new Set(['40P01', '40001'])
   const MAX_ATTEMPTS = 5
   for (let attempt = 1; ; attempt++) {
