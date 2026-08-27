@@ -393,11 +393,23 @@ message arriving mid-run is older than `created_at` yet was never seen by the dr
 
 ### `support_reply`
 
-1. Load proposal + ticket + messages. **Hard pre-checks** (each → `applying → failed` + audit +
-   owner `notify()`, never send): ticket status must be `awaiting_approval` (a rejected-sibling
-   or escalated ticket must not accept a late Approve tap — the action token is otherwise still
-   live); `customer_email` non-NULL; latest inbound has an `rfc_message_id` (never send
-   unthreaded).
+*(Step order amended 2026-08-27, implementation review: the recovery scan now runs FIRST — a
+crash-after-send re-entry that hit the staleness guard or status pre-check before scanning
+reported an already-delivered reply to the owner as "NOT sent" and re-enqueued the agent to
+draft a second reply to a customer who had the first. A completed send is a fait accompli: the
+only correct continuation is the post-send bookkeeping. The scan itself must never silently
+truncate — a capped scan that dropped our own marked message re-sent it, reproduced live;
+scan all non-inbound candidates and THROW past a generous bound rather than ever sending
+blind.)*
+
+1. Load proposal + ticket + messages; terminal checks that make recovery impossible (gmail
+   unconfigured, ticket/thread missing) → `applying → failed` + audit + `notify()`. Then the
+   **send-recovery scan** (step 4's mechanics): marker found → jump directly to step 5's
+   post-send bookkeeping (all idempotent/guarded) — never a refusal, never a re-draft. Then the
+   remaining **hard pre-checks** (each → `applying → failed` + audit + owner `notify()`, never
+   send): ticket status must be `awaiting_approval` (a rejected-sibling or escalated ticket
+   must not accept a late Approve tap — the action token is otherwise still live);
+   `customer_email` non-NULL; latest inbound has an `rfc_message_id` (never send unthreaded).
 2. **Staleness guard:** any inbound with `sent_at > threadSnapshotAt` → `applying → failed`
    (`applyError: 'stale: newer customer message'`) + ticket `awaiting_approval → triaged` with
    **`last_agent_run_at` cleared** (same transaction — the stale message's internalDate can
