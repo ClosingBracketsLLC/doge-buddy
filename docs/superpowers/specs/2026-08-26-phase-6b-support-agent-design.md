@@ -116,28 +116,32 @@ proposals-page bulk flip, the action-route lazy flip) and hooking all of them is
 derived invariant also catches sibling-invalidation and any future leak into this status. The
 15-minute grace covers §3's transition-before-submit window.
 
-**Job order (pinned — the ordering IS the correctness; steps 2–3 moved AFTER the claim,
-amended 2026-08-27: spend rows written before the CAS meant every queued duplicate burned a
-budget slot as a no-op — a first-bring-up backlog could black out the whole day and falsely
-escalate `agent_run_cap` on tickets that never ran; counting after the claim but before the SDK
-call keeps the accounting fail-closed for actual model spend):**
+**Job order (pinned — the ordering IS the correctness; amended twice 2026-08-27: spend rows
+written before the CAS meant every queued duplicate burned a budget slot as a no-op; but a
+naive caps-after-claim reorder left the claim stamp on a capped day, and the 20-minute stuck
+recovery then charged failures until the whole backlog falsely escalated `agent_failed` —
+empirically reproduced. The double-check shape below keeps both properties: capped days exit
+before stamping, and duplicates exit before spending):**
 1. Kill levers (`killswitch.global`, `workflow.support.enabled`) / Gmail+Anthropic env absent →
    skip, no stamp.
-2. **Guarded CAS claim** (was step 4) — a CAS-rejected duplicate exits here, before any spend
-   row exists.
-3. **Caps, after the claim**, in one `pg_advisory_xact_lock` transaction (the
-   `agents/lifecycle.ts` pattern — this queue has no single-caller guarantee): per-ticket daily
-   cap ≥ 3 → guarded `triaged → escalated` (reason `agent_run_cap`, notify) and exit (the claim
-   stamp is irrelevant once escalated). Global cap `SUPPORT_AGENT_MAX_RUNS_PER_DAY = 50` → exit
-   without running (claim stamp stays; the 20-min stuck branch re-claims and re-checks — after
-   UTC midnight it proceeds), one warning alert per UTC day. Under cap: INSERT the spend audit
-   row (`action: 'support.agent_run'`, `entityType: 'ticket'`, `entityId: ticketId`) in the
-   same locked transaction, then proceed.
-4. **Guarded CAS claim** — the per-ticket mutex:
+2. **Read-only pre-claim cap checks** (plain SELECT counts, no lock, no insert): per-ticket
+   daily cap ≥ 3 → guarded `triaged → escalated` (reason `agent_run_cap`, notify) and exit
+   (never stamped, correctly labeled even for stuck tickets). Global cap ≥ 50 → exit with NO
+   stamp (ticket stays selectable after UTC midnight), one warning alert per UTC day.
+3. **Guarded CAS claim** — the per-ticket mutex:
    `UPDATE support_tickets SET last_agent_run_at = now() WHERE id = $1 AND status = 'triaged'
    AND (<the selection predicate's watermark branch that selected it>) RETURNING id,
-   last_inbound_at` — 0 rows → audit skip + exit. The returned `last_inbound_at` is this run's
-   **`threadSnapshotAt`** (see §3/§4 — the staleness + prompt watermark).
+   last_inbound_at` — 0 rows → audit skip + exit BEFORE any spend row exists. The returned
+   `last_inbound_at` is this run's **`threadSnapshotAt`** (§3/§4 — staleness + prompt
+   watermark).
+4. **Locked cap re-check + spend insert**, one `pg_advisory_xact_lock` transaction (the
+   `agents/lifecycle.ts` pattern — this queue has no single-caller guarantee; the pre-claim
+   check is unlocked, so a deploy-overlap race can slip past it): re-count both caps; per-ticket
+   re-trip → guarded `triaged → escalated` (`agent_run_cap`) + return; global re-trip → **unwind
+   the stamp** (guarded `SET last_agent_run_at = <prior value> WHERE last_agent_run_at = <the
+   value this claim wrote>`) + return without a spend row. Under cap: INSERT the spend audit row
+   (`action: 'support.agent_run'`, `entityType: 'ticket'`, `entityId: ticketId`) in the same
+   locked transaction, then proceed.
 5. Resume pre-flight + SDK run (§2, §3).
 
 **Three timestamps, deliberately distinct:** `last_agent_run_at` (stamped at claim, before the
