@@ -153,6 +153,9 @@ export const supportTickets = pgTable('support_tickets', {
   triageFailureCount: integer('triage_failure_count').notNull().default(0),
   claimedOrderNumber: text('claimed_order_number'),
   escalationNotifiedAt: timestamp('escalation_notified_at', { withTimezone: true }),
+  lastAgentRunAt: timestamp('last_agent_run_at', { withTimezone: true }),
+  lastAgentPromptedAt: timestamp('last_agent_prompted_at', { withTimezone: true }),
+  agentFailureCount: integer('agent_failure_count').notNull().default(0),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 })
@@ -165,6 +168,7 @@ export const supportMessages = pgTable('support_messages', {
   fromEmail: text('from_email'),
   bodyText: text('body_text'),
   rfcMessageId: text('rfc_message_id'),
+  authResults: text('auth_results'),
   sentAt: timestamp('sent_at', { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
@@ -294,3 +298,16 @@ export const agentSessions = pgTable('agent_sessions', {
   transcript: jsonb('transcript'),
   updatedAt: updatedAt(),
 })
+
+export const agentSessionEntries = pgTable('agent_session_entries', {
+  seq: bigserial('seq', { mode: 'bigint' }).primaryKey(),
+  projectKey: text('project_key').notNull(),
+  sessionId: text('session_id').notNull(),
+  subpath: text('subpath').notNull().default(''),
+  uuid: text('uuid'),
+  entry: jsonb('entry').notNull(),
+  createdAt: createdAt(),
+}, (t) => [
+  uniqueIndex('agent_session_entries_uuid_uq').on(t.sessionId, t.subpath, t.uuid).where(sql`${t.uuid} IS NOT NULL`),
+  index('agent_session_entries_lookup_idx').on(t.projectKey, t.sessionId, t.subpath, t.seq),
+])

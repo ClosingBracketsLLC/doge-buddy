@@ -16,6 +16,7 @@ const EXPECTED_TABLES = [
   'proposals', 'product_scores', 'sourcing_signals',
   'agent_runs', 'agent_run_events', 'audit_log',
   'settings', 'cj_auth', 'admin_sessions', 'agent_sessions',
+  'agent_session_entries',
 ].sort()
 
 describe('migrations', () => {
@@ -26,7 +27,7 @@ describe('migrations', () => {
     await admin.end()
   })
 
-  it('applies cleanly to a fresh database and creates all 19 tables', async () => {
+  it('applies cleanly to a fresh database and creates all 20 tables', async () => {
     await runMigrations(testUrl)
     const c = new Client({ connectionString: testUrl })
     await c.connect()
