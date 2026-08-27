@@ -184,6 +184,36 @@ describe('createMockGmail', () => {
     expect(sentMsg.to).toEqual(['jane@example.com'])
   })
 
+  it('sendReply: the X-DogeBuddy-Proposal marker round-trips back through getMessage', async () => {
+    const gmail = createMockGmail({ selfAddress: SELF })
+    const inbound = gmail.receiveInbound({ from: 'jane@example.com', subject: 'Help', bodyText: 'help me' })
+
+    const marked = await gmail.sendReply({
+      threadId: inbound.threadId,
+      to: 'jane@example.com',
+      subject: 'Re: Help',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'On it!',
+      extraHeaders: { 'X-DogeBuddy-Proposal': 'proposal-abc' },
+    })
+    const unmarked = await gmail.sendReply({
+      threadId: inbound.threadId,
+      to: 'jane@example.com',
+      subject: 'Re: Help',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'Owner typed this one by hand',
+    })
+
+    // Marker readable on a metadata fetch — the format the apply executor's re-entry scan uses.
+    expect((await gmail.getMessage(marked.id, { format: 'metadata' })).dogeBuddyProposalId).toBe('proposal-abc')
+    // A reply sent without the header (the owner's own hand-sent mail) carries no marker.
+    expect((await gmail.getMessage(unmarked.id, { format: 'metadata' })).dogeBuddyProposalId).toBeNull()
+    // Inbound customer mail never does either.
+    expect((await gmail.getMessage(inbound.id, { format: 'full' })).dogeBuddyProposalId).toBeNull()
+  })
+
   it('receiveInbound: defaults `to` to [selfAddress] when omitted', async () => {
     const gmail = createMockGmail({ selfAddress: SELF })
     const { id } = gmail.receiveInbound({ from: 'jane@example.com', subject: 'x', bodyText: 'y' })

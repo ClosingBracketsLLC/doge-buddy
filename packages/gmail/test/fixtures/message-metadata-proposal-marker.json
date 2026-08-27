@@ -1,0 +1,47 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/msg-marker-1",
+    "query": {
+      "format": "metadata",
+      "metadataHeaders": [
+        "From",
+        "To",
+        "Cc",
+        "Delivered-To",
+        "Subject",
+        "Message-ID",
+        "In-Reply-To",
+        "References",
+        "Authentication-Results",
+        "X-DogeBuddy-Proposal"
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "msg-marker-1",
+      "threadId": "thread-marker-1",
+      "labelIds": ["SENT"],
+      "snippet": "Hi Jane, your order is on its way...",
+      "internalDate": "1756148500000",
+      "sizeEstimate": 7000,
+      "historyId": "3070",
+      "payload": {
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          { "name": "From", "value": "DogeBuddy Support <support@dogebuddy.com>" },
+          { "name": "To", "value": "jane@example.com" },
+          { "name": "Subject", "value": "Re: Order #4521 hasn't shipped" },
+          { "name": "Message-ID", "value": "<CAJ+marker1@mail.gmail.com>" },
+          { "name": "In-Reply-To", "value": "<CAJ+abc123@mail.gmail.com>" },
+          { "name": "References", "value": "<original-msg-999@mail.gmail.com> <CAJ+abc123@mail.gmail.com>" },
+          { "name": "X-DogeBuddy-Proposal", "value": "9f1c2b34-5d6e-47a8-9012-3456789abcde" }
+        ],
+        "body": { "size": 0 }
+      }
+    }
+  }
+}

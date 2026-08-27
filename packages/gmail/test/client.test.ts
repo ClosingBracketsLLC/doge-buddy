@@ -15,6 +15,7 @@ import messageFullNestedFixture from './fixtures/message-full-nested.json' with 
 import messageFullSinglepartFixture from './fixtures/message-full-singlepart.json' with { type: 'json' }
 import messageMetadataFixture from './fixtures/message-metadata.json' with { type: 'json' }
 import messageMetadataAuthResultsFixture from './fixtures/message-metadata-auth-results.json' with { type: 'json' }
+import messageMetadataProposalMarkerFixture from './fixtures/message-metadata-proposal-marker.json' with { type: 'json' }
 import message404Fixture from './fixtures/message-404.json' with { type: 'json' }
 import labelsListFixture from './fixtures/labels-list.json' with { type: 'json' }
 import labelCreateFixture from './fixtures/label-create.json' with { type: 'json' }
@@ -224,12 +225,30 @@ describe('createGmailClient', () => {
       'In-Reply-To',
       'References',
       'Authentication-Results',
+      'X-DogeBuddy-Proposal',
     ])
 
     expect(msg.bodyText).toBeNull()
     expect(msg.fromAddr).toBe('jane@example.com')
     expect(msg.deliveredTo).toEqual(['jane@example.com', 'support@dogebuddy.com'])
     // This fixture's response carries no Authentication-Results header at all.
+    expect(msg.authenticationResults).toBeNull()
+    // Nor an X-DogeBuddy-Proposal one — an ordinary customer message never carries the marker.
+    expect(msg.dogeBuddyProposalId).toBeNull()
+  })
+
+  it('getMessage(metadata): dogeBuddyProposalId exposes the X-DogeBuddy-Proposal marker when present', async () => {
+    const client = createGmailClient({
+      auth: stubAuth(),
+      fromAddress: FROM_ADDRESS,
+      fetchFn: fixtureFetch({ msg: messageMetadataProposalMarkerFixture }),
+    })
+    const msg = await client.getMessage('msg-marker-1', { format: 'metadata' })
+
+    // The whole point of the METADATA_HEADERS entry: a metadata fetch returns only the named
+    // headers, and this is the one `apply-support-reply.ts`'s re-entry scan reads to decide
+    // "already sent" vs "send now".
+    expect(msg.dogeBuddyProposalId).toBe('9f1c2b34-5d6e-47a8-9012-3456789abcde')
     expect(msg.authenticationResults).toBeNull()
   })
 

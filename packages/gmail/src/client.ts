@@ -1,5 +1,5 @@
 import type { GmailAuth } from './auth.ts'
-import type { GmailClient, HistoryRecord, NormalizedMessage } from './types.ts'
+import { PROPOSAL_MARKER_HEADER, type GmailClient, type HistoryRecord, type NormalizedMessage } from './types.ts'
 import { GmailApiError, GmailRateLimitError, HistoryExpiredError, MessageGoneError } from './errors.ts'
 import { parseAddrSpecs, parseFirstAddrSpec } from './address.ts'
 import { extractBodyText } from './body.ts'
@@ -21,6 +21,11 @@ const METADATA_HEADERS = [
   'In-Reply-To',
   'References',
   'Authentication-Results',
+  // A metadata fetch returns ONLY the headers named here, so the send-recovery marker has to be on
+  // this list or `dogeBuddyProposalId` would always come back null on the exact fetch that exists
+  // to read it (`apply-support-reply.ts`'s re-entry scan) — and a re-entered apply would send the
+  // customer a second copy of the same reply.
+  PROPOSAL_MARKER_HEADER,
 ]
 
 export interface CreateGmailClientOptions {
@@ -136,6 +141,9 @@ function normalizeMessage(raw: RawGmailMessage, format: 'metadata' | 'full'): No
     // prepends it) — firstHeader already returns the first/topmost occurrence. Exposed for both
     // 'metadata' and 'full' formats since support ingest fetches format:'full'.
     authenticationResults: firstHeader(headers, 'Authentication-Results'),
+    // Send-recovery marker (see the field's own doc comment on NormalizedMessage). Exposed for
+    // both formats for the same reason authenticationResults is — the reader picks the format.
+    dogeBuddyProposalId: firstHeader(headers, PROPOSAL_MARKER_HEADER),
     // format:'metadata' never carries body content — null it explicitly rather
     // than trusting the fixture/response to omit body.data.
     bodyText: format === 'metadata' ? null : extractBodyText(raw.payload),

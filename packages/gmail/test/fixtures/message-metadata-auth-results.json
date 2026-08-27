@@ -13,7 +13,8 @@
         "Message-ID",
         "In-Reply-To",
         "References",
-        "Authentication-Results"
+        "Authentication-Results",
+        "X-DogeBuddy-Proposal"
       ]
     }
   },
