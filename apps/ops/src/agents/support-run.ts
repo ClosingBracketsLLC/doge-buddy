@@ -10,6 +10,10 @@ type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: R
 
 // --- Global Constraints (spec §1/§3) ---------------------------------------------------------
 export const SUPPORT_MODEL = 'claude-sonnet-5'
+/** The SDK's local config/session mirror for support runs (`CLAUDE_CONFIG_DIR` below). Postgres is
+ * the durable transcript copy — the job deletes this directory after every run so the local mirror
+ * cannot accumulate against Railway's ephemeral disk. */
+export const SUPPORT_LOCAL_CONFIG_DIR = '/tmp/doge-buddy-claude'
 export const SUPPORT_MAX_TURNS = 15
 /** Hard SDK stop-loss (not a ≤ guarantee — the run halts once spend crosses it). */
 export const SUPPORT_MAX_BUDGET_USD = 0.5
@@ -230,7 +234,7 @@ export async function runSupportAgent(
       tools: [],
       allowedTools: ['mcp__support__*'],
       mcpServers: { support: deps.mcpServer },
-      envExtra: { CLAUDE_CONFIG_DIR: '/tmp/doge-buddy-claude', CLAUDE_CODE_PROJECT_DIR_NAME: SUPPORT_PROJECT_KEY },
+      envExtra: { CLAUDE_CONFIG_DIR: SUPPORT_LOCAL_CONFIG_DIR, CLAUDE_CODE_PROJECT_DIR_NAME: SUPPORT_PROJECT_KEY },
       resume: ctx.resumeSessionId ?? undefined,
       sessionStore: deps.sessionStore,
       persistSession: true,

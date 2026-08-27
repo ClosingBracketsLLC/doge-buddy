@@ -1,5 +1,5 @@
 import type { SessionStore, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
-import { agentRuns, auditLog, createDb, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
+import { agentRuns, auditLog, createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import type { DisputeOptions } from '@doge-buddy/supplier'
 import { and, asc, eq, inArray, like } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,10 +8,14 @@ import { SUPPORT_PROJECT_KEY } from '../src/agents/session-store.ts'
 import type { SupportOutput } from '../src/agents/support-output-schema.ts'
 import { SUPPORT_MODEL, type SupportRunContext, type SupportRunInput } from '../src/agents/support-run.ts'
 import {
+  AGENT_NO_ACTION_ACTION,
+  AGENT_PROPOSE_LOST_RACE_ACTION,
   AGENT_RUN_AUDIT_ACTION,
   AGENT_RUN_CAPPED_ACTION,
+  AGENT_RUN_FAILED_ACTION,
   AGENT_RUN_SKIPPED_ACTION,
   AGENT_RUN_TICKET_CAPPED_ACTION,
+  PROPOSAL_SUPERSEDED_ACTION,
   SUPPORT_AGENT_MAX_RUNS_PER_DAY,
   SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY,
   SUPPORT_AGENT_QUEUE,
@@ -33,6 +37,9 @@ const AUDIT_ACTIONS = [
   AGENT_RUN_SKIPPED_ACTION,
   AGENT_RUN_CAPPED_ACTION,
   AGENT_RUN_TICKET_CAPPED_ACTION,
+  AGENT_NO_ACTION_ACTION,
+  AGENT_PROPOSE_LOST_RACE_ACTION,
+  AGENT_RUN_FAILED_ACTION,
 ]
 
 let uidCounter = 0
@@ -41,16 +48,45 @@ function uid(): string {
   return `${Date.now()}-${uidCounter}`
 }
 
-function benignResult(): HarnessResult<SupportOutput> {
+function succeededResult(
+  output: SupportOutput,
+  overrides: Partial<HarnessResult<SupportOutput>> = {},
+): HarnessResult<SupportOutput> {
   return {
     status: 'succeeded',
-    output: { outcome: 'no_action', rationale: 'stub' },
+    output,
     costUsd: 0,
     costEstimated: false,
     sessionId: 'stub-session',
     sawMirrorError: false,
     failedBeforeFirstAssistant: false,
+    ...overrides,
   }
+}
+
+function benignResult(): HarnessResult<SupportOutput> {
+  return succeededResult({ outcome: 'no_action', rationale: 'stub' })
+}
+
+/** A run that produced no usable output — `status` distinguishes throw/watchdog from budget abort. */
+function unusableResult(overrides: Partial<HarnessResult<SupportOutput>> = {}): HarnessResult<SupportOutput> {
+  return {
+    status: 'failed',
+    output: null,
+    costUsd: 0,
+    costEstimated: false,
+    sessionId: null,
+    sawMirrorError: false,
+    failedBeforeFirstAssistant: false,
+    ...overrides,
+  }
+}
+
+/** A body that passes every validator screen: no HTML, no domains, no digits, no promised action. */
+const CLEAN_BODY = 'Hi Jane,\n\nThanks for reaching out — your package is moving through the carrier network.\n\nDoge Buddy Support'
+
+function proposeOutput(overrides: Partial<Extract<SupportOutput, { outcome: 'propose' }>> = {}): SupportOutput {
+  return { outcome: 'propose', reply: { body: CLEAN_BODY }, rationale: 'drafted', ...overrides }
 }
 
 describe('executeSupportAgentRun', () => {
@@ -85,10 +121,17 @@ describe('executeSupportAgentRun', () => {
     } as unknown as SessionStore
     await settings.set('killswitch.global', SETTINGS_DEFAULTS['killswitch.global'])
     await settings.set('workflow.support.enabled', SETTINGS_DEFAULTS['workflow.support.enabled'])
+    // Both default to 'manual' (SETTINGS_DEFAULTS); pinned here so a stray row from another
+    // test file cannot flip these runs into auto mode.
+    await settings.set('workflow.support_reply.mode', 'manual')
+    await settings.set('workflow.refund.mode', 'manual')
   })
 
-  // Everything this file creates is reachable from the `agentrun-%` thread-id prefix, and it
-  // exclusively owns these four audit actions (vitest runs files serially — see vitest.config.ts).
+  // Everything this file creates is reachable from the `agentrun-%` thread-id prefix (orders from
+  // `agentrun-order-%`), and it exclusively owns the audit actions above (vitest runs files
+  // serially — see vitest.config.ts). Proposal-scoped audit rows (`proposal.created`,
+  // `proposal.superseded`, …) are removed by entity id rather than by action, so nothing another
+  // file's proposals wrote is touched.
   afterEach(async () => {
     const ticketRows = await db
       .select({ id: supportTickets.id })
@@ -96,14 +139,26 @@ describe('executeSupportAgentRun', () => {
       .where(like(supportTickets.gmailThreadId, 'agentrun-%'))
     const ticketIds = ticketRows.map((r) => r.id)
     if (ticketIds.length > 0) {
+      const proposalRows = await db
+        .select({ id: proposals.id })
+        .from(proposals)
+        .where(inArray(proposals.ticketId, ticketIds))
       await db.delete(supportMessages).where(inArray(supportMessages.ticketId, ticketIds))
       await db.delete(proposals).where(inArray(proposals.ticketId, ticketIds))
       await db.delete(agentRuns).where(inArray(agentRuns.triggerRef, ticketIds))
       await db.delete(supportTickets).where(inArray(supportTickets.id, ticketIds))
+      if (proposalRows.length > 0) {
+        await db.delete(auditLog).where(inArray(auditLog.entityId, proposalRows.map((r) => r.id)))
+      }
     }
+    await db.delete(orders).where(like(orders.shopifyOrderGid, 'gid://shopify/Order/agentrun-order-%'))
     await db.delete(auditLog).where(inArray(auditLog.action, AUDIT_ACTIONS))
     await settings.set('killswitch.global', SETTINGS_DEFAULTS['killswitch.global'])
     await settings.set('workflow.support.enabled', SETTINGS_DEFAULTS['workflow.support.enabled'])
+    // Both default to 'manual' (SETTINGS_DEFAULTS); pinned here so a stray row from another
+    // test file cannot flip these runs into auto mode.
+    await settings.set('workflow.support_reply.mode', 'manual')
+    await settings.set('workflow.refund.mode', 'manual')
     vi.restoreAllMocks()
   })
 
@@ -135,13 +190,16 @@ describe('executeSupportAgentRun', () => {
       agentSessionId?: string | null
       escalationNotifiedAt?: Date | null
       escalationReason?: string | null
+      orderId?: string | null
+      customerEmail?: string | null
     } = {},
   ): Promise<string> {
     const [row] = await db
       .insert(supportTickets)
       .values({
         gmailThreadId: `agentrun-${uid()}`,
-        customerEmail: 'jane@example.com',
+        customerEmail: opts.customerEmail === undefined ? 'jane@example.com' : opts.customerEmail,
+        orderId: opts.orderId ?? null,
         subject: 'Where is my order?',
         status: opts.status ?? 'triaged',
         category: 'shipping',
@@ -203,6 +261,45 @@ describe('executeSupportAgentRun', () => {
 
   async function runRows(ticketId: string) {
     return db.select().from(agentRuns).where(eq(agentRuns.triggerRef, ticketId))
+  }
+
+  async function seedOrder(
+    opts: { totalCents?: number | null; orderNumber?: string } = {},
+  ): Promise<{ id: string; gid: string }> {
+    // Must satisfy RefundPayloadSchema's `gid://shopify/Order/` prefix AND stay findable by the
+    // afterEach cleanup.
+    const gid = `gid://shopify/Order/agentrun-order-${uid()}`
+    const [row] = await db
+      .insert(orders)
+      .values({
+        shopifyOrderGid: gid,
+        shopifyOrderNumber: opts.orderNumber ?? '1042',
+        isTest: true,
+        totalCents: opts.totalCents === undefined ? 5000 : opts.totalCents,
+      })
+      .returning({ id: orders.id })
+    return { id: row!.id, gid }
+  }
+
+  async function proposalRows(ticketId: string) {
+    return db.select().from(proposals).where(eq(proposals.ticketId, ticketId)).orderBy(asc(proposals.createdAt))
+  }
+
+  /** Stubs `runFn` with one result per call (the last one repeats), recording ctx/runId per call. */
+  function stubRun(...results: HarnessResult<SupportOutput>[]): ReturnType<typeof vi.fn> {
+    let call = 0
+    return vi.fn(async (_deps: unknown, input: SupportRunInput) => {
+      contexts.push(input.ctx)
+      runIds.push(input.runId)
+      const result = results[Math.min(call, results.length - 1)]!
+      call += 1
+      return result
+    })
+  }
+
+  function withRun(...results: HarnessResult<SupportOutput>[]): SupportAgentJobDeps {
+    runFn = stubRun(...results)
+    return makeDeps({ runFn: runFn as unknown as SupportAgentJobDeps['runFn'] })
   }
 
   describe('step 1: kill levers', () => {
@@ -595,7 +692,9 @@ describe('executeSupportAgentRun', () => {
         sessionId: 'session-gone',
       })
       const ticket = await ticketById(ticketId)
-      expect(ticket.agentSessionId).toBeNull()
+      // The stale id was cleared before the run (proved by the fresh `resumeSessionId` below); the
+      // id on the row now is the one THIS run produced, stored by the outcome handler.
+      expect(ticket.agentSessionId).toBe('stub-session')
       expect(ticket.agentFailureCount).toBe(1)
       expect(contexts[0]?.resumeSessionId).toBeNull()
       expect(contexts[0]?.isResume).toBe(false)
@@ -634,8 +733,10 @@ describe('executeSupportAgentRun', () => {
       await seedMessage(ticketId, { bodyText: 'old question', sentAt: minutesAgo(40) })
       await seedMessage(ticketId, { bodyText: 'new question', sentAt: minutesAgo(5), authResults: 'dmarc=pass' })
       sessionEntries = [{ uuid: 'e1' } as unknown as SessionStoreEntry]
+      // A resumed run reports the same session id back on its result message.
+      const deps = withRun(succeededResult({ outcome: 'no_action', rationale: 'stub' }, { sessionId: 'session-live' }))
 
-      await executeSupportAgentRun(makeDeps(), ticketId)
+      await executeSupportAgentRun(deps, ticketId)
 
       const ctx = contexts[0]!
       expect(ctx.resumeSessionId).toBe('session-live')
@@ -668,6 +769,418 @@ describe('executeSupportAgentRun', () => {
         { id: expect.any(String), type: 'support_reply', status: 'rejected', summary: 'Prior draft' },
       ])
       expect(ctx.ticket).toMatchObject({ id: ticketId, status: 'triaged', category: 'shipping' })
+    })
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // Step 7 outcome handling (Task 12): transitions, supersede + submit, failure semantics.
+  // -----------------------------------------------------------------------------------------
+
+  async function seedProposal(opts: {
+    ticketId: string
+    type: 'support_reply' | 'refund'
+    status: 'pending' | 'approved' | 'rejected' | 'expired' | 'applied'
+  }): Promise<string> {
+    const [row] = await db
+      .insert(proposals)
+      .values({
+        type: opts.type,
+        status: opts.status,
+        summary: 'prior draft',
+        payload: {},
+        sourceWorkflow: 'support',
+        ticketId: opts.ticketId,
+      })
+      .returning({ id: proposals.id })
+    return row!.id
+  }
+
+  async function proposalStatus(id: string): Promise<string> {
+    const [row] = await db.select({ status: proposals.status }).from(proposals).where(eq(proposals.id, id))
+    return row!.status
+  }
+
+  describe('step 7: propose outcome', () => {
+    it('commits awaiting_approval BEFORE submitting, and stores the reply on the ticket row', async () => {
+      const ticketId = await seedTicket()
+      // `notify` fires from inside `submitProposal` (manual mode) — reading the ticket there is
+      // how this pins the ordering the spec calls load-bearing: an auto-mode flip enqueues apply
+      // instantly, and the apply's `awaiting_approval`-anchored checks must already hold.
+      const statusAtSubmit: string[] = []
+      notify = vi.fn(async () => {
+        statusAtSubmit.push((await ticketById(ticketId)).status)
+        return true
+      })
+
+      await executeSupportAgentRun(withRun(succeededResult(proposeOutput())), ticketId)
+
+      expect(statusAtSubmit).toEqual(['awaiting_approval'])
+      expect((await ticketById(ticketId)).status).toBe('awaiting_approval')
+
+      const rows = await proposalRows(ticketId)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.type).toBe('support_reply')
+      expect(rows[0]!.status).toBe('pending')
+      expect(rows[0]!.summary).toBe('Reply: Where is my order?')
+      expect(rows[0]!.sourceWorkflow).toBe('support')
+      expect(rows[0]!.ticketId).toBe(ticketId)
+      expect(rows[0]!.agentRunId).toBe(runIds[0])
+      expect(rows[0]!.payload).toEqual({
+        type: 'support_reply',
+        ticketId,
+        body: CLEAN_BODY,
+        threadSnapshotAt: minutesAgo(30).toISOString(),
+      })
+    })
+
+    it('advances the prompt watermark, stamps the finish watermark, and stores the session id', async () => {
+      const ticketId = await seedTicket()
+
+      await executeSupportAgentRun(withRun(succeededResult(proposeOutput())), ticketId)
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.lastAgentPromptedAt).toEqual(minutesAgo(30))
+      expect(ticket.lastAgentFinishedAt).toEqual(NOW)
+      expect(ticket.agentSessionId).toBe('stub-session')
+    })
+
+    it("expires this ticket's still-pending support proposals, one superseded audit row each", async () => {
+      const ticketId = await seedTicket()
+      const otherTicketId = await seedTicket()
+      const pendingRefund = await seedProposal({ ticketId, type: 'refund', status: 'pending' })
+      const pendingReply = await seedProposal({ ticketId, type: 'support_reply', status: 'pending' })
+      const rejectedReply = await seedProposal({ ticketId, type: 'support_reply', status: 'rejected' })
+      const otherTicketRefund = await seedProposal({ ticketId: otherTicketId, type: 'refund', status: 'pending' })
+
+      await executeSupportAgentRun(withRun(succeededResult(proposeOutput())), ticketId)
+
+      // A reopen re-run must never leave two live refund approvals on the owner's phone.
+      expect(await proposalStatus(pendingRefund)).toBe('expired')
+      expect(await proposalStatus(pendingReply)).toBe('expired')
+      expect(await proposalStatus(rejectedReply)).toBe('rejected')
+      expect(await proposalStatus(otherTicketRefund)).toBe('pending')
+
+      const superseded = await auditRows(PROPOSAL_SUPERSEDED_ACTION)
+      expect(superseded.map((r) => r.entityId).sort()).toEqual([pendingRefund, pendingReply].sort())
+      expect(superseded[0]!.entityType).toBe('proposal')
+    })
+
+    it('losing the transition race submits nothing and audits it', async () => {
+      const ticketId = await seedTicket()
+      // The owner (or the orphan backstop) moves the ticket while the SDK call is in flight.
+      runFn = vi.fn(async (_deps: unknown, input: SupportRunInput) => {
+        contexts.push(input.ctx)
+        runIds.push(input.runId)
+        await db.update(supportTickets).set({ status: 'escalated' }).where(eq(supportTickets.id, ticketId))
+        return succeededResult(proposeOutput())
+      })
+
+      await executeSupportAgentRun(makeDeps({ runFn: runFn as unknown as SupportAgentJobDeps['runFn'] }), ticketId)
+
+      expect(await proposalRows(ticketId)).toEqual([])
+      expect(notify).not.toHaveBeenCalled()
+      expect(await auditRows(AGENT_PROPOSE_LOST_RACE_ACTION, ticketId)).toHaveLength(1)
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('escalated')
+      // Still an authoritative outcome: the run DID finish, so the stuck gate must not re-run it.
+      expect(ticket.lastAgentFinishedAt).toEqual(NOW)
+    })
+
+    it('submits the refund with the row-level orderId, the order gid, and the thread snapshot', async () => {
+      const order = await seedOrder({ totalCents: 5000, orderNumber: '1042' })
+      const ticketId = await seedTicket({ orderId: order.id })
+      await seedMessage(ticketId, {
+        bodyText: 'my toy arrived torn',
+        sentAt: minutesAgo(30),
+        authResults: 'spf=pass; dkim=pass; dmarc=pass',
+      })
+      const reason = 'Arrived damaged; customer sent photos of the torn seam and missing squeaker'
+
+      await executeSupportAgentRun(
+        withRun(
+          succeededResult(
+            proposeOutput({ refund: { amountCents: 2500, reason, openCjDispute: false } }),
+          ),
+        ),
+        ticketId,
+      )
+
+      const rows = await proposalRows(ticketId)
+      expect(rows.map((r) => r.type)).toEqual(['support_reply', 'refund'])
+      const refundRow = rows[1]!
+      expect(refundRow.ticketId).toBe(ticketId)
+      // The Task-8 accumulation bound reads `proposals.order_id` — an unset one makes prior
+      // refunds invisible to it.
+      expect(refundRow.orderId).toBe(order.id)
+      expect(refundRow.summary).toBe(
+        'Refund $25.00 order #1042 — Arrived damaged; customer sent photos of the torn seam and m',
+      )
+      expect(refundRow.payload).toEqual({
+        type: 'refund',
+        orderId: order.id,
+        shopifyOrderGid: order.gid,
+        amountCents: 2500,
+        reason,
+        openCjDispute: false,
+        threadSnapshotAt: minutesAgo(30).toISOString(),
+      })
+    })
+
+    it('stores the NFKC-normalized body that was actually screened, not the raw model output', async () => {
+      const ticketId = await seedTicket()
+      const raw = 'Hi Jane,\n\nThanks for conﬁrming your address\n\nDoge Buddy Support'
+
+      await executeSupportAgentRun(withRun(succeededResult(proposeOutput({ reply: { body: raw } }))), ticketId)
+
+      const [row] = await proposalRows(ticketId)
+      const payload = row!.payload as { body: string }
+      expect(payload.body).toContain('confirming')
+      expect(payload.body).not.toContain('ﬁ')
+    })
+  })
+
+  describe('step 7: escalate outcome', () => {
+    it('escalates with the reason, clears the notify stamp, and stamps the finish watermark', async () => {
+      const ticketId = await seedTicket({ escalationNotifiedAt: NOW })
+
+      await executeSupportAgentRun(
+        withRun(
+          succeededResult({
+            outcome: 'escalate',
+            escalationReason: 'customer says they filed a chargeback',
+            rationale: 'out of policy',
+          }),
+        ),
+        ticketId,
+      )
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('escalated')
+      expect(ticket.escalationReason).toBe('customer says they filed a chargeback')
+      // CRITICAL-1: cleared so the poll's notifyPendingEscalations (the ONLY notifier) picks it up.
+      expect(ticket.escalationNotifiedAt).toBeNull()
+      expect(ticket.lastAgentFinishedAt).toEqual(NOW)
+      expect(ticket.lastAgentPromptedAt).toEqual(minutesAgo(30))
+      expect(await proposalRows(ticketId)).toEqual([])
+      expect(notify).not.toHaveBeenCalled()
+    })
+
+    it('skips silently when the ticket left triaged mid-run', async () => {
+      const ticketId = await seedTicket()
+      runFn = vi.fn(async (_deps: unknown, input: SupportRunInput) => {
+        contexts.push(input.ctx)
+        runIds.push(input.runId)
+        await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, ticketId))
+        return succeededResult({ outcome: 'escalate', escalationReason: 'unsure', rationale: 'r' })
+      })
+
+      await executeSupportAgentRun(makeDeps({ runFn: runFn as unknown as SupportAgentJobDeps['runFn'] }), ticketId)
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('resolved')
+      expect(ticket.escalationReason).toBeNull()
+      const skips = await auditRows(AGENT_RUN_SKIPPED_ACTION, ticketId)
+      expect(skips).toHaveLength(1)
+      expect(skips[0]!.detail).toMatchObject({ reason: 'escalate_lost_race' })
+    })
+  })
+
+  describe('step 7: no_action outcome', () => {
+    it('stays triaged, audits the rationale, and the next immediate run skips at the CAS', async () => {
+      const ticketId = await seedTicket()
+      const deps = withRun(succeededResult({ outcome: 'no_action', rationale: 'waiting on the carrier' }))
+
+      await executeSupportAgentRun(deps, ticketId)
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('triaged')
+      expect(ticket.lastAgentFinishedAt).toEqual(NOW)
+      expect(ticket.lastAgentPromptedAt).toEqual(minutesAgo(30))
+      const audits = await auditRows(AGENT_NO_ACTION_ACTION, ticketId)
+      expect(audits).toHaveLength(1)
+      expect(audits[0]!.detail).toMatchObject({ rationale: 'waiting on the carrier' })
+
+      // No new inbound, and the finish stamp is newer than the claim stamp — neither the new-work
+      // branch nor the stuck branch authorizes a second claim.
+      await executeSupportAgentRun(deps, ticketId)
+
+      expect(runFn).toHaveBeenCalledTimes(1)
+      expect(await auditRows(AGENT_RUN_SKIPPED_ACTION, ticketId)).toHaveLength(1)
+      expect((await ticketById(ticketId)).agentFailureCount).toBe(0)
+    })
+  })
+
+  describe('step 7: failure path', () => {
+    it('a validator rejection counts a failure, clears the claim stamp, audits, and throws', async () => {
+      const ticketId = await seedTicket()
+      const deps = withRun(
+        succeededResult(proposeOutput({ reply: { body: 'Write to us at help@gmail.com instead' } })),
+      )
+
+      await expect(executeSupportAgentRun(deps, ticketId)).rejects.toThrow()
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('triaged')
+      expect(ticket.agentFailureCount).toBe(1)
+      // Immediately re-claimable — otherwise the retry's CAS finds no new inbound and no-ops,
+      // stranding the ticket at count 1 for 20 minutes.
+      expect(ticket.lastAgentRunAt).toBeNull()
+      // A failed run must keep looking UNFINISHED, or stuck recovery can never see it.
+      expect(ticket.lastAgentFinishedAt).toBeNull()
+      expect(ticket.lastAgentPromptedAt).toBeNull()
+      expect(await proposalRows(ticketId)).toEqual([])
+      const audits = await auditRows(AGENT_RUN_FAILED_ACTION, ticketId)
+      expect(audits).toHaveLength(1)
+      expect(audits[0]!.detail).toMatchObject({ code: 'contact_channel' })
+    })
+
+    it('the second failure escalates agent_failed and clears the session id', async () => {
+      const ticketId = await seedTicket({
+        agentFailureCount: 1,
+        agentSessionId: 'session-live',
+        escalationNotifiedAt: NOW,
+      })
+      sessionEntries = [{ uuid: 'e1' } as unknown as SessionStoreEntry]
+      const deps = withRun(
+        succeededResult(proposeOutput({ reply: { body: 'Write to us at help@gmail.com instead' } })),
+      )
+
+      await expect(executeSupportAgentRun(deps, ticketId)).rejects.toThrow()
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('escalated')
+      expect(ticket.escalationReason).toBe('agent_failed')
+      expect(ticket.escalationNotifiedAt).toBeNull()
+      expect(ticket.agentFailureCount).toBe(2)
+      expect(ticket.agentSessionId).toBeNull()
+      expect(ticket.lastAgentRunAt).toEqual(NOW)
+      expect(ticket.lastAgentFinishedAt).toBeNull()
+      expect(notify).not.toHaveBeenCalled()
+    })
+
+    it('a budget abort takes the same path', async () => {
+      const ticketId = await seedTicket()
+      const deps = withRun(unusableResult({ status: 'aborted' }))
+
+      await expect(executeSupportAgentRun(deps, ticketId)).rejects.toThrow()
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.agentFailureCount).toBe(1)
+      expect(ticket.lastAgentRunAt).toBeNull()
+      expect(ticket.lastAgentFinishedAt).toBeNull()
+      expect((await auditRows(AGENT_RUN_FAILED_ACTION, ticketId))[0]!.detail).toMatchObject({
+        code: 'run_aborted',
+      })
+    })
+
+    it('a run that produced no usable output takes the same path', async () => {
+      const ticketId = await seedTicket()
+      const deps = withRun(unusableResult())
+
+      await expect(executeSupportAgentRun(deps, ticketId)).rejects.toThrow()
+
+      expect((await ticketById(ticketId)).agentFailureCount).toBe(1)
+      expect((await auditRows(AGENT_RUN_FAILED_ACTION, ticketId))[0]!.detail).toMatchObject({
+        code: 'run_failed',
+      })
+    })
+
+    it('a throw out of the runner is recorded and rethrown unchanged', async () => {
+      const ticketId = await seedTicket()
+      runFn = vi.fn(async () => {
+        throw new Error('sdk exploded')
+      })
+
+      await expect(
+        executeSupportAgentRun(makeDeps({ runFn: runFn as unknown as SupportAgentJobDeps['runFn'] }), ticketId),
+      ).rejects.toThrow('sdk exploded')
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.agentFailureCount).toBe(1)
+      expect(ticket.lastAgentRunAt).toBeNull()
+      expect(ticket.lastAgentFinishedAt).toBeNull()
+      expect((await auditRows(AGENT_RUN_FAILED_ACTION, ticketId))[0]!.detail).toMatchObject({
+        code: 'run_threw',
+      })
+    })
+  })
+
+  describe('step 7: session bookkeeping', () => {
+    it('a mirror error warns, clears the session id, and still processes the outcome', async () => {
+      const ticketId = await seedTicket({ agentSessionId: 'session-live' })
+      sessionEntries = [{ uuid: 'e1' } as unknown as SessionStoreEntry]
+
+      await executeSupportAgentRun(
+        withRun(succeededResult(proposeOutput(), { sawMirrorError: true, sessionId: 'session-live' })),
+        ticketId,
+      )
+
+      expect(alert.mock.calls.filter((c) => c[1] === 'support_session_mirror_error')).toHaveLength(1)
+      const ticket = await ticketById(ticketId)
+      // Never resume a holed transcript — and the store must not write it straight back either.
+      expect(ticket.agentSessionId).toBeNull()
+      expect(ticket.status).toBe('awaiting_approval')
+      expect(await proposalRows(ticketId)).toHaveLength(1)
+    })
+
+    it('a resumed run that died before the first assistant message retries once, fresh', async () => {
+      const ticketId = await seedTicket({
+        agentSessionId: 'session-live',
+        lastAgentPromptedAt: minutesAgo(40),
+        lastInboundAt: minutesAgo(30),
+      })
+      await seedMessage(ticketId, { bodyText: 'old question', sentAt: minutesAgo(50) })
+      await seedMessage(ticketId, { bodyText: 'new question', sentAt: minutesAgo(30) })
+      sessionEntries = [{ uuid: 'e1' } as unknown as SessionStoreEntry]
+      const deps = withRun(
+        unusableResult({ failedBeforeFirstAssistant: true }),
+        succeededResult({ outcome: 'no_action', rationale: 'ok' }, { sessionId: 'session-fresh' }),
+      )
+
+      await executeSupportAgentRun(deps, ticketId)
+
+      expect(runFn).toHaveBeenCalledTimes(2)
+      expect(contexts[0]!.resumeSessionId).toBe('session-live')
+      expect(contexts[0]!.messages.map((m) => m.bodyText)).toEqual(['new question'])
+      // The fallback prompt is standalone-sufficient: a fresh session gets the FULL thread.
+      expect(contexts[1]!.resumeSessionId).toBeNull()
+      expect(contexts[1]!.isResume).toBe(false)
+      expect(contexts[1]!.messages.map((m) => m.bodyText)).toEqual(['old question', 'new question'])
+      expect(alert.mock.calls.filter((c) => c[1] === 'support_resume_failed')).toHaveLength(1)
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.agentFailureCount).toBe(0)
+      expect(ticket.status).toBe('triaged')
+      expect(ticket.agentSessionId).toBe('session-fresh')
+      expect(ticket.lastAgentFinishedAt).toEqual(NOW)
+      // Each SDK call records its own run row rather than overwriting the dead attempt's.
+      expect(runIds[1]).not.toBe(runIds[0])
+      expect(await runRows(ticketId)).toHaveLength(2)
+    })
+
+    it("only the resume retry's failure enters the failure path", async () => {
+      const ticketId = await seedTicket({ agentSessionId: 'session-live' })
+      sessionEntries = [{ uuid: 'e1' } as unknown as SessionStoreEntry]
+      const deps = withRun(unusableResult({ failedBeforeFirstAssistant: true }), unusableResult())
+
+      await expect(executeSupportAgentRun(deps, ticketId)).rejects.toThrow()
+
+      expect(runFn).toHaveBeenCalledTimes(2)
+      const ticket = await ticketById(ticketId)
+      expect(ticket.agentFailureCount).toBe(1)
+      expect(ticket.agentSessionId).toBeNull()
+      expect(ticket.lastAgentFinishedAt).toBeNull()
+    })
+
+    it('does not retry a FRESH run that died before the first assistant message', async () => {
+      const ticketId = await seedTicket()
+      const deps = withRun(unusableResult({ failedBeforeFirstAssistant: true }))
+
+      await expect(executeSupportAgentRun(deps, ticketId)).rejects.toThrow()
+
+      expect(runFn).toHaveBeenCalledTimes(1)
+      expect(alert.mock.calls.filter((c) => c[1] === 'support_resume_failed')).toHaveLength(0)
+      expect((await ticketById(ticketId)).agentFailureCount).toBe(1)
     })
   })
 
