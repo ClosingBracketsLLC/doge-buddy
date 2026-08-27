@@ -16,17 +16,24 @@ function fail(code: string, detail: string): ValidationFailure {
 const MAX_BODY_LEN = 4000
 /** Any HTML-tag-looking opener: `<b`, `<!--`, `</p`, etc. A drafted reply is plain text only —
  * nothing here is ever rendered as HTML, so a literal `<` followed by a tag-ish character is
- * always wrong, not a false positive worth tolerating. */
-const HTML_TAG_RE = /<[a-z!/]/i
+ * always wrong, not a false positive worth tolerating. Exception: `<https://...>` / `<http://...>`
+ * — angle brackets wrapped around a URL (a common plain-text convention for delimiting a link from
+ * surrounding punctuation) are not HTML; the URL/domain screen still fully screens what's inside.
+ */
+const HTML_TAG_RE = /<(?!https?:\/\/)[a-z!/]/i
 
 // -- Promised-action screen --
 
-/** Verbs/nouns describing an ACTION that resolves the customer's issue. */
+/** Verbs/nouns describing an ACTION that resolves the customer's issue. Includes both active
+ * ("cancel your order") and passive/perfect ("order has been cancelled") phrasings for
+ * cancellation, and the shipped-replacement completion phrase — natural ways a drafted reply
+ * reports an action as done, not just requested. */
 const ACTION_RE =
-  /refund(ed)?|reimburs\w*|credit(ed)?|store credit|money back|compensat\w*|replacement|reship\w*|resend|cancel\w* (your|the) order|payment (returned|reversed)/gi
+  /refund(ed)?|reimburs\w*|credit(ed)?|store credit|money back|compensat\w*|replacement|reship\w*|resend|cancel\w* (your|the) order|order (has been|was|is) cancel\w*|replacement has (been )?shipped|payment (returned|reversed)|funds/gi
 /** Words that PROMISE the action already happened or is imminent — the combination is what makes
  * a drafted reply a commitment rather than an explanation of policy. */
-const PROMISE_RE = /issued|processed|sent|approved|applied|on its way|within \d+ (business )?days|has been|will be/gi
+const PROMISE_RE =
+  /issued|processed|sent|approved|applied|on its way|on the way|within \d+ (business )?days|has been|have been|we have|we've|i've|is complete|has shipped|expect (it|the funds|your (refund|money))|funds back|will be/gi
 /** How close an ACTION token and a PROMISE token must be (in whitespace-normalized chars) to
  * count as one promised-action hit. */
 const PROMISE_PROXIMITY_CHARS = 200
@@ -42,19 +49,31 @@ const PLAUSIBLE_TLDS = new Set([
   'com', 'net', 'org', 'io', 'co', 'shop', 'store', 'info', 'biz', 'us', 'uk', 'de', 'xyz', 'me', 'app', 'dev',
   'link', 'site',
 ])
+/** Trailing punctuation that's prose, not part of the URL: `Track it here: https://dogebuddy.com.`
+ * — the sentence-ending period is not part of the link. */
+const TRAILING_URL_PUNCT_RE = /[.,;:!?)\]}'"]+$/
 
 // -- Contact screen --
 
 const EMAIL_RE = /[\w.+-]+@[\w-]+(\.[\w-]+)+/g
 const ALLOWED_EMAIL_SUFFIX = '@dogebuddy.com'
 /** A phone-like run of digits/separators. Deliberately loose (it has to catch `+1 (888)
- * 555-0142`) — the ≥7-actual-digits check below is what keeps `order #12345` from tripping it. */
+ * 555-0142`) — the extra checks in `isPhoneLikeCandidate` are what keep `order #12345`, ISO dates,
+ * and long unseparated digit runs (tracking numbers, `1Z999AA10123456784`) from tripping it. */
 const PHONE_RE = /[+(]?\d[\d\s().-]{6,}\d/g
 const PHONE_MIN_DIGITS = 7
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+/** A separator character INSIDE a candidate match (space, parens, dot, dash) — distinct from a
+ * leading `+`/`(`, which `isPhoneLikeCandidate` checks separately. */
+const PHONE_SEPARATOR_RE = /[\s().-]/
 
 interface Span {
   start: number
   end: number
+}
+
+function overlapsAnySpan(start: number, end: number, spans: Span[]): boolean {
+  return spans.some((s) => start >= s.start && end <= s.end)
 }
 
 function findMatches(re: RegExp, text: string): Span[] {
@@ -103,6 +122,17 @@ async function hasLiveSiblingRefundProposal(db: Db, ticketId: string): Promise<b
   return row !== undefined
 }
 
+/** Strips prose wrapping off a URL-ish regex match before it's parsed/compared: a trailing
+ * sentence-punctuation run (`https://dogebuddy.com.` → `https://dogebuddy.com`), and a trailing
+ * `>` when the character immediately before the match is its opening `<` (`<https://.../help>` →
+ * `https://.../help`) — angle brackets are a plain-text link delimiter, not part of the URL. */
+function stripUrlToken(body: string, raw: string, matchStart: number): string {
+  let s = raw
+  if (body[matchStart - 1] === '<' && s.endsWith('>')) s = s.slice(0, -1)
+  s = s.replace(TRAILING_URL_PUNCT_RE, '')
+  return s
+}
+
 /** Schemed-URL allowlist check: https + hostname dogebuddy.com/www.dogebuddy.com, OR byte-equal
  * to the ticket's own tracking URL (e.g. a carrier tracking link that is legitimately off-domain). */
 function isAllowedSchemedUrl(raw: string, trackingUrl: string | null): boolean {
@@ -115,33 +145,56 @@ function isAllowedSchemedUrl(raw: string, trackingUrl: string | null): boolean {
   }
 }
 
-function checkUrlsAndDomains(body: string, trackingUrl: string | null): ValidationResult {
-  const allowedSpans: Span[] = []
+interface UrlScreenData {
+  /** Spans (over the ORIGINAL body, stripped-length) of every schemed URL that passed the
+   * allowlist — shared with the contact screen's phone check so digits inside an allowed link
+   * (tracking numbers, order refs in a query string) are never misread as a phone number. */
+  allowedSpans: Span[]
+  /** Raw text of the first schemed URL that did NOT pass the allowlist, or null if all did. */
+  disallowedRaw: string | null
+}
 
-  const schemedRe = new RegExp(SCHEMED_URL_RE)
-  schemedRe.lastIndex = 0
+/** Scans every schemed URL in the body once, up front — shared by the contact screen (phone
+ * digits inside an allowed URL are exempt) and the URL/domain screen (which owns reporting the
+ * actual `url_not_allowed` failure). Does not short-circuit on the first bad URL: all allowed
+ * spans are still collected so the contact screen sees the full picture regardless of ordering. */
+function scanSchemedUrls(body: string, trackingUrl: string | null): UrlScreenData {
+  const allowedSpans: Span[] = []
+  let disallowedRaw: string | null = null
+
+  const re = new RegExp(SCHEMED_URL_RE)
+  re.lastIndex = 0
   let m: RegExpExecArray | null
-  while ((m = schemedRe.exec(body))) {
-    const raw = m[0]
-    if (!isAllowedSchemedUrl(raw, trackingUrl)) {
-      return fail('url_not_allowed', `disallowed URL in reply body: ${raw}`)
+  while ((m = re.exec(body))) {
+    const matchStart = m.index
+    const stripped = stripUrlToken(body, m[0], matchStart)
+    if (isAllowedSchemedUrl(stripped, trackingUrl)) {
+      allowedSpans.push({ start: matchStart, end: matchStart + stripped.length })
+    } else if (disallowedRaw === null) {
+      disallowedRaw = m[0]
     }
-    allowedSpans.push({ start: m.index, end: m.index + raw.length })
+  }
+
+  return { allowedSpans, disallowedRaw }
+}
+
+function checkUrlsAndDomains(body: string, urlData: UrlScreenData): ValidationResult {
+  if (urlData.disallowedRaw !== null) {
+    return fail('url_not_allowed', `disallowed URL in reply body: ${urlData.disallowedRaw}`)
   }
 
   const domainRe = new RegExp(BARE_DOMAIN_RE)
   domainRe.lastIndex = 0
+  let m: RegExpExecArray | null
   while ((m = domainRe.exec(body))) {
     const raw = m[0]
     const start = m.index
     const end = start + raw.length
     // Already covered by an allowed schemed URL (e.g. the query string of an allowed tracking
-    // link) — not a second, independent domain mention.
-    if (allowedSpans.some((s) => start >= s.start && end <= s.end)) continue
-    // The domain half of an email address (e.g. `gmail.com` in `help@gmail.com`) — the contact
-    // screen owns email addresses; classifying it here too would misreport an off-platform email
-    // as a bare-domain violation instead of a contact-channel one.
-    if (body[start - 1] === '@') continue
+    // link) — not a second, independent domain mention. Deliberately NOT skipped just because the
+    // token is preceded by `@` (an `@bare-domain.tld` mention with no local part, e.g. a Telegram
+    // handle, is exactly the kind of off-platform channel this screen exists to catch).
+    if (overlapsAnySpan(start, end, urlData.allowedSpans)) continue
 
     const lower = raw.toLowerCase()
     const labels = lower.split('.')
@@ -156,7 +209,21 @@ function checkUrlsAndDomains(body: string, trackingUrl: string | null): Validati
   return { ok: true }
 }
 
-function checkContact(body: string): ValidationResult {
+/** A phone-candidate match is only actually phone-like when: it has ≥7 digits, it is not an
+ * ISO date (`2024-01-15`), and it either starts with `+`/`(` or contains at least one separator
+ * between digit groups — a bare unseparated digit run (`10023481`, or the digit run embedded in
+ * `1Z999AA10123456784`) is an order/tracking number, not a phone number, no matter how long. */
+function isPhoneLikeCandidate(raw: string): boolean {
+  const digitCount = (raw.match(/\d/g) ?? []).length
+  if (digitCount < PHONE_MIN_DIGITS) return false
+  if (ISO_DATE_RE.test(raw)) return false
+
+  const hasLeadingPrefix = raw[0] === '+' || raw[0] === '('
+  const hasSeparator = PHONE_SEPARATOR_RE.test(raw)
+  return hasLeadingPrefix || hasSeparator
+}
+
+function checkContact(body: string, allowedUrlSpans: Span[]): ValidationResult {
   const emailRe = new RegExp(EMAIL_RE)
   emailRe.lastIndex = 0
   let m: RegExpExecArray | null
@@ -171,8 +238,11 @@ function checkContact(body: string): ValidationResult {
   phoneRe.lastIndex = 0
   while ((m = phoneRe.exec(body))) {
     const raw = m[0]
-    const digitCount = (raw.match(/\d/g) ?? []).length
-    if (digitCount >= PHONE_MIN_DIGITS) {
+    const start = m.index
+    const end = start + raw.length
+    // Digits inside an allowed URL (tracking number in a path/query) are not a phone number.
+    if (overlapsAnySpan(start, end, allowedUrlSpans)) continue
+    if (isPhoneLikeCandidate(raw)) {
       return fail('contact_channel', `phone-like token in reply body: ${raw}`)
     }
   }
@@ -183,18 +253,30 @@ function checkContact(body: string): ValidationResult {
 /**
  * Body-only checks + the sibling-aware promised-action screen (spec §3). `ticketId` is used only
  * for the promised-action screen's live-sibling-proposal lookup; nothing else here touches the DB.
+ *
+ * Check order is: plain text → promised-action → contact → URL/domain. Contact runs BEFORE the
+ * URL/domain screen so a bare `@domain.tld` mention with a real local part (`help@gmail.com`) is
+ * reported as `contact_channel`, not misclassified as a stray bare-domain `url_not_allowed` —
+ * both screens still independently catch every bypass either way, this only decides which failure
+ * code comes back when a body trips both.
  */
 export async function validateReplyBody(
   db: Db,
   ticketId: string,
-  body: string,
+  rawBody: string,
   opts: { hasRefundInOutput: boolean; trackingUrl: string | null },
 ): Promise<ValidationResult> {
+  // Unicode-normalize before ANY screen runs: NFKC folds compatibility look-alikes (U+2024 ONE DOT
+  // LEADER, U+FF0E FULLWIDTH FULL STOP, etc.) down to their plain ASCII equivalents, so a body
+  // using `evil․com` or `evil．com` to dodge the literal `.` in the domain regexes is screened
+  // exactly like `evil.com`.
+  const body = rawBody.normalize('NFKC')
+
   if (HTML_TAG_RE.test(body)) return fail('html_not_allowed', 'reply body contains an HTML tag')
   if (body.length > MAX_BODY_LEN) return fail('body_too_long', `reply body is ${body.length} chars (max ${MAX_BODY_LEN})`)
 
-  const normalized = body.replace(/\s+/g, ' ')
-  if (hasPromisedActionHit(normalized)) {
+  const normalizedForPromiseScan = body.replace(/\s+/g, ' ')
+  if (hasPromisedActionHit(normalizedForPromiseScan)) {
     if (!opts.hasRefundInOutput) {
       const hasSibling = await hasLiveSiblingRefundProposal(db, ticketId)
       if (!hasSibling) {
@@ -203,10 +285,12 @@ export async function validateReplyBody(
     }
   }
 
-  const urlResult = checkUrlsAndDomains(body, opts.trackingUrl)
-  if (!urlResult.ok) return urlResult
+  const urlData = scanSchemedUrls(body, opts.trackingUrl)
 
-  return checkContact(body)
+  const contactResult = checkContact(body, urlData.allowedSpans)
+  if (!contactResult.ok) return contactResult
+
+  return checkUrlsAndDomains(body, urlData)
 }
 
 /**
@@ -240,11 +324,14 @@ export async function validateRefundIntent(
     )
   }
 
+  // NULLS LAST for sentAt (the ordinary case: newest wall-clock message wins), then created_at and
+  // id as deterministic tiebreaks for rows that share (or both lack) a sentAt — so "latest inbound
+  // message" never depends on unstable row order when Gmail delivers two messages the same second.
   const [latestInbound] = await db
     .select({ authResults: supportMessages.authResults })
     .from(supportMessages)
     .where(and(eq(supportMessages.ticketId, ticket.id), eq(supportMessages.direction, 'inbound')))
-    .orderBy(sql`${supportMessages.sentAt} DESC NULLS LAST`)
+    .orderBy(sql`${supportMessages.sentAt} DESC NULLS LAST, ${supportMessages.createdAt} DESC, ${supportMessages.id} DESC`)
     .limit(1)
 
   if (!latestInbound || latestInbound.authResults === null || !/\bdmarc=pass\b/i.test(latestInbound.authResults)) {
@@ -262,11 +349,16 @@ export async function validateRefundIntent(
  * Composes the two checks for one agent output. Only the `propose` outcome carries anything sent
  * to a customer or applied to an order, so `escalate`/`no_action` pass straight through — those
  * outcomes take no customer-facing or financial action for this to screen.
+ *
+ * `trackingUrl` defaults to null (no off-domain tracking link exempted) — callers that know the
+ * ticket's real tracking URL (e.g. the route in Task 18) should pass it through so a legitimate
+ * carrier link doesn't trip the URL/domain or contact screens.
  */
 export async function validateSupportOutput(
   db: Db,
   ticket: { id: string; orderId: string | null; customerEmail: string | null },
   output: SupportOutput,
+  trackingUrl: string | null = null,
 ): Promise<ValidationResult> {
   if (output.outcome !== 'propose') return { ok: true }
 
@@ -274,7 +366,7 @@ export async function validateSupportOutput(
 
   const replyResult = await validateReplyBody(db, ticket.id, output.reply.body, {
     hasRefundInOutput: output.refund !== undefined,
-    trackingUrl: null,
+    trackingUrl,
   })
   if (!replyResult.ok) return replyResult
 
