@@ -113,6 +113,15 @@ export async function selectAndEnqueueAgentRuns(
     .orderBy(sql`${supportTickets.lastInboundAt} ASC NULLS FIRST`)
     .limit(AGENT_SELECT_CAP_PER_CYCLE)
 
+  // NOTE (fix round 2): `enqueued` over-reports relative to "jobs actually newly created" once
+  // `support.agent-run`'s queue policy is `'stately'` (see index.ts) — a `singletonKey` collision
+  // against an already created-or-active job makes pg-boss's `send()` return `null` rather than
+  // throw, so `enqueueSupportAgentRun`'s `Promise<void>` resolves normally and this still counts
+  // it. Harmless: nothing consumes this count today (it's not logged, alerted on, or asserted
+  // against in production) — it exists purely as this function's own return value for tests and
+  // any future caller. If a future caller needs an accurate "how many NEW jobs did this create"
+  // number, `enqueue`'s signature would need to surface pg-boss's job id (or `null`) through the
+  // `SendFn`/`enqueueSupportAgentRun` chain instead of discarding it.
   let enqueued = 0
   for (const ticket of candidates) {
     try {

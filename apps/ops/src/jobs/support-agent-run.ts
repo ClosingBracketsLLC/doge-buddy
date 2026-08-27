@@ -88,33 +88,53 @@ function utcMidnight(now: Date): Date {
 }
 
 /**
- * One `support.agent-run` job (spec §1 "Job order" — **pinned; the ordering IS the correctness**):
+ * One `support.agent-run` job (spec §1 "Job order" — **pinned; the ordering IS the correctness**;
+ * amended TWICE 2026-08-27 — see the CRITICAL note below for the full history):
  *
  * 1. Kill levers / Anthropic env absent → return with no stamp and no audit row.
- * 2. Load the ticket (existence gate only — the claim re-reads it under a row lock).
- * 3. Guarded CAS claim — the real per-ticket mutex, and (fix round 1, CRITICAL-1b) now the FIRST
- *    real gate a job hits. A queued duplicate/redelivery whose predicate fails on the locked row
- *    exits as a no-op (`support.agent_run_skipped`) BEFORE any cap is even checked — zero spend, by
- *    construction, for a run that was never going to happen. A stuck re-claim that hits the failure
- *    ceiling escalates inside that same transaction and comes back unclaimed.
- * 4. Per-ticket daily cap → guarded `triaged → escalated` (`agent_run_cap`) + exit; global daily
- *    cap → exit WITHOUT running. Both caps and the spend-row insert share ONE advisory-locked
- *    transaction, in that observable order. This step runs AFTER the claim (fix round 1,
- *    CRITICAL-1b — see that note below) — only a job that actually won the CAS ever reaches it.
+ * 2. **Read-only pre-claim cap checks** (fix round 2): plain SELECT counts, no lock, no insert.
+ *    Per-ticket ≥ 3 → guarded `triaged → escalated` (`agent_run_cap`) + exit, NEVER stamped —
+ *    this is also what keeps a ticket that's BOTH stuck AND per-ticket-capped correctly labeled
+ *    `agent_run_cap` rather than `agent_failed`: it never reaches the claim's own stuck-recovery
+ *    branch at all. Global ≥ 50 → exit with NO stamp (the ticket stays selectable after UTC
+ *    midnight), once-per-UTC-day warning alert.
+ * 3. Guarded CAS claim — the real per-ticket mutex. A queued duplicate/redelivery whose predicate
+ *    fails on the locked row exits as a no-op (`support.agent_run_skipped`) BEFORE any spend row
+ *    exists. A stuck re-claim that hits the failure ceiling escalates inside that same transaction
+ *    and comes back unclaimed.
+ * 4. **Locked cap RE-check + spend insert**, one advisory-locked transaction — step 2's checks were
+ *    UNLOCKED, so a deploy-overlap race (two workers) can slip a second claim past them; this
+ *    re-check under the SAME lock as the spend insert is the actual enforcement. Per-ticket re-trip
+ *    → guarded `triaged → escalated` (`agent_run_cap`) + return (the claim's stamp is moot — the
+ *    ticket is leaving `triaged`). Global re-trip → **UNWIND** the claim's stamp (guarded on the
+ *    EXACT value step 3 wrote) + return with NO spend row, leaving the ticket exactly as if step 3
+ *    had never run. Under cap: insert the spend row, proceed.
  * 5. Resume pre-flight (the store may not have the session) + context assembly.
  * 6. Insert the `agent_runs` row directly (NOT `claimDailyRun` — support runs many per day).
  * 7. Run the agent, then handle the outcome (`runAndHandleOutcome`): transitions, the
  *    supersede+submit step, the watermark/session stamps, and failure accounting.
  *
- * CRITICAL-1b (binding, fix round 1): steps 3 and 4 used to run in the other order (caps, THEN
- * claim). That let a duplicate delivery of the same job — a pg-boss redelivery, two overlapping
- * workers during a deploy — burn a spend row (and thus budget) even though its claim was always
- * going to be rejected: the cap-and-spend transaction ran unconditionally before the CAS ever
- * evaluated the ticket. Swapping the order so the claim runs FIRST means a CAS-rejected job now
- * exits at step 3 having written no spend row at all. Fail-closed accounting for a run that DOES
- * proceed is unaffected: the spend row still commits (step 4) before the `agent_runs` insert
- * (step 6) and the SDK call (step 7) — "before any token can be spent" now means "before any token
- * can be spent, AND only for a run that actually won its claim".
+ * CRITICAL (fix round 2 — supersedes fix round 1's note, kept for the history): round 1 moved
+ * BOTH caps to run entirely AFTER the claim, to stop a CAS-rejected duplicate from burning a spend
+ * row. That fixed the duplicate-spend bug but introduced a WORSE one, empirically reproduced: on a
+ * day the global cap was already exhausted, EVERY triaged ticket still claimed successfully (the
+ * claim doesn't know about the cap) and stamped `last_agent_run_at` — then, `SUPPORT_AGENT_STUCK_
+ * AFTER_MINUTES` later, `claimTicket`'s stuck-recovery branch saw "claimed, never finished" and
+ * charged a FAILURE, and ~2 stuck cycles later every remaining triaged ticket had falsely
+ * escalated `agent_failed`, with the agent never having run once. The per-ticket cap had the same
+ * defect in miniature: a ticket that was BOTH stuck AND per-ticket-capped got mislabeled
+ * `agent_failed` instead of `agent_run_cap`, since the claim's stuck-increment ran before the cap
+ * ever got a chance to say otherwise.
+ *
+ * The fix (this round) keeps BOTH properties by checking twice. Step 2's cheap unlocked read keeps
+ * the capped case from EVER reaching the claim on the common (non-race) path — no stamp, so no
+ * stuck-gate false failure, and a stuck+capped ticket is labeled `agent_run_cap` correctly because
+ * it never reaches `claimTicket`'s stuck branch at all. Step 4's locked re-check is what makes this
+ * correct even under a genuine race (two workers slipping past step 2's unlocked read at once) —
+ * and when IT catches a global cap trip after the claim already stamped the row, it UNWINDS that
+ * stamp rather than leaving it standing (round 1's mistake), so the false-failure bug can't recur
+ * through the race path either. `claimTicket` returns both the prior and the exact stamped
+ * `last_agent_run_at` value to make that unwind's guard expressible.
  *
  * CRITICAL-1 (binding): every transition INTO `escalated` here clears `escalation_notified_at` and
  * sets an `escalation_reason`, and NOTHING here notifies — the poll's `notifyPendingEscalations` is
@@ -122,27 +142,55 @@ function utcMidnight(now: Date): Date {
  */
 export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId: string): Promise<void> {
   const now = deps.now ?? (() => new Date())
+  const midnight = utcMidnight(now())
 
   // --- Step 1: kill levers. No stamp, no audit row — this is a policy no-op, not an attempt.
   if (await deps.settings.get('killswitch.global')) return
   if (!(await deps.settings.get('workflow.support.enabled'))) return
   if (!deps.anthropicConfigured) return
 
-  // --- Step 2: load the ticket. Existence gate only, and the source of nothing else — the claim
-  // just below re-reads the row under a lock.
-  const [ticket] = await deps.db
-    .select({ id: supportTickets.id })
-    .from(supportTickets)
-    .where(eq(supportTickets.id, ticketId))
-    .limit(1)
-  if (!ticket) return
+  // --- Step 2: read-only pre-claim cap checks (fix round 2 — see this function's own doc comment
+  // for why this has to run BEFORE the claim). Plain SELECT counts: no lock, no insert. The
+  // once-per-day warning's guard-row insert is its own tiny locked transaction (`warnGlobalCapped`
+  // below) — kept race-safe independently of these unlocked counts, which only need to be cheap and
+  // right most of the time; step 4's locked re-check is what makes the caps correct under a race.
+  const [preTicketCap] = await deps.db
+    .select({ value: count() })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.action, AGENT_RUN_AUDIT_ACTION),
+        eq(auditLog.entityId, ticketId),
+        gte(auditLog.createdAt, midnight),
+      ),
+    )
+  if ((preTicketCap?.value ?? 0) >= SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY) {
+    await escalateTicketCapped(deps, ticketId, preTicketCap?.value ?? 0)
+    return
+  }
 
-  // --- Step 3: guarded CAS claim (the per-ticket mutex) — MOVED ahead of the cap check
-  // (CRITICAL-1b, see this function's own doc comment). A queued duplicate whose predicate fails on
-  // the locked row exits right here, before any cap or spend accounting exists. A stuck re-claim
-  // that hits the failure ceiling escalates inside that same transaction and comes back unclaimed
-  // (spec §1: otherwise a third hard-kill strands the ticket at count 2 with the ×2 net never run).
-  const claim = await claimTicket(deps, ticketId, now())
+  const [preGlobalCap] = await deps.db
+    .select({ value: count() })
+    .from(auditLog)
+    .where(and(eq(auditLog.action, AGENT_RUN_AUDIT_ACTION), gte(auditLog.createdAt, midnight)))
+  if ((preGlobalCap?.value ?? 0) >= SUPPORT_AGENT_MAX_RUNS_PER_DAY) {
+    await warnGlobalCapped(deps, midnight, preGlobalCap?.value ?? 0)
+    // No stamp — the ticket stays selectable after UTC midnight, exactly as if this cycle never
+    // touched it. This early exit (before the claim) is the entire point of fix round 2.
+    return
+  }
+
+  // --- Step 3: guarded CAS claim (the per-ticket mutex). A queued duplicate whose predicate fails
+  // on the locked row exits right here, before any spend row exists. A stuck re-claim that hits the
+  // failure ceiling escalates inside that same transaction and comes back unclaimed (spec §1:
+  // otherwise a third hard-kill strands the ticket at count 2 with the ×2 net never run).
+  //
+  // `claimedAt` is captured ONCE and reused as step 4's unwind guard value (`claim.
+  // stampedLastAgentRunAt` below is this exact same Date) — calling `now()` a second time for that
+  // guard could return a DIFFERENT millisecond on a real clock, which would make the unwind's
+  // `WHERE last_agent_run_at = <value>` guard never match and silently no-op.
+  const claimedAt = now()
+  const claim = await claimTicket(deps, ticketId, claimedAt)
   if (!claim.claimed) {
     await deps.db.insert(auditLog).values({
       actor: 'system',
@@ -154,18 +202,15 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
     return
   }
 
-  // --- Step 4: BOTH caps and the spend-row insert in ONE transaction under
-  // `pg_advisory_xact_lock` (the `agents/lifecycle.ts` pattern) — now that the claim has already
-  // succeeded (CRITICAL-1b). This queue has no single-caller guarantee (unlike triage's poll, which
-  // rides the singleton poll), so every check-then-act on these counts has to hold the lock or two
-  // overlapping workers — routine during a deploy — both read the same under-cap count and both
-  // proceed. That includes the once-per-day cap-warning guard row: two capped workers racing a bare
-  // check-then-act would each insert one and page the owner twice. The alert itself is fired
-  // OUTSIDE (best-effort I/O must never hold the lock).
+  // --- Step 4: locked cap RE-check + spend insert, one advisory-locked transaction (the
+  // `agents/lifecycle.ts` pattern). This queue has no single-caller guarantee (unlike triage's
+  // poll, which rides the singleton poll), so — now that step 2's unlocked read has already caught
+  // the common case — this re-check under the lock is what makes the caps correct even when a
+  // deploy-overlap race slipped a second worker past step 2. The alert for a re-tripped global cap
+  // is fired OUTSIDE this transaction (best-effort I/O must never hold the lock).
   //
   // Order inside the lock is the spec's observable order: per-ticket cap, then global cap, then
   // spend row.
-  const midnight = utcMidnight(now())
   const capResult = await deps.db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'support-agent-daily'}))`)
 
@@ -218,23 +263,12 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
   })
 
   if (capResult.outcome === 'ticket_capped') {
-    // Deliberately outside the transaction (and not retried): if the process dies between the
-    // commit and these two writes, the ticket is left `triaged` with the cap still tripped, so the
-    // next selection cycle re-enqueues it, the claim re-claims it, and this exact branch re-fires.
-    // Self-healing, and cheaper than holding the global lock across two more writes.
-    //
-    // CRITICAL-1b: step 3's claim already stamped `last_agent_run_at` before this ran — that stamp
-    // is simply irrelevant now. The ticket is about to leave `triaged` entirely, and every
-    // selection/claim predicate requires `status = 'triaged'`, so no watermark on this row matters
-    // again until (if ever) an operator moves it back.
-    await escalateRunCapped(deps, ticketId)
-    await deps.db.insert(auditLog).values({
-      actor: 'system',
-      action: AGENT_RUN_TICKET_CAPPED_ACTION,
-      entityType: 'ticket',
-      entityId: ticketId,
-      detail: { max: SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, runsToday: capResult.runsToday },
-    })
+    // A genuine race — step 2's unlocked read missed this (another worker's spend rows landed
+    // between that read and this locked re-check). Same handling as step 2's own (far more common)
+    // per-ticket-capped exit: the claim's stamp is moot, the ticket is leaving `triaged` entirely,
+    // and every selection/claim predicate requires `status = 'triaged'`, so no watermark on this
+    // row matters again until (if ever) an operator moves it back.
+    await escalateTicketCapped(deps, ticketId, capResult.runsToday)
     return
   }
   if (capResult.outcome === 'global_capped') {
@@ -246,15 +280,9 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
         })
         .catch(() => {})
     }
-    // CRITICAL-1b: unlike ticket_capped above, this ticket STAYS `triaged` — and step 3's claim
-    // stamp stays too, deliberately unwound by nothing here. That leaves it reading exactly like a
-    // claimed-but-never-finished run, which is precisely what the stuck gate
-    // (`SUPPORT_AGENT_STUCK_AFTER_MINUTES`, both in `claimTicket`'s predicate and in
-    // `agent-select.ts`'s mirrored selection predicate) is for: it re-claims this ticket on its own
-    // in 20 minutes and this same cap check runs again — by then either the global count has moved
-    // (rare) or UTC midnight has passed and the count has reset, and it proceeds. No failure is
-    // charged for hitting this branch: `claimTicket`'s failure increment only fires on the branch
-    // that AUTHORIZED a stuck re-claim, and a fresh claim (this one) never takes that branch.
+    // CRITICAL fix round 2: UNWIND step 3's claim stamp — round 1 left it standing here, which is
+    // exactly the bug fix round 2 exists to close (see this function's own doc comment).
+    await unwindClaimStamp(deps.db, ticketId, claim.stampedLastAgentRunAt, claim.priorLastAgentRunAt)
     return
   }
 
@@ -786,6 +814,16 @@ type ClaimResult =
       /** The locked read's `last_inbound_at` (spec §1 step 4) — this run's staleness + prompt
        * watermark. Task 12 promotes it to `last_agent_prompted_at` on an authoritative result. */
       threadSnapshotAt: Date | null
+      /** The value `last_agent_run_at` held BEFORE this claim's stamp (fix round 2) — same as
+       * `ticket.lastAgentRunAt` above, surfaced explicitly here so the caller never has to reach
+       * into `ticket` to find it. What step 4's global-cap-re-trip unwind restores the column to. */
+      priorLastAgentRunAt: Date | null
+      /** The EXACT value this claim just wrote to `last_agent_run_at` (fix round 2) — literally the
+       * `now` this function was called with, not a fresh clock read. Step 4's unwind guards its
+       * UPDATE on this exact value so it can never clobber a write that happened after this claim
+       * committed (structurally impossible while the CAS holds this ticket claimed, but the guard
+       * documents the intent and costs nothing). */
+      stampedLastAgentRunAt: Date
     }
 
 /**
@@ -872,8 +910,54 @@ async function claimTicket(deps: SupportAgentJobDeps, ticketId: string, now: Dat
       .set({ lastAgentRunAt: now, ...(stuckClaim ? { agentFailureCount } : {}) })
       .where(eq(supportTickets.id, ticketId))
 
-    return { claimed: true, stuckClaim, agentFailureCount, ticket: locked, threadSnapshotAt: locked.lastInboundAt }
+    return {
+      claimed: true,
+      stuckClaim,
+      agentFailureCount,
+      ticket: locked,
+      threadSnapshotAt: locked.lastInboundAt,
+      priorLastAgentRunAt: locked.lastAgentRunAt,
+      stampedLastAgentRunAt: now,
+    }
   })
+}
+
+/**
+ * Undoes step 3's claim stamp when step 4's LOCKED re-check finds the global cap tripped after all
+ * (fix round 2 — a genuine race: step 2's pre-claim read is unlocked and can slip past a
+ * concurrent capping worker). Guarded on the EXACT value the claim wrote, so this can only ever
+ * touch the row it's meant to: if `last_agent_run_at` no longer holds `stampedValue` — the CAS
+ * makes that structurally impossible while this ticket stays claimed, but the guard is cheap and
+ * documents the intent regardless — this simply matches 0 rows and no-ops rather than clobbering
+ * whatever is there. `status = 'triaged'` in the guard is the same defense-in-depth, not
+ * load-bearing.
+ *
+ * Exported (test-only, mirroring `support-poll-gmail.ts`'s `resetSupportPollOnceFlags`): a genuine
+ * interleaved race — a second worker's cap-tripping spend row landing strictly between step 2's
+ * read and step 4's locked re-check — is impractical to construct deterministically in a test
+ * without adding a real synchronization hook to production code purely for that purpose. Testing
+ * this guard directly (correct value unwinds; wrong value is a no-op) is the pragmatic substitute.
+ *
+ * Returns the number of rows the UPDATE actually matched (0 or 1) — purely for that direct test.
+ */
+export async function unwindClaimStamp(
+  db: Db,
+  ticketId: string,
+  stampedValue: Date,
+  priorValue: Date | null,
+): Promise<number> {
+  const updated = await db
+    .update(supportTickets)
+    .set({ lastAgentRunAt: priorValue })
+    .where(
+      and(
+        eq(supportTickets.id, ticketId),
+        eq(supportTickets.status, 'triaged'),
+        eq(supportTickets.lastAgentRunAt, stampedValue),
+      ),
+    )
+    .returning({ id: supportTickets.id })
+  return updated.length
 }
 
 /**
@@ -949,6 +1033,62 @@ async function escalateRunCapped(deps: SupportAgentJobDeps, ticketId: string): P
     .update(supportTickets)
     .set({ status: 'escalated', escalationReason: 'agent_run_cap', escalationNotifiedAt: null })
     .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'triaged')))
+}
+
+/**
+ * Per-ticket cap escalation (fix round 2): the audit row + `escalateRunCapped` call, shared by
+ * BOTH step 2's fast (unlocked, common) path and step 4's locked re-check's rare race path —
+ * identical handling either way, so this is the one place that does it.
+ */
+async function escalateTicketCapped(deps: SupportAgentJobDeps, ticketId: string, runsToday: number): Promise<void> {
+  // Deliberately not retried on failure here (and not inside a transaction with the audit insert):
+  // if the process dies between the two writes, the ticket is left `triaged` with the cap still
+  // tripped, so the next selection cycle re-enqueues it, the claim re-claims it, and this exact
+  // path re-fires. Self-healing, and cheaper than holding a lock across two more writes.
+  await escalateRunCapped(deps, ticketId)
+  await deps.db.insert(auditLog).values({
+    actor: 'system',
+    action: AGENT_RUN_TICKET_CAPPED_ACTION,
+    entityType: 'ticket',
+    entityId: ticketId,
+    detail: { max: SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, runsToday },
+  })
+}
+
+/**
+ * The once-per-UTC-day global-cap warning (fix round 2), as its own small locked transaction:
+ * guarded so two tickets racing step 2's unlocked pre-check at (nearly) the same moment can't each
+ * insert a guard row and page the owner twice — the SAME `pg_advisory_xact_lock` key step 4's
+ * transaction uses, so the two can never run concurrently with each other either. The alert itself
+ * fires OUTSIDE the lock (best-effort I/O must never hold it).
+ *
+ * Step 4's transaction has its OWN inline copy of this exact guard-row check (it's already holding
+ * the lock by the time it needs it, so wrapping this function around a second `transaction()` call
+ * there would just be a pointless nested transaction) — a ticket that races PAST this unlocked
+ * pre-check and reaches step 4's re-check still needs the identical once-per-day dedup, which is
+ * why that inline copy exists rather than this function being the only place it's written.
+ */
+async function warnGlobalCapped(deps: SupportAgentJobDeps, midnight: Date, runsToday: number): Promise<void> {
+  const shouldAlert = await deps.db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'support-agent-daily'}))`)
+    const [existingWarning] = await tx
+      .select({ id: auditLog.id })
+      .from(auditLog)
+      .where(and(eq(auditLog.action, AGENT_RUN_CAPPED_ACTION), gte(auditLog.createdAt, midnight)))
+      .limit(1)
+    if (existingWarning) return false
+    await tx.insert(auditLog).values({
+      actor: 'system',
+      action: AGENT_RUN_CAPPED_ACTION,
+      detail: { max: SUPPORT_AGENT_MAX_RUNS_PER_DAY, runsToday },
+    })
+    return true
+  })
+  if (shouldAlert) {
+    await deps
+      .alert('warning', 'support_agent_run_capped', { max: SUPPORT_AGENT_MAX_RUNS_PER_DAY, runsToday })
+      .catch(() => {})
+  }
 }
 
 /**

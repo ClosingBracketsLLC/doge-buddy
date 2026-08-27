@@ -23,6 +23,7 @@ import {
   enqueueSupportAgentRun,
   executeSupportAgentRun,
   supportAgentRunHandler,
+  unwindClaimStamp,
   type SupportAgentJobDeps,
 } from '../src/jobs/support-agent-run.ts'
 import { SETTINGS_DEFAULTS, createSettings } from '../src/settings.ts'
@@ -339,8 +340,8 @@ describe('executeSupportAgentRun', () => {
     })
   })
 
-  describe('step 4 (post-claim): per-ticket daily cap', () => {
-    it('escalates with agent_run_cap and a cleared notify stamp at the cap', async () => {
+  describe('step 2 (pre-claim, read-only): per-ticket daily cap', () => {
+    it('escalates with agent_run_cap and a cleared notify stamp at the cap, WITHOUT ever stamping the claim', async () => {
       const ticketId = await seedTicket({ escalationNotifiedAt: NOW })
       await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, ticketId)
 
@@ -350,11 +351,9 @@ describe('executeSupportAgentRun', () => {
       expect(ticket.status).toBe('escalated')
       expect(ticket.escalationReason).toBe('agent_run_cap')
       expect(ticket.escalationNotifiedAt).toBeNull()
-      // CRITICAL-1b: the claim (step 3) runs BEFORE this cap check now, so it already stamped
-      // last_agent_run_at — that stamp is simply moot once the ticket is escalated (every
-      // selection/claim predicate requires status = 'triaged').
-      expect(ticket.lastAgentRunAt).toEqual(NOW)
-      // No NEW spend row past the 3 pre-seeded ones: the cap trips before the spend insert.
+      // Fix round 2: this ticket is caught at step 2, BEFORE step 3's claim ever runs — never
+      // stamped at all (not "stamped then moot", round 1's now-reverted behavior).
+      expect(ticket.lastAgentRunAt).toBeNull()
       expect(await auditRows(AGENT_RUN_AUDIT_ACTION, ticketId)).toHaveLength(
         SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY,
       )
@@ -376,13 +375,8 @@ describe('executeSupportAgentRun', () => {
     })
   })
 
-  describe('step 4 (post-claim): global daily cap', () => {
-    it('leaves the ticket untouched, stamps the claim, and warns exactly once per UTC day', async () => {
-      // Two SEPARATE tickets, each independently eligible to claim: CRITICAL-1b means a single
-      // ticket can only reach this cap check ONCE per claim (a second call on the same ticket, same
-      // frozen clock, would now fail the CAS itself — see the "duplicate delivery" test below — so
-      // re-exercising the cap-warning dedup needs a second, independently-claimable ticket instead
-      // of calling this function twice on the same one.
+  describe('step 2 (pre-claim, read-only): global daily cap', () => {
+    it('leaves the ticket completely untouched (no stamp) and warns exactly once per UTC day', async () => {
       const ticketId1 = await seedTicket()
       const ticketId2 = await seedTicket()
       await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_DAY, null)
@@ -394,10 +388,10 @@ describe('executeSupportAgentRun', () => {
       const ticket2 = await ticketById(ticketId2)
       expect(ticket1.status).toBe('triaged')
       expect(ticket2.status).toBe('triaged')
-      // CRITICAL-1b: the claim stamp survives a global-capped exit — see this function's own doc
-      // comment. It's what lets the 20-minute stuck gate re-claim and re-check the cap later.
-      expect(ticket1.lastAgentRunAt).toEqual(NOW)
-      expect(ticket2.lastAgentRunAt).toEqual(NOW)
+      // Fix round 2: no stamp at all — this is the entire point (round 1's "stamp survives" was
+      // exactly the bug that let the stuck gate falsely charge a failure later).
+      expect(ticket1.lastAgentRunAt).toBeNull()
+      expect(ticket2.lastAgentRunAt).toBeNull()
       expect(runFn).not.toHaveBeenCalled()
       // No extra spend rows were inserted past the cap, for EITHER ticket.
       expect(await auditRows(AGENT_RUN_AUDIT_ACTION)).toHaveLength(SUPPORT_AGENT_MAX_RUNS_PER_DAY)
@@ -406,8 +400,78 @@ describe('executeSupportAgentRun', () => {
     })
   })
 
-  describe('CRITICAL-1b: claim runs BEFORE the cap/spend transaction', () => {
-    it('a duplicate delivery whose claim is rejected writes NO spend row at all', async () => {
+  describe('CRITICAL fix round 2: pre-claim caps run BEFORE the claim (re-review reproduction)', () => {
+    it('(a) a standing global cap never stamps or charges a failure across repeated cycles, and resumes normally once the cap rows age past UTC midnight', async () => {
+      const ticketId = await seedTicket() // triaged, never run
+      // Global cap already at the ceiling, all dated NOW (today).
+      await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_DAY, null)
+
+      let currentNow = NOW
+      const deps = makeDeps({ now: () => currentNow })
+
+      async function assertUntouchedAndNeverRan(): Promise<void> {
+        const ticket = await ticketById(ticketId)
+        expect(ticket.status).toBe('triaged')
+        expect(ticket.agentFailureCount).toBe(0)
+        expect(ticket.lastAgentRunAt).toBeNull()
+        expect(runFn).not.toHaveBeenCalled()
+      }
+
+      // Cycle 1: NOW.
+      await executeSupportAgentRun(deps, ticketId)
+      await assertUntouchedAndNeverRan()
+
+      // Cycle 2: NOW + 21 minutes — past SUPPORT_AGENT_STUCK_AFTER_MINUTES (20). Under the round-1
+      // bug this is exactly where a standing stamp would have looked "claimed but never finished"
+      // and the stuck-recovery branch would have charged a failure. Round 2: no stamp ever existed,
+      // so there is nothing for the stuck gate to find.
+      currentNow = new Date(NOW.getTime() + 21 * 60_000)
+      await executeSupportAgentRun(deps, ticketId)
+      await assertUntouchedAndNeverRan()
+
+      // Cycle 3: NOW + 42 minutes — a second stuck-recovery window has passed. Under the round-1
+      // bug this is where AGENT_FAILURE_ESCALATE_AT (2) would have been reached and the ticket
+      // would have falsely escalated `agent_failed`, with the agent never having run once. This is
+      // the re-reviewer's empirically-reproduced scenario.
+      currentNow = new Date(NOW.getTime() + 42 * 60_000)
+      await executeSupportAgentRun(deps, ticketId)
+      await assertUntouchedAndNeverRan()
+
+      // The warning fired exactly once across all 3 cycles (same UTC day, guard-row deduped).
+      expect(await auditRows(AGENT_RUN_CAPPED_ACTION)).toHaveLength(1)
+      expect(alert.mock.calls.filter((c) => c[1] === 'support_agent_run_capped')).toHaveLength(1)
+
+      // Shift to the next UTC day: the seeded cap rows (dated NOW) age out of the count-since-
+      // midnight window, and this ticket proceeds normally.
+      currentNow = new Date(NOW.getTime() + 24 * 60 * 60_000)
+      await executeSupportAgentRun(deps, ticketId)
+      expect(runFn).toHaveBeenCalledTimes(1)
+      const ticket = await ticketById(ticketId)
+      expect(ticket.lastAgentRunAt).toEqual(currentNow)
+    })
+
+    it('(b) a ticket that looks stuck AND is at the per-ticket cap escalates agent_run_cap, not agent_failed, with no failure charged', async () => {
+      const ticketId = await seedTicket({
+        lastAgentRunAt: minutesAgo(25), // looks stuck: claimed 25 min ago (> the 20-min threshold)
+        lastAgentFinishedAt: null, // never finished
+        agentFailureCount: 0,
+      })
+      // Per-ticket cap already tripped — this must win BEFORE claimTicket's own stuck branch ever
+      // gets a chance to charge a failure and mislabel this `agent_failed`.
+      await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, ticketId)
+
+      await executeSupportAgentRun(makeDeps(), ticketId)
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('escalated')
+      expect(ticket.escalationReason).toBe('agent_run_cap') // NOT agent_failed
+      expect(ticket.agentFailureCount).toBe(0) // claimTicket's stuck-increment branch never ran
+      expect(runFn).not.toHaveBeenCalled()
+      expect(await auditRows(AGENT_RUN_TICKET_CAPPED_ACTION, ticketId)).toHaveLength(1)
+      expect(await auditRows(AGENT_RUN_FAILED_ACTION, ticketId)).toEqual([])
+    })
+
+    it('(c) a duplicate delivery whose claim is rejected writes NO spend row at all', async () => {
       const ticketId = await seedTicket()
 
       // First delivery: claims cleanly and runs, writing exactly one spend row.
@@ -418,8 +482,7 @@ describe('executeSupportAgentRun', () => {
 
       // A duplicate delivery of the SAME job (pg-boss redelivery, a straggling second worker): the
       // ticket is already stamped by the first claim, with no new inbound and not yet stuck, so the
-      // CAS rejects it. Under the OLD order (cap-then-claim) this would still have burned a SECOND
-      // spend row before the claim ever got a chance to reject it — that's the bug this pins.
+      // CAS rejects it — before step 4's spend transaction is ever reached.
       await executeSupportAgentRun(makeDeps(), ticketId)
 
       expect(runFn).toHaveBeenCalledTimes(1) // unchanged — the duplicate never ran
@@ -427,39 +490,57 @@ describe('executeSupportAgentRun', () => {
       expect(await auditRows(AGENT_RUN_AUDIT_ACTION, ticketId)).toEqual(spendRowsAfterFirst)
     })
 
-    it('a per-ticket-capped claim writes the cap outcome, not a spend row, and the claim stamp stands', async () => {
-      const ticketId = await seedTicket()
-      await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, ticketId)
+    describe('(d) unwindClaimStamp: the race-path unwind, tested directly', () => {
+      // A genuine interleaved race (a second worker's cap-tripping spend row landing strictly
+      // between step 2's unlocked read and step 4's locked re-check) is impractical to construct
+      // deterministically without adding a test-only synchronization hook to production code — see
+      // `unwindClaimStamp`'s own doc comment. Testing its guard directly is the sanctioned fallback.
+      it('restores the prior value when the current value matches exactly what this claim wrote', async () => {
+        const priorValue = minutesAgo(90)
+        const stampedValue = NOW
+        const ticketId = await seedTicket({ lastAgentRunAt: stampedValue })
 
-      await executeSupportAgentRun(makeDeps(), ticketId)
+        const affected = await unwindClaimStamp(db, ticketId, stampedValue, priorValue)
 
-      const ticket = await ticketById(ticketId)
-      expect(ticket.status).toBe('escalated')
-      expect(ticket.escalationReason).toBe('agent_run_cap')
-      expect(ticket.lastAgentRunAt).toEqual(NOW) // the claim (step 3) ran and stamped before the cap tripped
-      expect(await auditRows(AGENT_RUN_AUDIT_ACTION, ticketId)).toHaveLength(
-        SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, // no new spend row past the pre-seeded ones
-      )
-      expect(await auditRows(AGENT_RUN_TICKET_CAPPED_ACTION, ticketId)).toHaveLength(1)
-      expect(runFn).not.toHaveBeenCalled()
-    })
+        expect(affected).toBe(1)
+        expect((await ticketById(ticketId)).lastAgentRunAt).toEqual(priorValue)
+      })
 
-    it('a globally-capped claim writes the cap outcome, not a spend row, and the claim stamp stands', async () => {
-      const ticketId = await seedTicket()
-      await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_DAY, null)
+      it('restores a NULL prior value (a never-run ticket claimed for the first time)', async () => {
+        const stampedValue = NOW
+        const ticketId = await seedTicket({ lastAgentRunAt: stampedValue })
 
-      await executeSupportAgentRun(makeDeps(), ticketId)
+        const affected = await unwindClaimStamp(db, ticketId, stampedValue, null)
 
-      const ticket = await ticketById(ticketId)
-      expect(ticket.status).toBe('triaged') // NOT escalated — global cap just defers, doesn't escalate
-      expect(ticket.lastAgentRunAt).toEqual(NOW)
-      expect(await auditRows(AGENT_RUN_AUDIT_ACTION)).toHaveLength(SUPPORT_AGENT_MAX_RUNS_PER_DAY)
-      expect(await auditRows(AGENT_RUN_CAPPED_ACTION)).toHaveLength(1)
-      expect(runFn).not.toHaveBeenCalled()
+        expect(affected).toBe(1)
+        expect((await ticketById(ticketId)).lastAgentRunAt).toBeNull()
+      })
+
+      it('no-ops (0 rows) when the current value does NOT match the expected stamped value', async () => {
+        const actualValue = minutesAgo(5) // something else wrote a DIFFERENT last_agent_run_at
+        const wrongStampedValue = NOW
+        const ticketId = await seedTicket({ lastAgentRunAt: actualValue })
+
+        const affected = await unwindClaimStamp(db, ticketId, wrongStampedValue, minutesAgo(90))
+
+        expect(affected).toBe(0)
+        // Untouched — the guard protected the row from being clobbered.
+        expect((await ticketById(ticketId)).lastAgentRunAt).toEqual(actualValue)
+      })
+
+      it('no-ops when the ticket has already left triaged status', async () => {
+        const stampedValue = NOW
+        const ticketId = await seedTicket({ status: 'escalated', lastAgentRunAt: stampedValue })
+
+        const affected = await unwindClaimStamp(db, ticketId, stampedValue, minutesAgo(90))
+
+        expect(affected).toBe(0)
+        expect((await ticketById(ticketId)).lastAgentRunAt).toEqual(stampedValue)
+      })
     })
   })
 
-  describe('step 3: CAS claim (now runs before the cap check — CRITICAL-1b)', () => {
+  describe('step 3: CAS claim (after the read-only pre-claim cap checks, before the locked re-check)', () => {
     it('claims a fresh triaged ticket, writing the spend audit row BEFORE the run', async () => {
       const ticketId = await seedTicket()
       let auditRowsAtRunTime = -1
