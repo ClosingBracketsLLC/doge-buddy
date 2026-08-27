@@ -2,6 +2,7 @@ import { auditLog, proposals, supportTickets } from '@doge-buddy/db'
 import { and, eq } from 'drizzle-orm'
 import { applyNewListing } from './apply-new-listing.ts'
 import type { ApplyProposalDeps, ProposalRow } from './apply-shared.ts'
+import { applySupportReply } from './apply-support-reply.ts'
 import { applyProposalTransition, StaleProposalStatusError } from './transitions.ts'
 
 /**
@@ -15,12 +16,13 @@ export { proposalHandle } from './apply-shared.ts'
 export type { ApplyProposalDeps, OrderRefundState, ProposalRow, ProposalShopifyOps, RefundOps } from './apply-shared.ts'
 
 /**
- * Type-keyed apply-executor dispatch (Task 14). `support_reply`/`refund` are added by Tasks 15/16
- * — until then, dispatching either type falls through to `executeApplyProposal`'s own
- * `unimplemented proposal type` throw below, same as `new_listing` did before this pipeline existed.
+ * Type-keyed apply-executor dispatch (Task 14). `refund` is added by Task 16 — until then,
+ * dispatching it falls through to `executeApplyProposal`'s own `unimplemented proposal type` throw
+ * below, same as `new_listing` did before this pipeline existed.
  */
 const executors: Record<string, (deps: ApplyProposalDeps, row: ProposalRow) => Promise<void>> = {
   new_listing: applyNewListing,
+  support_reply: applySupportReply,
 }
 
 /**

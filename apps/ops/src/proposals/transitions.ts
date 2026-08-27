@@ -2,6 +2,12 @@ import { type createDb, proposals } from '@doge-buddy/db'
 import { and, eq } from 'drizzle-orm'
 
 type Db = ReturnType<typeof createDb>['db']
+/** The type of the callback's `tx` parameter inside `db.transaction(async (tx) => {...})` — same
+ * alias `support/ingest.ts` declares, for the same reason: a caller that must make a proposal's
+ * status change atomic with other writes (e.g. `apply-support-reply.ts`'s staleness path, which
+ * fails the proposal and re-triages its ticket in one commit) passes the transaction handle here. */
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
+type DbOrTx = Db | Tx
 
 export type ProposalStatusDb = 'pending' | 'approved' | 'rejected' | 'expired' | 'applying' | 'applied' | 'failed'
 
@@ -79,7 +85,7 @@ export type ProposalPatch = Partial<{
  * this throws `StaleProposalStatusError` instead of silently clobbering that other writer's change.
  */
 export async function applyProposalTransition(
-  db: Db,
+  db: DbOrTx,
   proposalId: string,
   from: ProposalStatusDb,
   to: ProposalStatusDb,
