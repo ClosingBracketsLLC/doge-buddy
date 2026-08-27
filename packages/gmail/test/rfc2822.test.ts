@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import { buildReplyRaw } from '../src/rfc2822.ts'
 
+/**
+ * Minimal RFC 2045 quoted-printable decoder, used only to verify our own encoder round-trips.
+ * Strips soft line breaks (=\r\n) before resolving =XX hex escapes, exactly as a real QP decoder
+ * would — a hex escape or a real character can legally straddle where a soft break used to be.
+ */
+function decodeQuotedPrintable(text: string): Buffer {
+  const noSoftBreaks = text.replace(/=\r\n/g, '')
+  const bytes: number[] = []
+  for (let i = 0; i < noSoftBreaks.length; i++) {
+    const c = noSoftBreaks[i]!
+    if (c === '=' && i + 2 < noSoftBreaks.length) {
+      bytes.push(Number.parseInt(noSoftBreaks.slice(i + 1, i + 3), 16))
+      i += 2
+    } else {
+      bytes.push(c.charCodeAt(0))
+    }
+  }
+  return Buffer.from(bytes)
+}
+
 describe('buildReplyRaw', () => {
   it('builds RFC 2822 with CRLF headers and proper body separation', () => {
     const raw = buildReplyRaw({
@@ -188,5 +208,138 @@ describe('buildReplyRaw', () => {
     expect(fromLines).toHaveLength(1)
     const toLines = text.split('\r\n').filter((line) => line.startsWith('To:'))
     expect(toLines).toHaveLength(1)
+  })
+
+  it('includes MIME-Version and quoted-printable Content-Transfer-Encoding headers', () => {
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com',
+      to: 'jane@example.com',
+      subject: 'Test',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'Hello there',
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+
+    expect(text).toContain('MIME-Version: 1.0\r\n')
+    expect(text).toContain('Content-Transfer-Encoding: quoted-printable\r\n')
+  })
+
+  it('quoted-printable encodes a long non-ASCII body: every encoded line <= 76 chars, decodes back byte-equal', () => {
+    const bodyText = 'Hündchen 🐶 '.repeat(300)
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com',
+      to: 'jane@example.com',
+      subject: 'Test',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText,
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+    const encodedBody = text.split('\r\n\r\n')[1]!
+
+    for (const line of encodedBody.split('\r\n')) {
+      expect(line.length).toBeLessThanOrEqual(76)
+    }
+
+    const decoded = decodeQuotedPrintable(encodedBody)
+    expect(decoded.equals(Buffer.from(bodyText, 'utf-8'))).toBe(true)
+  })
+
+  it('quoted-printable leaves a plain ASCII body readable, apart from soft breaks', () => {
+    const bodyText = 'Hi Jane,\n\nSorry about that. We shipped a replacement leash today.\n\nRegards,\nSupport'
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com',
+      to: 'jane@example.com',
+      subject: 'Test',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText,
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+    const encodedBody = text.split('\r\n\r\n')[1]!
+
+    // No soft breaks needed — every line here is well under 76 chars — so the ASCII body
+    // should pass through completely unchanged.
+    expect(encodedBody).toBe(bodyText)
+  })
+
+  it('folds a long non-ASCII subject into multiple RFC 2047 encoded-words, each <= 75 chars, with no split multi-byte characters', () => {
+    const longSubject =
+      'Re: Hundeleine kaputt 🐶🐶🐶 sehr sehr lange Betreffzeile die definitiv über ein einzelnes encoded-word hinausgeht und noch mehr Text braucht damit garantiert gefaltet wird'
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com',
+      to: 'jane@example.com',
+      subject: longSubject,
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'test',
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+
+    const match = text.match(/Subject: ([\s\S]*?)\r\nIn-Reply-To:/)
+    expect(match).not.toBeNull()
+    const subjectValue = match![1]!
+
+    const words = subjectValue.split('\r\n ')
+    expect(words.length).toBeGreaterThan(1)
+
+    let decoded = ''
+    for (const word of words) {
+      expect(word.length).toBeLessThanOrEqual(75)
+      const wordMatch = word.match(/^=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=$/)
+      expect(wordMatch).not.toBeNull()
+      decoded += Buffer.from(wordMatch![1]!, 'base64').toString('utf-8')
+    }
+
+    // Reconstructing byte-for-byte (rather than just "doesn't throw") is what actually proves no
+    // multi-byte character was split across a chunk boundary — a split would corrupt the UTF-8
+    // sequence and this equality would fail.
+    expect(decoded).toBe(longSubject)
+  })
+
+  it('extraHeaders: adds a custom header line to the output', () => {
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com',
+      to: 'jane@example.com',
+      subject: 'Test',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'test',
+      extraHeaders: { 'X-DogeBuddy-Proposal': 'abc-123' },
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+
+    expect(text).toContain('X-DogeBuddy-Proposal: abc-123\r\n')
+  })
+
+  it('extraHeaders: an invalid header name throws', () => {
+    expect(() =>
+      buildReplyRaw({
+        from: 'support@dogebuddy.com',
+        to: 'jane@example.com',
+        subject: 'Test',
+        inReplyTo: '<abc@mail.example.com>',
+        references: '<abc@mail.example.com>',
+        bodyText: 'test',
+        extraHeaders: { 'Bad Header!': 'value' },
+      }),
+    ).toThrow()
+  })
+
+  it('extraHeaders: value is CR/LF-sanitized like every other field (no header injection)', () => {
+    const raw = buildReplyRaw({
+      from: 'support@dogebuddy.com',
+      to: 'jane@example.com',
+      subject: 'Test',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<abc@mail.example.com>',
+      bodyText: 'test',
+      extraHeaders: { 'X-DogeBuddy-Proposal': 'x\r\nBcc: evil@x.com' },
+    })
+    const text = Buffer.from(raw, 'base64url').toString()
+
+    const bccLines = text.split('\r\n').filter((line) => line.startsWith('Bcc:'))
+    expect(bccLines).toHaveLength(0)
   })
 })

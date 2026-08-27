@@ -14,6 +14,7 @@ import thread404Fixture from './fixtures/thread-404.json' with { type: 'json' }
 import messageFullNestedFixture from './fixtures/message-full-nested.json' with { type: 'json' }
 import messageFullSinglepartFixture from './fixtures/message-full-singlepart.json' with { type: 'json' }
 import messageMetadataFixture from './fixtures/message-metadata.json' with { type: 'json' }
+import messageMetadataAuthResultsFixture from './fixtures/message-metadata-auth-results.json' with { type: 'json' }
 import message404Fixture from './fixtures/message-404.json' with { type: 'json' }
 import labelsListFixture from './fixtures/labels-list.json' with { type: 'json' }
 import labelCreateFixture from './fixtures/label-create.json' with { type: 'json' }
@@ -174,6 +175,21 @@ describe('createGmailClient', () => {
     )
   })
 
+  it('getMessage(full, nested): authenticationResults exposes the TOPMOST Authentication-Results header value (controller ruling: full format, not just metadata)', async () => {
+    const client = createGmailClient({
+      auth: stubAuth(),
+      fromAddress: FROM_ADDRESS,
+      fetchFn: fixtureFetch({ msg: messageFullNestedFixture }),
+    })
+    const msg = await client.getMessage('msg-nested-1', { format: 'full' })
+
+    // The fixture carries two Authentication-Results headers (Gmail's own stamp topmost, an
+    // upstream relay's stamp further down) — only the first occurrence must win.
+    expect(msg.authenticationResults).toBe(
+      'mx.google.com; spf=pass (google.com: domain of jane@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=jane@example.com; dkim=pass header.i=@example.com; dmarc=pass',
+    )
+  })
+
   it('getMessage(full, singlepart): falls back to top-level body.data and nulls absent headers', async () => {
     const client = createGmailClient({
       auth: stubAuth(),
@@ -207,11 +223,29 @@ describe('createGmailClient', () => {
       'Message-ID',
       'In-Reply-To',
       'References',
+      'Authentication-Results',
     ])
 
     expect(msg.bodyText).toBeNull()
     expect(msg.fromAddr).toBe('jane@example.com')
     expect(msg.deliveredTo).toEqual(['jane@example.com', 'support@dogebuddy.com'])
+    // This fixture's response carries no Authentication-Results header at all.
+    expect(msg.authenticationResults).toBeNull()
+  })
+
+  it('getMessage(metadata): authenticationResults exposes the TOPMOST Authentication-Results header value when present', async () => {
+    const client = createGmailClient({
+      auth: stubAuth(),
+      fromAddress: FROM_ADDRESS,
+      fetchFn: fixtureFetch({ msg: messageMetadataAuthResultsFixture }),
+    })
+    const msg = await client.getMessage('msg-auth-1', { format: 'metadata' })
+
+    // The fixture carries two Authentication-Results headers — only the first (topmost, Gmail's
+    // own stamp) occurrence must be returned.
+    expect(msg.authenticationResults).toBe(
+      'mx.google.com; spf=pass (google.com: domain of jane@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=jane@example.com; dkim=pass header.i=@example.com; dmarc=pass',
+    )
   })
 
   it('getMessage: 404 becomes MessageGoneError', async () => {
@@ -322,16 +356,29 @@ describe('createGmailClient', () => {
     expect(init.signal).toBeInstanceOf(AbortSignal)
   })
 
-  it('IMPORTANT 4a: a fetch that times out (AbortError) retries once after a jittered delay, then throws GmailApiError', async () => {
+  it('IMPORTANT 4a: a fetch that times out (TimeoutError) retries once after a jittered delay, then throws the typed timeout error', async () => {
     let calls = 0
     const fetchFn = vi.fn(async () => {
       calls++
-      throw new DOMException('The operation was aborted.', 'AbortError')
+      throw Object.assign(new Error('timed out'), { name: 'TimeoutError' })
     }) as unknown as typeof fetch
     const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
 
-    await expect(client.getProfile()).rejects.toMatchObject({ name: 'GmailApiError' })
+    await expect(client.getProfile()).rejects.toMatchObject({ name: 'GmailApiError', status: 0, reason: 'timeout' })
     expect(calls).toBe(2)
+  })
+
+  it('a fetch rejecting with any other error name (e.g. AbortError) propagates unchanged, with NO retry — the client accepts no caller signal, so this is an unknown error', async () => {
+    let calls = 0
+    const original = Object.assign(new Error('aborted'), { name: 'AbortError' })
+    const fetchFn = vi.fn(async () => {
+      calls++
+      throw original
+    }) as unknown as typeof fetch
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await expect(client.getProfile()).rejects.toBe(original)
+    expect(calls).toBe(1)
   })
 
   it('401: invalidates the cached token, refetches it, and retries the request exactly once', async () => {
@@ -433,6 +480,26 @@ describe('createGmailClient', () => {
 
     // Should contain RFC 2047 encoded subject
     expect(text).toMatch(/Subject: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?\=\r\n/)
+  })
+
+  it('sendReply: extraHeaders pass through into the raw message', async () => {
+    const fetchFn = vi.fn(fixtureFetch({ send: sendReplyFixture }))
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await client.sendReply({
+      threadId: 'thread-100',
+      to: 'jane@example.com',
+      subject: 'Broken leash',
+      inReplyTo: '<abc@mail.example.com>',
+      references: '<root@x> <abc@mail.example.com>',
+      bodyText: 'Hi Jane,\n\nSorry about that.',
+      extraHeaders: { 'X-DogeBuddy-Proposal': 'abc-123' },
+    })
+
+    const [, init] = fetchFn.mock.calls[0]!
+    const body = JSON.parse(String(init?.body))
+    const text = Buffer.from(body.raw, 'base64url').toString()
+    expect(text).toContain('X-DogeBuddy-Proposal: abc-123\r\n')
   })
 
   it('no fixture contains auth material', async () => {

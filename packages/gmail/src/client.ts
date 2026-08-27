@@ -11,7 +11,17 @@ const BASE_URL = 'https://gmail.googleapis.com/gmail/v1/users/me'
 const RATE_LIMIT_REASONS = new Set(['userRateLimitExceeded', 'rateLimitExceeded', 'dailyLimitExceeded'])
 
 /** Order is significant — mirrors the brief's required metadataHeaders order exactly. */
-const METADATA_HEADERS = ['From', 'To', 'Cc', 'Delivered-To', 'Subject', 'Message-ID', 'In-Reply-To', 'References']
+const METADATA_HEADERS = [
+  'From',
+  'To',
+  'Cc',
+  'Delivered-To',
+  'Subject',
+  'Message-ID',
+  'In-Reply-To',
+  'References',
+  'Authentication-Results',
+]
 
 export interface CreateGmailClientOptions {
   auth: GmailAuth
@@ -70,8 +80,11 @@ function jitterDelayMs(): number {
  * keep a poll (and the singleton queue lock protecting it) alive indefinitely. */
 const REQUEST_TIMEOUT_MS = 20_000
 
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'AbortError'
+/** AbortSignal.timeout() rejects with a DOMException named 'TimeoutError' (NOT 'AbortError') —
+ * this is the only abort reason the client itself can produce, since it never accepts a caller
+ * signal. Any other error name is unknown and must propagate untouched. */
+function isTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'TimeoutError'
 }
 
 async function safeJson(res: Response): Promise<unknown> {
@@ -119,6 +132,10 @@ function normalizeMessage(raw: RawGmailMessage, format: 'metadata' | 'full'): No
     rfcMessageId: firstHeader(headers, 'Message-ID'),
     inReplyTo: firstHeader(headers, 'In-Reply-To'),
     references: firstHeader(headers, 'References'),
+    // The topmost Authentication-Results header is Gmail's own stamp (each hop that adds one
+    // prepends it) — firstHeader already returns the first/topmost occurrence. Exposed for both
+    // 'metadata' and 'full' formats since support ingest fetches format:'full'.
+    authenticationResults: firstHeader(headers, 'Authentication-Results'),
     // format:'metadata' never carries body content — null it explicitly rather
     // than trusting the fixture/response to omit body.data.
     bodyText: format === 'metadata' ? null : extractBodyText(raw.payload),
@@ -170,14 +187,16 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
         // one jittered retry (sharing the same retry budget as the 5xx path — no more attempts
         // than a garden-variety server error gets), then throw as a GmailApiError so callers don't
         // need to special-case a raw DOMException on top of the existing error taxonomy.
-        if (isAbortError(err) && !attemptedServerRetry) {
+        if (isTimeoutError(err) && !attemptedServerRetry) {
           attemptedServerRetry = true
           await sleep(jitterDelayMs())
           continue
         }
-        if (isAbortError(err)) {
+        if (isTimeoutError(err)) {
           throw new GmailApiError('Gmail API request timed out', 0, 'timeout')
         }
+        // Unknown error (not our own timeout) — the client accepts no caller signal, so there's
+        // nothing else this could legitimately be. Don't retry, don't wrap: propagate as-is.
         throw err
       }
 
@@ -315,6 +334,7 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
         inReplyTo: r.inReplyTo,
         references: r.references,
         bodyText: r.bodyText,
+        extraHeaders: r.extraHeaders,
       })
 
       const result = (await request('POST', '/messages/send', [], 'other', { raw, threadId: r.threadId })) as {

@@ -18,6 +18,9 @@ export interface NormalizedMessage {
   rfcMessageId: string | null
   inReplyTo: string | null
   references: string | null
+  /** Topmost (first-occurrence) `Authentication-Results` header value — Gmail's own SPF/DKIM/DMARC
+   * stamp. Present on both 'metadata' and 'full' format shapes; null when the header is absent. */
+  authenticationResults: string | null
   /** null when fetched with format:'metadata' */
   bodyText: string | null
 }
@@ -32,5 +35,13 @@ export interface GmailClient {
   listLabels(): Promise<{ id: string; name: string }[]>
   createLabel(name: string): Promise<{ id: string; name: string }>
   modifyMessage(id: string, mods: { addLabelIds?: string[]; removeLabelIds?: string[] }): Promise<void>
-  sendReply(r: { threadId: string; to: string; subject: string; inReplyTo: string; references: string; bodyText: string }): Promise<{ id: string; threadId: string }>
+  sendReply(r: {
+    threadId: string
+    to: string
+    subject: string
+    inReplyTo: string
+    references: string
+    bodyText: string
+    extraHeaders?: Record<string, string>
+  }): Promise<{ id: string; threadId: string }>
 }
