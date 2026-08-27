@@ -5,10 +5,12 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "record": "tsx scripts/record-fixtures.ts"
   },
   "devDependencies": {
     "@types/node": "^22",
+    "tsx": "^4.20.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.0"
   },
