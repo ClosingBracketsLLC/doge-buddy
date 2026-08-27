@@ -335,19 +335,32 @@ const supportAgentDeps: SupportAgentJobDeps = {
   sessionStore: createPgSessionStore(db),
   anthropicConfigured: Boolean(config.anthropic),
 }
-// `policy: 'singleton'` is load-bearing here (house rule, queue.ts:149-176's doc comment): this
-// queue's sole producer (`enqueueSupportAgentRun`) sets `singletonKey: ticketId` on every send,
-// expecting pg-boss to keep at most one ACTIVE job per ticket at a time — the per-ticket mutex
-// `claimTicket`'s row lock inside the job then makes airtight. `createQueueRetrying` (not a bare
-// `boss.createQueue`) guards the same first-boot concurrent-DDL race as every other queue below.
-await createQueueRetrying(queue.boss, SUPPORT_AGENT_QUEUE, { name: SUPPORT_AGENT_QUEUE, policy: 'singleton' })
+// `policy: 'stately'` is load-bearing here (fix round 1, CRITICAL-1a — was `'singleton'`, ruled
+// wrong): this queue's sole producer (`enqueueSupportAgentRun`) sets `singletonKey: ticketId` on
+// every send, expecting pg-boss to keep at most one job per ticket *outstanding* at a time —
+// created-or-active, not just active. pg-boss's `'singleton'` policy only indexes/dedupes the
+// ACTIVE state (empirically confirmed: a second `send()` with the same key while the first is
+// merely queued — not yet active — still enqueues a duplicate), so a burst of selection cycles
+// (`agent-select.ts`, once a minute) or a retried claim could stack up more than one pending job
+// for the same ticket. `'stately'` dedupes across BOTH `created` and `active` states for a given
+// key, which is what "at most one outstanding run per ticket" actually requires; `claimTicket`'s
+// row lock inside the job remains the airtight per-ticket mutex regardless.
+//
+// `createQueueRetrying` (not a bare `boss.createQueue`) guards the same first-boot concurrent-DDL
+// race as every other queue below. `createQueue` is idempotent and a no-op on a queue that already
+// exists (e.g. from before this fix, when it was created with `'singleton'`), so the explicit
+// `updateQueue` follow-up is required to make `'stately'` actually stick on redeploy — the same
+// two-call pattern `registerCron` documents and uses for the exact same reason (see this file's own
+// doc comment on `CronJobOptions`/`registerCron` in queue.ts).
+await createQueueRetrying(queue.boss, SUPPORT_AGENT_QUEUE, { name: SUPPORT_AGENT_QUEUE, policy: 'stately' })
+await queue.boss.updateQueue(SUPPORT_AGENT_QUEUE, { name: SUPPORT_AGENT_QUEUE, policy: 'stately' })
 // `batchSize: 1` is pinned explicitly (not just relying on pg-boss's own default of 1): the job's
 // `removeLocalSessionMirror()` does a best-effort `rm -rf` of the WHOLE shared SDK session-mirror
 // directory after every run, not just the run's own subdirectory — see that function's doc comment
 // in `jobs/support-agent-run.ts`. A batch >1 (or a second concurrent worker on this queue) would
 // let one run's cleanup delete another's live mirror out from under it.
 await queue.boss.work(SUPPORT_AGENT_QUEUE, { batchSize: 1 }, supportAgentRunHandler(supportAgentDeps))
-app.log.info(`${SUPPORT_AGENT_QUEUE} worker ARMED — singleton, batch size 1`)
+app.log.info(`${SUPPORT_AGENT_QUEUE} worker ARMED — stately, batch size 1`)
 
 const supportPollDeps: SupportPollDeps = {
   db,

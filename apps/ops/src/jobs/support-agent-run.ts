@@ -91,17 +91,30 @@ function utcMidnight(now: Date): Date {
  * One `support.agent-run` job (spec §1 "Job order" — **pinned; the ordering IS the correctness**):
  *
  * 1. Kill levers / Anthropic env absent → return with no stamp and no audit row.
- * 2. Load the ticket; per-ticket daily cap → guarded `triaged → escalated` (`agent_run_cap`) + exit.
- * 3. Global daily cap; at cap, exit WITHOUT stamping (the ticket stays selectable after UTC
- *    midnight). Both caps and the spend-row insert share ONE advisory-locked transaction, in that
- *    observable order; only the per-ticket cap's escalation happens after the commit.
- * 4. Guarded CAS claim — the real per-ticket mutex. A queued duplicate whose predicate fails on the
- *    locked row exits as a no-op (`support.agent_run_skipped`), as does a stuck re-claim that hit
- *    the failure ceiling (escalated inside that same transaction).
+ * 2. Load the ticket (existence gate only — the claim re-reads it under a row lock).
+ * 3. Guarded CAS claim — the real per-ticket mutex, and (fix round 1, CRITICAL-1b) now the FIRST
+ *    real gate a job hits. A queued duplicate/redelivery whose predicate fails on the locked row
+ *    exits as a no-op (`support.agent_run_skipped`) BEFORE any cap is even checked — zero spend, by
+ *    construction, for a run that was never going to happen. A stuck re-claim that hits the failure
+ *    ceiling escalates inside that same transaction and comes back unclaimed.
+ * 4. Per-ticket daily cap → guarded `triaged → escalated` (`agent_run_cap`) + exit; global daily
+ *    cap → exit WITHOUT running. Both caps and the spend-row insert share ONE advisory-locked
+ *    transaction, in that observable order. This step runs AFTER the claim (fix round 1,
+ *    CRITICAL-1b — see that note below) — only a job that actually won the CAS ever reaches it.
  * 5. Resume pre-flight (the store may not have the session) + context assembly.
  * 6. Insert the `agent_runs` row directly (NOT `claimDailyRun` — support runs many per day).
  * 7. Run the agent, then handle the outcome (`runAndHandleOutcome`): transitions, the
  *    supersede+submit step, the watermark/session stamps, and failure accounting.
+ *
+ * CRITICAL-1b (binding, fix round 1): steps 3 and 4 used to run in the other order (caps, THEN
+ * claim). That let a duplicate delivery of the same job — a pg-boss redelivery, two overlapping
+ * workers during a deploy — burn a spend row (and thus budget) even though its claim was always
+ * going to be rejected: the cap-and-spend transaction ran unconditionally before the CAS ever
+ * evaluated the ticket. Swapping the order so the claim runs FIRST means a CAS-rejected job now
+ * exits at step 3 having written no spend row at all. Fail-closed accounting for a run that DOES
+ * proceed is unaffected: the spend row still commits (step 4) before the `agent_runs` insert
+ * (step 6) and the SDK call (step 7) — "before any token can be spent" now means "before any token
+ * can be spent, AND only for a run that actually won its claim".
  *
  * CRITICAL-1 (binding): every transition INTO `escalated` here clears `escalation_notified_at` and
  * sets an `escalation_reason`, and NOTHING here notifies — the poll's `notifyPendingEscalations` is
@@ -115,8 +128,8 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
   if (!(await deps.settings.get('workflow.support.enabled'))) return
   if (!deps.anthropicConfigured) return
 
-  // --- Step 2: load the ticket. (Its cap check lives in step 3's transaction; this read is the
-  // does-it-exist gate and the source of nothing else — the claim re-reads it under a row lock.)
+  // --- Step 2: load the ticket. Existence gate only, and the source of nothing else — the claim
+  // just below re-reads the row under a lock.
   const [ticket] = await deps.db
     .select({ id: supportTickets.id })
     .from(supportTickets)
@@ -124,13 +137,31 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
     .limit(1)
   if (!ticket) return
 
-  // --- Steps 2–3: BOTH caps and the spend-row insert in ONE transaction under
-  // `pg_advisory_xact_lock` (the `agents/lifecycle.ts` pattern). This queue has no single-caller
-  // guarantee (unlike triage's poll, which rides the singleton poll), so every check-then-act on
-  // these counts has to hold the lock or two overlapping workers — routine during a deploy — both
-  // read the same under-cap count and both proceed. That includes the once-per-day cap-warning
-  // guard row: two capped workers racing a bare check-then-act would each insert one and page the
-  // owner twice. The alert itself is fired OUTSIDE (best-effort I/O must never hold the lock).
+  // --- Step 3: guarded CAS claim (the per-ticket mutex) — MOVED ahead of the cap check
+  // (CRITICAL-1b, see this function's own doc comment). A queued duplicate whose predicate fails on
+  // the locked row exits right here, before any cap or spend accounting exists. A stuck re-claim
+  // that hits the failure ceiling escalates inside that same transaction and comes back unclaimed
+  // (spec §1: otherwise a third hard-kill strands the ticket at count 2 with the ×2 net never run).
+  const claim = await claimTicket(deps, ticketId, now())
+  if (!claim.claimed) {
+    await deps.db.insert(auditLog).values({
+      actor: 'system',
+      action: AGENT_RUN_SKIPPED_ACTION,
+      entityType: 'ticket',
+      entityId: ticketId,
+      detail: { reason: claim.reason },
+    })
+    return
+  }
+
+  // --- Step 4: BOTH caps and the spend-row insert in ONE transaction under
+  // `pg_advisory_xact_lock` (the `agents/lifecycle.ts` pattern) — now that the claim has already
+  // succeeded (CRITICAL-1b). This queue has no single-caller guarantee (unlike triage's poll, which
+  // rides the singleton poll), so every check-then-act on these counts has to hold the lock or two
+  // overlapping workers — routine during a deploy — both read the same under-cap count and both
+  // proceed. That includes the once-per-day cap-warning guard row: two capped workers racing a bare
+  // check-then-act would each insert one and page the owner twice. The alert itself is fired
+  // OUTSIDE (best-effort I/O must never hold the lock).
   //
   // Order inside the lock is the spec's observable order: per-ticket cap, then global cap, then
   // spend row.
@@ -189,8 +220,13 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
   if (capResult.outcome === 'ticket_capped') {
     // Deliberately outside the transaction (and not retried): if the process dies between the
     // commit and these two writes, the ticket is left `triaged` with the cap still tripped, so the
-    // next selection cycle re-enqueues it and this exact branch re-fires. Self-healing, and
-    // cheaper than holding the global lock across two more writes.
+    // next selection cycle re-enqueues it, the claim re-claims it, and this exact branch re-fires.
+    // Self-healing, and cheaper than holding the global lock across two more writes.
+    //
+    // CRITICAL-1b: step 3's claim already stamped `last_agent_run_at` before this ran — that stamp
+    // is simply irrelevant now. The ticket is about to leave `triaged` entirely, and every
+    // selection/claim predicate requires `status = 'triaged'`, so no watermark on this row matters
+    // again until (if ever) an operator moves it back.
     await escalateRunCapped(deps, ticketId)
     await deps.db.insert(auditLog).values({
       actor: 'system',
@@ -210,21 +246,15 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
         })
         .catch(() => {})
     }
-    return
-  }
-
-  // --- Step 4: guarded CAS claim (the per-ticket mutex). A stuck re-claim that reaches the failure
-  // ceiling escalates inside that same transaction and comes back unclaimed — the run is skipped
-  // (spec §1: otherwise a third hard-kill strands the ticket at count 2 with the ×2 net never run).
-  const claim = await claimTicket(deps, ticketId, now())
-  if (!claim.claimed) {
-    await deps.db.insert(auditLog).values({
-      actor: 'system',
-      action: AGENT_RUN_SKIPPED_ACTION,
-      entityType: 'ticket',
-      entityId: ticketId,
-      detail: { reason: claim.reason },
-    })
+    // CRITICAL-1b: unlike ticket_capped above, this ticket STAYS `triaged` — and step 3's claim
+    // stamp stays too, deliberately unwound by nothing here. That leaves it reading exactly like a
+    // claimed-but-never-finished run, which is precisely what the stuck gate
+    // (`SUPPORT_AGENT_STUCK_AFTER_MINUTES`, both in `claimTicket`'s predicate and in
+    // `agent-select.ts`'s mirrored selection predicate) is for: it re-claims this ticket on its own
+    // in 20 minutes and this same cap check runs again — by then either the global count has moved
+    // (rare) or UTC midnight has passed and the count has reset, and it proceeds. No failure is
+    // charged for hitting this branch: `claimTicket`'s failure increment only fires on the branch
+    // that AUTHORIZED a stuck re-claim, and a fresh claim (this one) never takes that branch.
     return
   }
 

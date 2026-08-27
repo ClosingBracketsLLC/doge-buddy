@@ -339,7 +339,7 @@ describe('executeSupportAgentRun', () => {
     })
   })
 
-  describe('step 2: per-ticket daily cap', () => {
+  describe('step 4 (post-claim): per-ticket daily cap', () => {
     it('escalates with agent_run_cap and a cleared notify stamp at the cap', async () => {
       const ticketId = await seedTicket({ escalationNotifiedAt: NOW })
       await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, ticketId)
@@ -350,8 +350,11 @@ describe('executeSupportAgentRun', () => {
       expect(ticket.status).toBe('escalated')
       expect(ticket.escalationReason).toBe('agent_run_cap')
       expect(ticket.escalationNotifiedAt).toBeNull()
-      // No stamp and no new spend row: the ticket is selectable again after UTC midnight.
-      expect(ticket.lastAgentRunAt).toBeNull()
+      // CRITICAL-1b: the claim (step 3) runs BEFORE this cap check now, so it already stamped
+      // last_agent_run_at — that stamp is simply moot once the ticket is escalated (every
+      // selection/claim predicate requires status = 'triaged').
+      expect(ticket.lastAgentRunAt).toEqual(NOW)
+      // No NEW spend row past the 3 pre-seeded ones: the cap trips before the spend insert.
       expect(await auditRows(AGENT_RUN_AUDIT_ACTION, ticketId)).toHaveLength(
         SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY,
       )
@@ -373,26 +376,90 @@ describe('executeSupportAgentRun', () => {
     })
   })
 
-  describe('step 3: global daily cap', () => {
-    it('leaves the ticket untouched and warns exactly once per UTC day', async () => {
-      const ticketId = await seedTicket()
+  describe('step 4 (post-claim): global daily cap', () => {
+    it('leaves the ticket untouched, stamps the claim, and warns exactly once per UTC day', async () => {
+      // Two SEPARATE tickets, each independently eligible to claim: CRITICAL-1b means a single
+      // ticket can only reach this cap check ONCE per claim (a second call on the same ticket, same
+      // frozen clock, would now fail the CAS itself — see the "duplicate delivery" test below — so
+      // re-exercising the cap-warning dedup needs a second, independently-claimable ticket instead
+      // of calling this function twice on the same one.
+      const ticketId1 = await seedTicket()
+      const ticketId2 = await seedTicket()
       await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_DAY, null)
 
-      await executeSupportAgentRun(makeDeps(), ticketId)
-      await executeSupportAgentRun(makeDeps(), ticketId)
+      await executeSupportAgentRun(makeDeps(), ticketId1)
+      await executeSupportAgentRun(makeDeps(), ticketId2)
 
-      const ticket = await ticketById(ticketId)
-      expect(ticket.status).toBe('triaged')
-      expect(ticket.lastAgentRunAt).toBeNull()
+      const ticket1 = await ticketById(ticketId1)
+      const ticket2 = await ticketById(ticketId2)
+      expect(ticket1.status).toBe('triaged')
+      expect(ticket2.status).toBe('triaged')
+      // CRITICAL-1b: the claim stamp survives a global-capped exit — see this function's own doc
+      // comment. It's what lets the 20-minute stuck gate re-claim and re-check the cap later.
+      expect(ticket1.lastAgentRunAt).toEqual(NOW)
+      expect(ticket2.lastAgentRunAt).toEqual(NOW)
       expect(runFn).not.toHaveBeenCalled()
-      // No extra spend rows were inserted past the cap.
+      // No extra spend rows were inserted past the cap, for EITHER ticket.
       expect(await auditRows(AGENT_RUN_AUDIT_ACTION)).toHaveLength(SUPPORT_AGENT_MAX_RUNS_PER_DAY)
       expect(await auditRows(AGENT_RUN_CAPPED_ACTION)).toHaveLength(1)
       expect(alert.mock.calls.filter((c) => c[1] === 'support_agent_run_capped')).toHaveLength(1)
     })
   })
 
-  describe('step 4: CAS claim', () => {
+  describe('CRITICAL-1b: claim runs BEFORE the cap/spend transaction', () => {
+    it('a duplicate delivery whose claim is rejected writes NO spend row at all', async () => {
+      const ticketId = await seedTicket()
+
+      // First delivery: claims cleanly and runs, writing exactly one spend row.
+      await executeSupportAgentRun(makeDeps(), ticketId)
+      expect(runFn).toHaveBeenCalledTimes(1)
+      const spendRowsAfterFirst = await auditRows(AGENT_RUN_AUDIT_ACTION, ticketId)
+      expect(spendRowsAfterFirst).toHaveLength(1)
+
+      // A duplicate delivery of the SAME job (pg-boss redelivery, a straggling second worker): the
+      // ticket is already stamped by the first claim, with no new inbound and not yet stuck, so the
+      // CAS rejects it. Under the OLD order (cap-then-claim) this would still have burned a SECOND
+      // spend row before the claim ever got a chance to reject it — that's the bug this pins.
+      await executeSupportAgentRun(makeDeps(), ticketId)
+
+      expect(runFn).toHaveBeenCalledTimes(1) // unchanged — the duplicate never ran
+      expect(await auditRows(AGENT_RUN_SKIPPED_ACTION, ticketId)).toHaveLength(1)
+      expect(await auditRows(AGENT_RUN_AUDIT_ACTION, ticketId)).toEqual(spendRowsAfterFirst)
+    })
+
+    it('a per-ticket-capped claim writes the cap outcome, not a spend row, and the claim stamp stands', async () => {
+      const ticketId = await seedTicket()
+      await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, ticketId)
+
+      await executeSupportAgentRun(makeDeps(), ticketId)
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('escalated')
+      expect(ticket.escalationReason).toBe('agent_run_cap')
+      expect(ticket.lastAgentRunAt).toEqual(NOW) // the claim (step 3) ran and stamped before the cap tripped
+      expect(await auditRows(AGENT_RUN_AUDIT_ACTION, ticketId)).toHaveLength(
+        SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY, // no new spend row past the pre-seeded ones
+      )
+      expect(await auditRows(AGENT_RUN_TICKET_CAPPED_ACTION, ticketId)).toHaveLength(1)
+      expect(runFn).not.toHaveBeenCalled()
+    })
+
+    it('a globally-capped claim writes the cap outcome, not a spend row, and the claim stamp stands', async () => {
+      const ticketId = await seedTicket()
+      await seedRunAudits(SUPPORT_AGENT_MAX_RUNS_PER_DAY, null)
+
+      await executeSupportAgentRun(makeDeps(), ticketId)
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('triaged') // NOT escalated — global cap just defers, doesn't escalate
+      expect(ticket.lastAgentRunAt).toEqual(NOW)
+      expect(await auditRows(AGENT_RUN_AUDIT_ACTION)).toHaveLength(SUPPORT_AGENT_MAX_RUNS_PER_DAY)
+      expect(await auditRows(AGENT_RUN_CAPPED_ACTION)).toHaveLength(1)
+      expect(runFn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('step 3: CAS claim (now runs before the cap check — CRITICAL-1b)', () => {
     it('claims a fresh triaged ticket, writing the spend audit row BEFORE the run', async () => {
       const ticketId = await seedTicket()
       let auditRowsAtRunTime = -1

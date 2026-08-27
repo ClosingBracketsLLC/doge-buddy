@@ -1,5 +1,5 @@
 import { proposals, supportTickets, type createDb } from '@doge-buddy/db'
-import { and, asc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm'
+import { and, eq, inArray, isNull, lt, notExists, or, sql } from 'drizzle-orm'
 import type { SendOpts } from '../fulfillment/types.ts'
 import { enqueueSupportAgentRun, SUPPORT_AGENT_STUCK_AFTER_MINUTES } from '../jobs/support-agent-run.ts'
 
@@ -26,10 +26,16 @@ const AGENT_FAILURE_ESCALATE_AT = 2
  * `submitProposeOutcome`'s own doc comment on that exact failure window). */
 const ORPHAN_AFTER_MINUTES = 15
 
-/** Proposal statuses that count as "still live" for the orphan check. Deliberately NOT `applied`:
- * an applied proposal means the reply/refund already went out, so a ticket sitting in
- * `awaiting_approval` with only applied proposals reflects a different situation than an orphan
- * (the ticket simply hasn't been marked resolved yet), not one this backstop should touch. */
+/** Proposal statuses that count as "still live" for the orphan check — `pending`/`approved`/
+ * `applying` ONLY. Deliberately NOT `applied`/`rejected`/`failed` (fix round 1, IMPORTANT 2 —
+ * corrects an earlier version of this comment that claimed the opposite of what this code has
+ * always done): those three are TERMINAL proposal states, and a ticket sitting in
+ * `awaiting_approval` whose only proposal is terminal is exactly the crash/lost-race window this
+ * backstop exists to catch — e.g. `proposal.apply`'s Shopify/refund call committed (`applied`) but
+ * the process died before the ticket's own status write landed, or an owner `rejected` the one live
+ * proposal and nothing has re-proposed since. Treating a terminal proposal as "not live" is what
+ * lets the backstop actually escalate those tickets instead of leaving them stranded forever behind
+ * a proposal that can never change status again on its own. */
 const LIVE_PROPOSAL_STATUSES = ['pending', 'approved', 'applying'] as const
 
 export interface AgentSelectDeps {
@@ -57,11 +63,18 @@ export interface AgentSelectDeps {
  * queue's per-ticket `singletonKey`, so a ticket already mid-run is deduped by pg-boss rather than
  * double-enqueued.
  *
- * **2. Orphan backstop** (CRITICAL-1): `awaiting_approval` tickets idle past `ORPHAN_AFTER_MINUTES`
- * with no live support proposal are guarded-escalated (`orphaned_awaiting_approval`,
- * `escalationNotifiedAt` cleared). Nothing here notifies — the escalate stage already ran earlier
- * in THIS poll cycle, so a ticket escalated here is picked up by `notifyPendingEscalations` on the
- * NEXT cycle, one minute later.
+ * **2. Orphan backstop** (CRITICAL-1, anchor amended in fix round 1 — IMPORTANT 3): `awaiting_approval`
+ * tickets with no live support proposal, idle past `ORPHAN_AFTER_MINUTES` on the ANCHOR defined by
+ * `orphanAnchor` below, are guarded-escalated (`orphaned_awaiting_approval`, `escalationNotifiedAt`
+ * cleared). Nothing here notifies — the escalate stage already ran earlier in THIS poll cycle, so a
+ * ticket escalated here is picked up by `notifyPendingEscalations` on the NEXT cycle, one minute
+ * later.
+ *
+ * The anchor is deliberately NOT `support_tickets.updated_at` alone: every inbound message bumps it
+ * (the column's own `$onUpdate`), so a customer chasing a stalled ticket — writing again and again,
+ * asking what happened to their refund — would keep resetting the very clock meant to catch exactly
+ * that situation. Chasing is the SIGNAL something is stuck, not evidence it isn't. See `orphanAnchor`
+ * for the actual precedence.
  */
 export async function selectAndEnqueueAgentRuns(
   deps: AgentSelectDeps,
@@ -93,7 +106,11 @@ export async function selectAndEnqueueAgentRuns(
         ),
       ),
     )
-    .orderBy(asc(supportTickets.lastInboundAt))
+    // NULLS FIRST (fix round 1, Minor 5): Postgres's default for ASC is NULLS LAST, which would
+    // sort a ticket with no inbound at all (`last_inbound_at IS NULL`) BEHIND every ticket that has
+    // one — starving it off the back of the cap forever on a busy cycle. NULLS FIRST treats "no
+    // inbound yet" as the oldest possible case, which is the conservative reading.
+    .orderBy(sql`${supportTickets.lastInboundAt} ASC NULLS FIRST`)
     .limit(AGENT_SELECT_CAP_PER_CYCLE)
 
   let enqueued = 0
@@ -113,36 +130,86 @@ export async function selectAndEnqueueAgentRuns(
     }
   }
 
-  const orphanBefore = new Date(nowVal.getTime() - ORPHAN_AFTER_MINUTES * 60_000)
-  const staleAwaiting = await deps.db
-    .select({ id: supportTickets.id })
-    .from(supportTickets)
-    .where(and(eq(supportTickets.status, 'awaiting_approval'), lt(supportTickets.updatedAt, orphanBefore)))
-
-  let orphansEscalated = 0
-  for (const ticket of staleAwaiting) {
-    const [live] = await deps.db
-      .select({ id: proposals.id })
-      .from(proposals)
-      .where(and(eq(proposals.ticketId, ticket.id), inArray(proposals.status, [...LIVE_PROPOSAL_STATUSES])))
-      .limit(1)
-    if (live) continue
-
-    // Guarded on the status this ticket was selected with (6A convention): 0 rows = the owner (or
-    // a concurrent write) already moved it, skip silently.
-    const escalated = await deps.db
-      .update(supportTickets)
-      .set({
-        status: 'escalated',
-        escalationReason: 'orphaned_awaiting_approval',
-        // CRITICAL-1: cleared so `notifyPendingEscalations` (the only notifier) picks this ticket
-        // up — nothing in this function notifies directly.
-        escalationNotifiedAt: null,
-      })
-      .where(and(eq(supportTickets.id, ticket.id), eq(supportTickets.status, 'awaiting_approval')))
-      .returning({ id: supportTickets.id })
-    if (escalated.length > 0) orphansEscalated += 1
-  }
+  const orphansEscalated = await escalateOrphans(deps.db, orphanBefore(nowVal))
 
   return { enqueued, orphansEscalated }
+}
+
+function orphanBefore(nowVal: Date): string {
+  // ISO + explicit cast (`ingest.ts`'s own `${...}::timestamptz` convention) rather than handing a
+  // bare JS `Date` to a raw `sql` fragment: the comparison's LEFT side below is a `COALESCE(...)`
+  // expression, not a plain column, so there is no drizzle column encoder to infer a `timestamptz`
+  // parameter type from — an explicit cast makes the type unambiguous regardless.
+  return new Date(nowVal.getTime() - ORPHAN_AFTER_MINUTES * 60_000).toISOString()
+}
+
+/**
+ * The orphan backstop, as ONE set-based statement (fix round 1 — IMPORTANT 3 + Minor 4 folded
+ * together): a correlated `NOT EXISTS` for "no live support proposal", a correlated `COALESCE`
+ * anchor for "idle long enough" that does NOT degrade on customer chasing, and a `LIMIT` so one
+ * cycle can't try to escalate an unbounded backlog in a single round trip.
+ *
+ * **The anchor, precedence in order:**
+ * 1. This ticket's own newest proposal's `created_at`, if it has ever had one — a fresh DRAFT (even
+ *    one later expired/rejected) is real activity and resets the clock.
+ * 2. Else `last_agent_run_at` — the ticket was claimed and run at least once, just never drafted
+ *    anything that became a proposal row (shouldn't happen for a `propose` outcome, but the fallback
+ *    costs nothing and fails toward "not yet orphaned" rather than a NULL comparison).
+ * 3. Else `updated_at` — neither of the above ever happened; this is the floor every ticket has.
+ *
+ * `updated_at` is deliberately NOT the anchor on its own (spec amendment, IMPORTANT 3): every
+ * inbound message bumps it via the column's own `$onUpdate`, so a customer repeatedly chasing a
+ * stalled ticket would keep resetting the exact clock meant to catch that ticket as stuck — starving
+ * the backstop precisely when it matters most. Only genuine PROPOSAL activity (a new draft, a
+ * supersede touching `updated_at` via the proposals row itself) can reset the countdown; a bare
+ * inbound message cannot.
+ */
+async function escalateOrphans(db: Db, before: string): Promise<number> {
+  const liveProposalExists = db
+    .select({ one: sql`1` })
+    .from(proposals)
+    .where(and(eq(proposals.ticketId, supportTickets.id), inArray(proposals.status, [...LIVE_PROPOSAL_STATUSES])))
+
+  const orphanAnchor = sql`COALESCE(
+    (SELECT max(${proposals.createdAt}) FROM ${proposals} WHERE ${proposals.ticketId} = ${supportTickets.id}),
+    ${supportTickets.lastAgentRunAt},
+    ${supportTickets.updatedAt}
+  )`
+
+  // The id-selection subquery gets its OWN `FROM support_tickets`, which is what makes `LIMIT`
+  // meaningful here (Postgres `UPDATE` has no `LIMIT` clause of its own) — the correlated
+  // `NOT EXISTS`/`orphanAnchor` subqueries above resolve against THIS nearest enclosing FROM, not
+  // the outer UPDATE's target, so there is no ambiguity despite both naming the same table.
+  const orphanCandidateIds = db
+    .select({ id: supportTickets.id })
+    .from(supportTickets)
+    .where(
+      and(
+        eq(supportTickets.status, 'awaiting_approval'),
+        notExists(liveProposalExists),
+        sql`${orphanAnchor} < ${before}::timestamptz`,
+      ),
+    )
+    .orderBy(sql`${orphanAnchor} ASC`)
+    .limit(AGENT_SELECT_CAP_PER_CYCLE)
+
+  // The `status = 'awaiting_approval'` condition is repeated here even though it's ONE atomic
+  // statement (the subquery and this UPDATE share the same snapshot — there is no separate round
+  // trip for a concurrent write to land in between): cheap, harmless, and it keeps this UPDATE
+  // self-evidently guarded the same way every other status transition in this codebase is (6A
+  // convention), rather than relying on a reader trusting the subquery's own WHERE clause never to
+  // drift out of sync with it.
+  const escalated = await db
+    .update(supportTickets)
+    .set({
+      status: 'escalated',
+      escalationReason: 'orphaned_awaiting_approval',
+      // CRITICAL-1: cleared so `notifyPendingEscalations` (the only notifier) picks these tickets
+      // up — nothing in this function notifies directly.
+      escalationNotifiedAt: null,
+    })
+    .where(and(inArray(supportTickets.id, orphanCandidateIds), eq(supportTickets.status, 'awaiting_approval')))
+    .returning({ id: supportTickets.id })
+
+  return escalated.length
 }

@@ -58,10 +58,14 @@ const PROPOSAL_APPLY_QUEUE = 'proposal.apply'
  * every future call is a fast no-op, so this only ever matters on first boot; retrying a few
  * times with a short backoff is safe and sufficient.
  *
- * Exported (Task 13) for `index.ts`'s own singleton-policy queue creations — house rule: every
- * queue whose producer sets a `singletonKey` (e.g. `support.agent-run`) must be created through
- * this retrying wrapper rather than a bare `boss.createQueue`, for the same first-boot DDL-race
- * reason `startQueue`'s own singleton queues below use it.
+ * Exported (Task 13) for `index.ts`'s own non-standard-policy queue creations — house rule: every
+ * queue whose producer sets a `singletonKey` (e.g. `support.agent-run`, `policy: 'stately'` — see
+ * that queue's own comment in index.ts for why `'stately'` and not `'singleton'`) must be created
+ * through this retrying wrapper rather than a bare `boss.createQueue`, for the same first-boot
+ * DDL-race reason `startQueue`'s own non-standard-policy queues below use it. And because
+ * `createQueue` is a silent no-op on a queue that already exists, index.ts follows this call with
+ * its own explicit `updateQueue` to force the policy even on a queue that predates the intended
+ * policy — the same two-call shape `registerCron` below documents and uses for the identical reason.
  */
 export async function createQueueRetrying(boss: PgBoss, name: string, options?: PgBoss.Queue): Promise<void> {
   const RETRYABLE_CODES = new Set(['40P01', '40001'])

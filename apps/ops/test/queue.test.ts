@@ -105,4 +105,76 @@ describe('queue', () => {
     expect(after?.expireInSeconds).toBe(3600)
     expect(after?.policy).toBe('singleton')
   })
+
+  // CRITICAL-1a (support.agent-run fix round 1): `index.ts` doesn't call `registerCron` for
+  // `support.agent-run` (it's a producer-driven queue, not a cron), so it hand-rolls the exact same
+  // create-then-force-update sequence `registerCron` uses above, inline. This proves that inline
+  // sequence actually forces `'stately'` onto a queue that pre-exists with a DIFFERENT policy (the
+  // state every real deploy that predates this fix is in — the queue was created with `'singleton'`
+  // by an earlier boot) — `createQueueRetrying`'s `createQueue` call alone is a silent no-op there.
+  describe('CRITICAL-1a: forcing policy onto a pre-existing support.agent-run-shaped queue', () => {
+    it('createQueueRetrying + an explicit updateQueue upgrades a pre-existing singleton queue to stately', async () => {
+      const name = `test.agent-run-shaped-${Date.now()}`
+      try {
+        await q.boss.createQueue(name, { name, policy: 'singleton' })
+        expect((await q.boss.getQueue(name))?.policy).toBe('singleton')
+
+        // The exact two-call sequence index.ts uses for SUPPORT_AGENT_QUEUE.
+        await q.boss.createQueue(name, { name, policy: 'stately' }) // createQueueRetrying's own call, inlined — no-ops, queue already exists
+        await q.boss.updateQueue(name, { name, policy: 'stately' })
+
+        expect((await q.boss.getQueue(name))?.policy).toBe('stately')
+      } finally {
+        await q.boss.deleteQueue(name)
+      }
+    })
+  })
+
+  // Empirical proof of the CRITICAL-1a claim itself: pg-boss's `'singleton'` policy only indexes
+  // (and therefore only dedupes) the ACTIVE state — two sends with the same key while the FIRST is
+  // merely `created` (queued, no worker registered on either test queue below to promote it) both
+  // succeed, so a burst of selection cycles really can stack up more than one pending job per
+  // ticket under `'singleton'`. `'stately'` additionally indexes the `created` state (pg-boss's
+  // `job_i3`, `WHERE state <= 'active' AND policy = 'stately'`), so the second send is rejected
+  // (pg-boss returns a `null` id on a dedup collision, same as its documented 'short'/'singleton'
+  // behavior) even though nothing has started running yet. No gated handler or timing wait needed
+  // here (unlike `queue-fulfillment.test.ts`'s active-state dedupe test) — neither queue below has
+  // a registered worker at all, so both jobs are guaranteed to still be sitting `created`.
+  describe('CRITICAL-1a: stately dedupes a queued (not yet active) duplicate; singleton does not', () => {
+    it("policy 'singleton' does NOT dedupe two sends with the same key while both are merely queued", async () => {
+      const name = `test.policy-singleton-created-dedupe-${Date.now()}`
+      try {
+        await q.boss.createQueue(name, { name, policy: 'singleton' })
+        const opts = { singletonKey: 'ticket-a' }
+
+        const firstId = await q.boss.send(name, {}, opts)
+        const secondId = await q.boss.send(name, {}, opts)
+
+        expect(firstId).not.toBeNull()
+        expect(secondId).not.toBeNull() // the bug: a second queued duplicate is NOT rejected
+      } finally {
+        // `deleteQueue` fails on a foreign-key violation while any job row still references the
+        // queue (the two `send()`s above left at least one) — purge first.
+        await q.boss.purgeQueue(name)
+        await q.boss.deleteQueue(name)
+      }
+    })
+
+    it("policy 'stately' DOES dedupe two sends with the same key while the first is still merely queued", async () => {
+      const name = `test.policy-stately-created-dedupe-${Date.now()}`
+      try {
+        await q.boss.createQueue(name, { name, policy: 'stately' })
+        const opts = { singletonKey: 'ticket-a' }
+
+        const firstId = await q.boss.send(name, {}, opts)
+        const secondId = await q.boss.send(name, {}, opts)
+
+        expect(firstId).not.toBeNull()
+        expect(secondId).toBeNull() // the fix: a queued duplicate is rejected outright
+      } finally {
+        await q.boss.purgeQueue(name)
+        await q.boss.deleteQueue(name)
+      }
+    })
+  })
 })
