@@ -1,4 +1,4 @@
-import { auditLog, createDb, products, productVariants, proposals, supplierVariantMappings } from '@doge-buddy/db'
+import { auditLog, createDb, products, productVariants, proposals, supplierVariantMappings, supportTickets } from '@doge-buddy/db'
 import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
@@ -55,10 +55,13 @@ function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopi
   }
 }
 
-/** Minimal `Pick<SupplierAdapter, 'subscribeProductWebhook'>` fake — same spirit as
- * `MockSupplierAdapter.subscribeProductWebhook` (`packages/supplier`): records every
- * `supplierProductId` passed, in call order, on `subscribedProductIds`. `subscribeProductWebhook`
- * itself is overridable so a test can make it throw and assert the apply still succeeds. */
+/** Minimal `Pick<SupplierAdapter, 'subscribeProductWebhook' | 'getDisputeOptions' | 'openDispute'>`
+ * fake — same spirit as `MockSupplierAdapter.subscribeProductWebhook` (`packages/supplier`):
+ * records every `supplierProductId` passed, in call order, on `subscribedProductIds`.
+ * `subscribeProductWebhook` itself is overridable so a test can make it throw and assert the apply
+ * still succeeds. `getDisputeOptions`/`openDispute` are unused by this file's `new_listing`-only
+ * tests (Task 16's `refund` executor is what actually calls them) — stubbed here purely to satisfy
+ * `ApplyProposalDeps.adapter`'s grown `Pick`. */
 function fakeAdapter(overrides: { subscribeProductWebhook?: (supplierProductId: string) => Promise<void> } = {}) {
   const subscribedProductIds: string[] = []
   return {
@@ -66,6 +69,29 @@ function fakeAdapter(overrides: { subscribeProductWebhook?: (supplierProductId: 
     subscribeProductWebhook: overrides.subscribeProductWebhook ?? (async (supplierProductId: string) => {
       subscribedProductIds.push(supplierProductId)
     }),
+    getDisputeOptions: async () => {
+      throw new Error('fakeAdapter.getDisputeOptions: not used by these tests')
+    },
+    openDispute: async () => {
+      throw new Error('fakeAdapter.openDispute: not used by these tests')
+    },
+  }
+}
+
+/**
+ * The Task 14 `ApplyProposalDeps` fields this file's `new_listing`-only tests don't themselves
+ * exercise (`gmail`/`refundOps`/`supportAddress`), plus test-friendly defaults for `notify`/
+ * `enqueue`/`adminBaseUrl` — the two new dead-letter tests below override `notify` with their own
+ * spy. Keeps every other call site's deps-construction purely mechanical (Task 14 brief).
+ */
+function baseDeps(overrides: { notify?: ReturnType<typeof vi.fn> } = {}) {
+  return {
+    gmail: null,
+    refundOps: null,
+    supportAddress: '',
+    notify: overrides.notify ?? vi.fn(async () => true),
+    enqueue: vi.fn(async () => {}),
+    adminBaseUrl: 'https://admin.example.com',
   }
 }
 
@@ -115,6 +141,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
 
   let createdProposalIds: string[] = []
   let createdProductIds: string[] = []
+  let createdTicketIds: string[] = []
 
   afterEach(async () => {
     if (createdProductIds.length > 0) {
@@ -133,26 +160,46 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       await db.delete(auditLog).where(inArray(auditLog.entityId, createdProposalIds))
       await db.delete(proposals).where(inArray(proposals.id, createdProposalIds))
     }
+    if (createdTicketIds.length > 0) {
+      await db.delete(supportTickets).where(inArray(supportTickets.id, createdTicketIds))
+    }
     createdProductIds = []
     createdProposalIds = []
+    createdTicketIds = []
   })
 
   async function seedProposal(opts: {
     status: 'approved' | 'applying' | 'applied' | 'rejected'
-    type?: 'new_listing' | 'refund'
+    type?: 'new_listing' | 'refund' | 'support_reply'
     payload?: unknown
+    ticketId?: string
   }) {
     const [row] = await db
       .insert(proposals)
       .values({
         type: opts.type ?? 'new_listing',
         status: opts.status,
-        summary: 'test',
+        summary: 'test summary',
         payload: (opts.payload ?? newListingPayload()) as object,
         sourceWorkflow: 'test',
+        ticketId: opts.ticketId,
       })
       .returning()
     createdProposalIds.push(row!.id)
+    return row!
+  }
+
+  /** Seeds a support_tickets row in `awaiting_approval` — the status a proposal-bearing ticket
+   * sits in while its approved support_reply/refund waits to be applied. */
+  async function seedAwaitingApprovalTicket() {
+    const [row] = await db
+      .insert(supportTickets)
+      .values({
+        gmailThreadId: `test-thread-${crypto.randomUUID()}`,
+        status: 'awaiting_approval',
+      })
+      .returning()
+    createdTicketIds.push(row!.id)
     return row!
   }
 
@@ -182,7 +229,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const alert = vi.fn(async () => {})
     const adapter = fakeAdapter()
 
-    await executeApplyProposal({ db, alert, shopify, adapter }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('applied')
@@ -251,7 +298,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       },
     })
 
-    await executeApplyProposal({ db, alert, shopify, adapter }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('applied')
@@ -279,7 +326,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const alert = vi.fn(async () => {})
     const adapter = fakeAdapter()
 
-    await executeApplyProposal({ db, alert, shopify, adapter }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('applied')
 
@@ -290,7 +337,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
 
     // Re-run against the same (now 'applied') row — the existing dispatch-no-op branch (test 5)
     // returns before reaching the resolve-payload/subscribe step, so no second subscribe call.
-    await executeApplyProposal({ db, alert, shopify, adapter }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
     expect(adapter.subscribedProductIds).toHaveLength(1)
   })
 
@@ -303,7 +350,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const shopify = fakeShopify()
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)
 
     const productRow = await loadProduct(row.id)
     createdProductIds.push(productRow!.id)
@@ -349,7 +396,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     })
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)
 
     expect(shopify.calls).not.toContain('productSet:DRAFT')
     expect(shopify.calls).toContain('productSet:ACTIVE')
@@ -391,7 +438,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     ]
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)
 
     expect(shopify.calls).toContain('find')
     expect(shopify.calls).not.toContain('productSet:DRAFT')
@@ -423,7 +470,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       const shopify = fakeShopify()
       const alert = vi.fn(async () => {})
 
-      await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
+      await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)
 
       expect(shopify.calls).toEqual([])
       const after = await loadProposal(row.id)
@@ -448,7 +495,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     }
     const alert = vi.fn(async () => {})
 
-    await expect(executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)).rejects.toThrow(/online store publish failed/)
+    await expect(executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)).rejects.toThrow(/online store publish failed/)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('applying')
@@ -473,7 +520,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     }
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('applied')
@@ -496,13 +543,13 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const shopify = fakeShopify()
     const alert = vi.fn(async () => {})
 
-    await expect(executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)).rejects.toThrow(/unimplemented/)
+    await expect(executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)).rejects.toThrow(/unimplemented/)
 
     const midway = await loadProposal(row.id)
     expect(midway!.status).toBe('applying')
 
     const err = new Error('unimplemented proposal type: refund')
-    await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id, err)
+    await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id, err)
 
     const after = await loadProposal(row.id)
     expect(after!.status).toBe('failed')
@@ -525,7 +572,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       const shopify = fakeShopify()
       const alert = vi.fn(async () => {})
 
-      await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id, new Error('boom'))
+      await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id, new Error('boom'))
 
       const after = await loadProposal(row.id)
       expect(after!.status).toBe('failed')
@@ -568,7 +615,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     })
     const alert = vi.fn(async () => {})
 
-    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter() }, row.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)
 
     const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, sku))
     expect(variantRow).toBeDefined()
@@ -601,7 +648,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     // A applies clean first.
     const shopifyA = fakeShopify()
     const alertA = vi.fn(async () => {})
-    await executeApplyProposal({ db, alert: alertA, shopify: shopifyA, adapter: fakeAdapter() }, rowA.id)
+    await executeApplyProposal({ db, alert: alertA, shopify: shopifyA, adapter: fakeAdapter(), ...baseDeps() }, rowA.id)
 
     const afterA = await loadProposal(rowA.id)
     expect(afterA!.status).toBe('applied')
@@ -639,7 +686,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     }
     const alertB = vi.fn(async () => {})
     await expect(
-      executeApplyProposal({ db, alert: alertB, shopify: shopifyB, adapter: fakeAdapter() }, rowB.id),
+      executeApplyProposal({ db, alert: alertB, shopify: shopifyB, adapter: fakeAdapter(), ...baseDeps() }, rowB.id),
     ).rejects.toThrow(/sku collision/)
 
     // B's own product row was already created (step 2, before the variant loop's guard fires) —
@@ -652,7 +699,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
 
     // Dead-letter B: the job wrapper's retry-exhaustion path, same as test 8.
     const err = new Error(`sku collision: ${sharedSku} already belongs to another product`)
-    await deadLetterApplyProposal({ db, alert: alertB, shopify: shopifyB, adapter: fakeAdapter() }, rowB.id, err)
+    await deadLetterApplyProposal({ db, alert: alertB, shopify: shopifyB, adapter: fakeAdapter(), ...baseDeps() }, rowB.id, err)
 
     const afterB = await loadProposal(rowB.id)
     expect(afterB!.status).toBe('failed')
@@ -675,5 +722,65 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     expect(mappingsAfter).toHaveLength(1)
     expect(mappingsAfter[0]!.supplierProductId).toBe('cjp-a')
     expect(mappingsAfter[0]!.supplierVariantId).toBe('cjv-a')
+  })
+
+  // ---------------------------------------------------------------------------
+  // 12. Dead-letter growth (Task 14): support_reply escalates its ticket and pages the owner.
+  // ---------------------------------------------------------------------------
+  it('12. support_reply dead-letter: ticket escalated + notify called with the proposal link', async () => {
+    const ticket = await seedAwaitingApprovalTicket()
+    const row = await seedProposal({
+      status: 'approved', type: 'support_reply', payload: { type: 'support_reply' }, ticketId: ticket.id,
+    })
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+    const notify = vi.fn(async () => true)
+
+    await deadLetterApplyProposal(
+      { db, alert, shopify, adapter: fakeAdapter(), ...baseDeps({ notify }) },
+      row.id,
+      new Error('gmail send failed'),
+    )
+
+    const afterProposal = await loadProposal(row.id)
+    expect(afterProposal!.status).toBe('failed')
+
+    const [afterTicket] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(afterTicket!.status).toBe('escalated')
+    expect(afterTicket!.escalationReason).toBe('apply_failed')
+    expect(afterTicket!.escalationNotifiedAt).toBeNull()
+
+    expect(notify).toHaveBeenCalledWith({
+      title: 'Approved support_reply FAILED to apply',
+      body: row.summary,
+      actions: [{ label: 'View', url: `https://admin.example.com/admin/proposals/${row.id}` }],
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // 13. Dead-letter growth (Task 14): new_listing touches neither the ticket nor notify, even
+  // when a ticketId happens to be present on the row (it normally isn't for this type).
+  // ---------------------------------------------------------------------------
+  it('13. new_listing dead-letter: ticket untouched, notify not called', async () => {
+    const ticket = await seedAwaitingApprovalTicket()
+    const row = await seedProposal({ status: 'approved', type: 'new_listing', ticketId: ticket.id })
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+    const notify = vi.fn(async () => true)
+
+    await deadLetterApplyProposal(
+      { db, alert, shopify, adapter: fakeAdapter(), ...baseDeps({ notify }) },
+      row.id,
+      new Error('shopify publish failed'),
+    )
+
+    const afterProposal = await loadProposal(row.id)
+    expect(afterProposal!.status).toBe('failed')
+
+    const [afterTicket] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(afterTicket!.status).toBe('awaiting_approval')
+    expect(afterTicket!.escalationReason).toBeNull()
+
+    expect(notify).not.toHaveBeenCalled()
   })
 })

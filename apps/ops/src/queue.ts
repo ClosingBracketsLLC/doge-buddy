@@ -1,4 +1,5 @@
 import { createDb } from '@doge-buddy/db'
+import type { GmailClient } from '@doge-buddy/gmail'
 import type { SupplierAdapter } from '@doge-buddy/supplier'
 import PgBoss from 'pg-boss'
 import type { createAlerter } from './alerts.ts'
@@ -11,7 +12,8 @@ import { fulfillmentPlaceOrderHandler } from './jobs/fulfillment-place-order.ts'
 import { fulfillmentSyncTrackingHandler } from './jobs/fulfillment-sync-tracking.ts'
 import { proposalApplyHandler } from './jobs/proposal-apply.ts'
 import { webhookProcessHandler } from './jobs/webhook-process.ts'
-import type { ApplyProposalDeps, ProposalShopifyOps } from './proposals/run-apply.ts'
+import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
+import type { ApplyProposalDeps, ProposalShopifyOps, RefundOps } from './proposals/run-apply.ts'
 import type { createSettings } from './settings.ts'
 
 export interface FulfillmentQueueDeps {
@@ -34,6 +36,28 @@ export interface FulfillmentQueueDeps {
    * `'shopify not configured'` on any call, same as `index.ts`'s own `config.shopify`-gated stub.
    */
   proposalShopify?: ProposalShopifyOps
+  /**
+   * Gmail client backing `proposal.apply`'s `support_reply` executor (Task 15). Optional so tests
+   * that never touch that path don't need one; `startQueue` below defaults to `null` when omitted
+   * — `applySupportReply` fails loudly (alert) on a `null` gmail rather than throwing a `TypeError`.
+   */
+  gmail?: GmailClient | null
+  /**
+   * Refund/dispute ops backing `proposal.apply`'s `refund` executor (Task 16). Same optional/`null`
+   * default shape as `gmail` above.
+   */
+  refundOps?: RefundOps | null
+  /** Config `SUPPORT_ADDRESS`, threaded to `ApplyProposalDeps`. Defaults to `''` when omitted. */
+  supportAddress?: string
+  /**
+   * Owner-notification seam, threaded to `ApplyProposalDeps` (dead-letter growth, Task 14) and any
+   * executor that needs it. Defaults to `createNoopNotifier(deps.alert)` when omitted — same
+   * alert-and-false degrade `index.ts`'s own `notify` binding falls back to when Telegram isn't
+   * configured.
+   */
+  notify?: NotifyOwner
+  /** The admin app's own base URL, threaded to `ApplyProposalDeps` (dead-letter proposal links). Defaults to `''` when omitted. */
+  adminBaseUrl?: string
 }
 
 export interface Queue {
@@ -139,11 +163,19 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
       publishablePublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
     },
-    // Task 16: the apply-time CJ product-webhook subscribe needs only `subscribeProductWebhook`
-    // off the same supplier adapter every other queue here already threads through — no
-    // no-config fallback needed (unlike `shopify`/`proposalShopify` above), since `deps.adapter`
-    // is required on `FulfillmentQueueDeps` and already used unconditionally by `placeOrderDeps`.
+    // The full supplier adapter every other queue here already threads through covers this Pick
+    // unconditionally (subscribeProductWebhook for new_listing, getDisputeOptions/openDispute for
+    // Task 16's refund executor) — no no-config fallback needed (unlike `shopify`/`proposalShopify`
+    // above), since `deps.adapter` is required on `FulfillmentQueueDeps`.
     adapter: deps.adapter,
+    // Tasks 15/16 fallback stubs: `null` degrades those executors to a loud alert-and-fail rather
+    // than a `TypeError`, same spirit as `shopifyNotConfigured` above.
+    gmail: deps.gmail ?? null,
+    refundOps: deps.refundOps ?? null,
+    supportAddress: deps.supportAddress ?? '',
+    notify: deps.notify ?? createNoopNotifier(deps.alert),
+    enqueue,
+    adminBaseUrl: deps.adminBaseUrl ?? '',
   }
 
   await createQueueRetrying(boss, 'demo.ping')

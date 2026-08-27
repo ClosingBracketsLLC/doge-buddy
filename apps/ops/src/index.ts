@@ -216,8 +216,29 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       productVariantsByProductId: shopifyNotConfigured,
     }
 
+// Built here — before `startQueue` — because `proposal.apply`'s `support_reply` executor
+// (Task 15) needs a `gmail` dep at registration time via `ApplyProposalDeps`, same reasoning as
+// `shopifyClient` above. `null` whenever `config.gmail` is unset (dev without Gmail creds) —
+// `startQueue` defaults `ApplyProposalDeps.gmail` to `null` in that case, and `applySupportReply`
+// fails loudly (alert) on a `null` gmail rather than throwing a `TypeError`. This is the SAME
+// client instance `supportPollDeps`/`supportAgentDeps` further below also use — constructing it
+// once here rather than twice.
+const gmailClient = config.gmail
+  ? createGmailClient({
+      auth: createGmailAuth({
+        saEmail: config.gmail.saEmail,
+        saKey: config.gmail.saKey,
+        impersonate: config.gmail.impersonate,
+      }),
+      fromAddress: config.gmail.supportAddress,
+    })
+  : null
+
 queue = await startQueue(config.databaseUrl, {
   adapter: supplierAdapter, settings, alert, shopify: shopifyOps, proposalShopify,
+  gmail: gmailClient, supportAddress: config.gmail?.supportAddress ?? '', notify,
+  adminBaseUrl: config.adminBaseUrl ?? '',
+  refundOps: null, // Task 16 wires the real one
 })
 
 // Task 11's day-claim breaker self-heal: flip any `agent_runs` row left stuck in 'running' past
@@ -308,16 +329,10 @@ if (config.anthropic) {
 // staying well under pg-boss's 15-minute default. `retryLimit: 0` (the cadence itself IS the
 // retry — see the handler's own doc comment) bounds how long a Railway hard-kill mid-poll can
 // black out ingest to this same window.
-const gmailClient = config.gmail
-  ? createGmailClient({
-      auth: createGmailAuth({
-        saEmail: config.gmail.saEmail,
-        saKey: config.gmail.saKey,
-        impersonate: config.gmail.impersonate,
-      }),
-      fromAddress: config.gmail.supportAddress,
-    })
-  : null
+//
+// `gmailClient` itself is built earlier now (above `startQueue`) — `proposal.apply`'s
+// `support_reply` executor (Task 15) needs it too, via `ApplyProposalDeps`; this poll and
+// `supportAgentDeps` below just reuse that same instance.
 const triageCall = config.anthropic ? createAnthropicTriageCall({ apiKey: config.anthropic.apiKey }) : null
 
 // `support.agent-run` (Phase 6B, Tasks 11-13): the per-ticket agent job the poll's 4th stage
