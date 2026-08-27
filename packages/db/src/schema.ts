@@ -153,8 +153,16 @@ export const supportTickets = pgTable('support_tickets', {
   triageFailureCount: integer('triage_failure_count').notNull().default(0),
   claimedOrderNumber: text('claimed_order_number'),
   escalationNotifiedAt: timestamp('escalation_notified_at', { withTimezone: true }),
+  // Three deliberately distinct support-agent watermarks (6B §1):
+  //  - last_agent_run_at:      stamped at CLAIM, before the SDK call — the loop/claim guard.
+  //  - last_agent_finished_at: stamped on every authoritative outcome — wall-clock, and the ONLY
+  //    column comparable to last_agent_run_at. `run_at` newer than `finished_at` means "claimed but
+  //    never finished", which is what stuck-run recovery detects.
+  //  - last_agent_prompted_at: the ticket's own MESSAGE-time prompt watermark (set to the run's
+  //    thread snapshot), used to filter a resumed run's thread. NOT comparable to the two above.
   lastAgentRunAt: timestamp('last_agent_run_at', { withTimezone: true }),
   lastAgentPromptedAt: timestamp('last_agent_prompted_at', { withTimezone: true }),
+  lastAgentFinishedAt: timestamp('last_agent_finished_at', { withTimezone: true }),
   agentFailureCount: integer('agent_failure_count').notNull().default(0),
   createdAt: createdAt(),
   updatedAt: updatedAt(),

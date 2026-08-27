@@ -130,6 +130,7 @@ describe('executeSupportAgentRun', () => {
       lastInboundAt?: Date | null
       lastAgentRunAt?: Date | null
       lastAgentPromptedAt?: Date | null
+      lastAgentFinishedAt?: Date | null
       agentFailureCount?: number
       agentSessionId?: string | null
       escalationNotifiedAt?: Date | null
@@ -148,6 +149,7 @@ describe('executeSupportAgentRun', () => {
         lastInboundAt: opts.lastInboundAt === undefined ? minutesAgo(30) : opts.lastInboundAt,
         lastAgentRunAt: opts.lastAgentRunAt ?? null,
         lastAgentPromptedAt: opts.lastAgentPromptedAt ?? null,
+        lastAgentFinishedAt: opts.lastAgentFinishedAt ?? null,
         agentFailureCount: opts.agentFailureCount ?? 0,
         agentSessionId: opts.agentSessionId ?? null,
         escalationNotifiedAt: opts.escalationNotifiedAt ?? null,
@@ -356,6 +358,7 @@ describe('executeSupportAgentRun', () => {
     it('re-claims on new inbound after a completed run', async () => {
       const ticketId = await seedTicket({
         lastAgentRunAt: minutesAgo(10),
+        lastAgentFinishedAt: minutesAgo(10),
         lastAgentPromptedAt: minutesAgo(10),
         lastInboundAt: minutesAgo(2),
       })
@@ -363,23 +366,125 @@ describe('executeSupportAgentRun', () => {
       await executeSupportAgentRun(makeDeps(), ticketId)
 
       expect(runFn).toHaveBeenCalledTimes(1)
-      expect((await ticketById(ticketId)).lastAgentRunAt).toEqual(NOW)
+      const ticket = await ticketById(ticketId)
+      expect(ticket.lastAgentRunAt).toEqual(NOW)
+      expect(ticket.agentFailureCount).toBe(0)
     })
 
-    it('re-claims a stuck run and increments agent_failure_count', async () => {
-      const ticketId = await seedTicket({
-        lastAgentRunAt: minutesAgo(25),
-        lastAgentPromptedAt: minutesAgo(40),
-        lastInboundAt: minutesAgo(45),
+    // The three watermarks: `last_agent_run_at` and `last_agent_finished_at` are wall-clock and
+    // comparable; `last_agent_prompted_at` is MESSAGE-time and is not. Comparing the prompt
+    // watermark against the claim stamp made every completed run look stuck 20 minutes later — a
+    // re-run of settled tickets on a timer, at real cost. These four cases pin the corrected gate.
+    describe('stuck gate (wall-clock only)', () => {
+      it('A: a run that finished 60 minutes ago claims on new inbound, with no failure charged', async () => {
+        const ticketId = await seedTicket({
+          lastAgentRunAt: minutesAgo(60),
+          lastAgentFinishedAt: minutesAgo(59),
+          lastAgentPromptedAt: minutesAgo(61),
+          lastInboundAt: minutesAgo(2),
+        })
+
+        await executeSupportAgentRun(makeDeps(), ticketId)
+
+        expect(runFn).toHaveBeenCalledTimes(1)
+        expect((await ticketById(ticketId)).agentFailureCount).toBe(0)
       })
 
-      await executeSupportAgentRun(makeDeps(), ticketId)
+      it('B: the same ticket already carrying one failure still is not charged a second', async () => {
+        const ticketId = await seedTicket({
+          agentFailureCount: 1,
+          lastAgentRunAt: minutesAgo(60),
+          lastAgentFinishedAt: minutesAgo(59),
+          lastInboundAt: minutesAgo(2),
+        })
 
-      expect(runFn).toHaveBeenCalledTimes(1)
-      const ticket = await ticketById(ticketId)
-      expect(ticket.agentFailureCount).toBe(1)
-      expect(ticket.status).toBe('triaged')
-      expect(ticket.lastAgentRunAt).toEqual(NOW)
+        await executeSupportAgentRun(makeDeps(), ticketId)
+
+        // The bug this pins: charging a healthy new-inbound claim would escalate this ticket here.
+        expect(runFn).toHaveBeenCalledTimes(1)
+        const ticket = await ticketById(ticketId)
+        expect(ticket.agentFailureCount).toBe(1)
+        expect(ticket.status).toBe('triaged')
+      })
+
+      it('C: a completed run with no new inbound is not claimable 25 minutes later', async () => {
+        const ticketId = await seedTicket({
+          lastAgentRunAt: minutesAgo(25),
+          lastAgentFinishedAt: minutesAgo(24),
+          // Message-time watermark, deliberately older than the claim stamp: the degenerate
+          // comparison would read this as "stuck" and burn a run on a settled ticket.
+          lastAgentPromptedAt: minutesAgo(50),
+          lastInboundAt: minutesAgo(50),
+        })
+
+        await executeSupportAgentRun(makeDeps(), ticketId)
+
+        expect(runFn).not.toHaveBeenCalled()
+        expect(await auditRows(AGENT_RUN_SKIPPED_ACTION, ticketId)).toHaveLength(1)
+        expect((await ticketById(ticketId)).lastAgentRunAt).toEqual(minutesAgo(25))
+      })
+
+      it('D: a true hard-kill (claimed, never finished) re-claims and charges a failure', async () => {
+        const ticketId = await seedTicket({
+          lastAgentRunAt: minutesAgo(25),
+          lastAgentFinishedAt: null,
+          lastAgentPromptedAt: minutesAgo(40),
+          lastInboundAt: minutesAgo(45),
+        })
+
+        await executeSupportAgentRun(makeDeps(), ticketId)
+
+        expect(runFn).toHaveBeenCalledTimes(1)
+        const ticket = await ticketById(ticketId)
+        expect(ticket.agentFailureCount).toBe(1)
+        expect(ticket.status).toBe('triaged')
+        expect(ticket.lastAgentRunAt).toEqual(NOW)
+      })
+
+      it('D2: a stale finish stamp from a PRIOR run also reads as a hard-kill', async () => {
+        const ticketId = await seedTicket({
+          lastAgentRunAt: minutesAgo(25),
+          // Finished before it was last claimed — the second claim never finished.
+          lastAgentFinishedAt: minutesAgo(40),
+          lastInboundAt: minutesAgo(45),
+        })
+
+        await executeSupportAgentRun(makeDeps(), ticketId)
+
+        expect(runFn).toHaveBeenCalledTimes(1)
+        expect((await ticketById(ticketId)).agentFailureCount).toBe(1)
+      })
+
+      it('F: new inbound on a never-finished claim is a new-work claim, not a failure', async () => {
+        // Both branches would authorize this one: the claim is 25 minutes old and never finished
+        // (stuck), AND the customer wrote again since. New work wins — the run is about to happen
+        // for a legitimate reason, so charging it a failure would penalize a healthy ticket.
+        const ticketId = await seedTicket({
+          lastAgentRunAt: minutesAgo(25),
+          lastAgentFinishedAt: null,
+          lastInboundAt: minutesAgo(5),
+        })
+
+        await executeSupportAgentRun(makeDeps(), ticketId)
+
+        expect(runFn).toHaveBeenCalledTimes(1)
+        expect((await ticketById(ticketId)).agentFailureCount).toBe(0)
+      })
+
+      it('E: a stuck-aged claim that DID finish claims on new inbound without a failure', async () => {
+        const ticketId = await seedTicket({
+          lastAgentRunAt: minutesAgo(25),
+          lastAgentFinishedAt: minutesAgo(24),
+          lastInboundAt: minutesAgo(2),
+        })
+
+        await executeSupportAgentRun(makeDeps(), ticketId)
+
+        expect(runFn).toHaveBeenCalledTimes(1)
+        const ticket = await ticketById(ticketId)
+        expect(ticket.agentFailureCount).toBe(0)
+        expect(ticket.lastAgentRunAt).toEqual(NOW)
+      })
     })
 
     // What makes the claim a true CAS rather than a check-then-act: the predicate is evaluated
@@ -411,11 +516,17 @@ describe('executeSupportAgentRun', () => {
         agentFailureCount: 1,
         agentSessionId: 'session-poisoned',
         lastAgentRunAt: minutesAgo(25),
-        lastAgentPromptedAt: null,
+        lastAgentFinishedAt: null,
         escalationNotifiedAt: NOW,
       })
+      const throwIfCalled = vi.fn(async () => {
+        throw new Error('runFn must not be called on the stuck-escalation path')
+      })
 
-      await executeSupportAgentRun(makeDeps(), ticketId)
+      await executeSupportAgentRun(
+        makeDeps({ runFn: throwIfCalled as unknown as SupportAgentJobDeps['runFn'] }),
+        ticketId,
+      )
 
       const ticket = await ticketById(ticketId)
       expect(ticket.status).toBe('escalated')
@@ -423,9 +534,52 @@ describe('executeSupportAgentRun', () => {
       expect(ticket.escalationNotifiedAt).toBeNull()
       expect(ticket.agentFailureCount).toBe(2)
       expect(ticket.agentSessionId).toBeNull()
-      expect(runFn).not.toHaveBeenCalled()
+      expect(throwIfCalled).not.toHaveBeenCalled()
       expect(await runRows(ticketId)).toEqual([])
+      expect(await auditRows(AGENT_RUN_SKIPPED_ACTION, ticketId)).toHaveLength(1)
       expect(notify).not.toHaveBeenCalled()
+    })
+
+    // The stranding bug this pins: with the increment and the escalation in SEPARATE transactions,
+    // a hard-kill between them leaves the ticket `triaged` at count 2 — below no selection
+    // predicate, above the `< 2` claim guard, never escalated, so never notified. Forever, with
+    // zero owner signal. One commit means that state is never reachable, not merely unlikely.
+    it('commits the ceiling escalation and the increment together — (triaged, 2) is unobservable', async () => {
+      const ticketId = await seedTicket({
+        agentFailureCount: 1,
+        lastAgentRunAt: minutesAgo(25),
+        lastAgentFinishedAt: null,
+      })
+      const observations: string[] = []
+      const holder = await pool.connect()
+      try {
+        await holder.query('BEGIN')
+        await holder.query('SELECT id FROM support_tickets WHERE id = $1 FOR UPDATE', [ticketId])
+        const job = executeSupportAgentRun(makeDeps(), ticketId)
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        // Release: from here the job's claim transaction runs, and this connection polls every
+        // committed state it can see until the job settles.
+        await holder.query('COMMIT')
+        let running = true
+        void job.then(() => {
+          running = false
+        })
+        while (running) {
+          const { rows } = await holder.query(
+            'SELECT status, agent_failure_count FROM support_tickets WHERE id = $1',
+            [ticketId],
+          )
+          observations.push(`${rows[0].status}:${rows[0].agent_failure_count}`)
+        }
+        await job
+      } finally {
+        holder.release()
+      }
+
+      expect(observations).not.toContain('triaged:2')
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('escalated')
+      expect(ticket.agentFailureCount).toBe(2)
     })
   })
 
@@ -445,6 +599,28 @@ describe('executeSupportAgentRun', () => {
       expect(ticket.agentFailureCount).toBe(1)
       expect(contexts[0]?.resumeSessionId).toBeNull()
       expect(contexts[0]?.isResume).toBe(false)
+    })
+
+    it('does not clear a session id that changed while the store was being checked', async () => {
+      const ticketId = await seedTicket({ agentSessionId: 'session-gone' })
+      sessionStore = {
+        append: vi.fn(async () => {}),
+        // Whatever else writes the column (Task 12's outcome handling, an owner reject) lands
+        // while this load is in flight — the stale clear must not erase the newer value.
+        load: vi.fn(async () => {
+          await db
+            .update(supportTickets)
+            .set({ agentSessionId: 'session-newer' })
+            .where(eq(supportTickets.id, ticketId))
+          return null
+        }),
+        listSubkeys: vi.fn(async () => []),
+      } as unknown as SessionStore
+
+      await executeSupportAgentRun(makeDeps({ sessionStore }), ticketId)
+
+      expect((await ticketById(ticketId)).agentSessionId).toBe('session-newer')
+      expect(contexts[0]?.resumeSessionId).toBeNull()
     })
 
     it('resumes a stored session and sends only messages newer than the prompt watermark', async () => {
@@ -515,6 +691,25 @@ describe('executeSupportAgentRun', () => {
 
       expect(runFn).toHaveBeenCalledTimes(1)
       expect((await ticketById(ticketId)).lastAgentRunAt).toEqual(NOW)
+    })
+
+    it('one job throwing does not abandon the rest of the batch, and still fails it', async () => {
+      const firstId = await seedTicket()
+      const secondId = await seedTicket()
+      runFn = vi.fn(async (_deps: unknown, input: SupportRunInput) => {
+        contexts.push(input.ctx)
+        if (input.ctx.ticket.id === firstId) throw new Error('boom')
+        return benignResult()
+      })
+      const deps = makeDeps({ runFn: runFn as unknown as SupportAgentJobDeps['runFn'] })
+
+      await expect(
+        supportAgentRunHandler(deps)([{ data: { ticketId: firstId } }, { data: { ticketId: secondId } }] as never),
+      ).rejects.toThrow('boom')
+
+      // The second ticket was still attempted — it must not be failed without ever being tried.
+      expect(contexts.map((c) => c.ticket.id)).toEqual([firstId, secondId])
+      expect((await ticketById(secondId)).lastAgentRunAt).toEqual(NOW)
     })
   })
 
