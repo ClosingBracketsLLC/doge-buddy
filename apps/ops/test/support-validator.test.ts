@@ -1,7 +1,7 @@
 import { createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import { eq, like } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { validateReplyBody, validateRefundIntent, validateSupportOutput } from '../src/support/validator.ts'
+import { validateReplyBody, validateRefundIntent, validateSupportOutput, senderAuthNote } from '../src/support/validator.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -571,6 +571,56 @@ describe('support validator', () => {
       },
     )
 
+    // Fix round 1 (Task 18 review), CRITICAL 1: at APPROVE time the row being approved is itself
+    // `pending` — one of the LIVE statuses the bound sums — so without excluding it, it counts
+    // against its own total and the bound degenerates to `amount > total - amount`. Reproduced
+    // here exactly: a 100%-of-total ($50-on-$50) refund failed `refund_exceeds_total` with
+    // "remaining 0c" before the fix.
+    describe('excludeProposalId (self-exclusion at approve time)', () => {
+      it('a 100%-of-total refund succeeds when the row being approved excludes itself from the bound', async () => {
+        const orderId = await seedOrder(5000)
+        const ticketId = await seedTicket({ orderId })
+        await seedInboundMessage(ticketId, { authResults: 'dmarc=pass' })
+        const ownProposalId = await seedRefundProposal({ orderId, ticketId, status: 'pending', amountCents: 5000 })
+
+        const result = await validateRefundIntent(
+          db,
+          { id: ticketId, orderId },
+          { amountCents: 5000, openCjDispute: false },
+          ownProposalId,
+        )
+        expect(result).toEqual({ ok: true })
+      })
+
+      it('without excludeProposalId, the same 100%-of-total refund fails (regression check on the bug itself)', async () => {
+        const orderId = await seedOrder(5000)
+        const ticketId = await seedTicket({ orderId })
+        await seedInboundMessage(ticketId, { authResults: 'dmarc=pass' })
+        await seedRefundProposal({ orderId, ticketId, status: 'pending', amountCents: 5000 })
+
+        const result = await validateRefundIntent(db, { id: ticketId, orderId }, { amountCents: 5000, openCjDispute: false })
+        expect(result.ok).toBe(false)
+        expect((result as { code: string }).code).toBe('refund_exceeds_total')
+      })
+
+      it('exclusion is only of SELF: a genuine second live refund proposal on the same order still blocks', async () => {
+        const orderId = await seedOrder(5000)
+        const ticketId = await seedTicket({ orderId })
+        await seedInboundMessage(ticketId, { authResults: 'dmarc=pass' })
+        await seedRefundProposal({ orderId, ticketId, status: 'approved', amountCents: 1000 })
+        const ownProposalId = await seedRefundProposal({ orderId, ticketId, status: 'pending', amountCents: 4500 })
+
+        const result = await validateRefundIntent(
+          db,
+          { id: ticketId, orderId },
+          { amountCents: 4500, openCjDispute: false },
+          ownProposalId,
+        )
+        expect(result.ok).toBe(false)
+        expect((result as { code: string }).code).toBe('refund_exceeds_total')
+      })
+    })
+
     it('does not count rejected, expired, or failed prior proposals toward the bound', async () => {
       const orderId = await seedOrder(2000)
       await seedRefundProposal({ orderId, status: 'rejected', amountCents: 1900 })
@@ -607,6 +657,26 @@ describe('support validator', () => {
         { id: ticketId, orderId },
         { amountCents: 500, openCjDispute: false },
       )
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('refund_sender_unauthenticated')
+    })
+
+    // Fix round 1 (Task 18 review), M7: `senderAuthNote` (the display helper submit.ts's Telegram
+    // body and the admin refund summary both now use) must reuse the EXACT word-bounded regex
+    // this gate enforces — before the fix, those two display call sites re-typed `/dmarc=pass/i`
+    // with no word boundaries, which would have shown "verified" for a crafted `xdmarc=pass`
+    // header that this gate correctly refuses.
+    it('senderAuthNote: a word-embedded "xdmarc=pass" is NOT treated as verified (word-boundary match, same as the gate)', () => {
+      expect(senderAuthNote('xdmarc=pass')).toBe('auth: NOT verified')
+      expect(senderAuthNote('dkim=pass; dmarc=pass; spf=pass')).toBe('auth: dmarc=pass')
+      expect(senderAuthNote(null)).toBe('auth: NOT verified')
+    })
+
+    it('the gate itself refuses the same crafted "xdmarc=pass" header (regression pin for the M7 helper extraction)', async () => {
+      const orderId = await seedOrder(2000)
+      const ticketId = await seedTicket({ orderId })
+      await seedInboundMessage(ticketId, { authResults: 'xdmarc=pass' })
+      const result = await validateRefundIntent(db, { id: ticketId, orderId }, { amountCents: 500, openCjDispute: false })
       expect(result.ok).toBe(false)
       expect((result as { code: string }).code).toBe('refund_sender_unauthenticated')
     })

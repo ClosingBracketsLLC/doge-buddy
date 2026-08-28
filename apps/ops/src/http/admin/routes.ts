@@ -23,6 +23,7 @@ import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts
 import { onSupportProposalRejected, validateSupportProposalForApproval } from '../../proposals/support-decision.ts'
 import { applyProposalTransition, StaleProposalStatusError } from '../../proposals/transitions.ts'
 import { SETTINGS_DEFAULTS, type Settings, type SettingKey, type WorkflowMode } from '../../settings.ts'
+import { senderAuthNote } from '../../support/validator.ts'
 import {
   consumeLoginToken,
   createLoginToken,
@@ -679,13 +680,17 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       async function loadProposalDetailExtras(row: ProposalRow): Promise<ProposalDetailExtras> {
         if (row.type !== 'refund') return {}
 
-        const payload = row.payload as { orderId?: string }
+        // Resolved via `row.orderId` (Task 18 review, M9) — the proposals row's own column, and
+        // the SAME key `validateRefundIntent`'s accumulation bound checks — not `payload.orderId`.
+        // Both are set to the same value at submit time in the only current caller, but reading
+        // the row's own column is what keeps this display never able to disagree with the column
+        // the actual gate enforces against, even if a future payload/row divergence ever appeared.
         let orderNumber: string | null = null
-        if (payload.orderId) {
+        if (row.orderId) {
           const [order] = await deps.db
             .select({ number: orders.shopifyOrderNumber })
             .from(orders)
-            .where(eq(orders.id, payload.orderId))
+            .where(eq(orders.id, row.orderId))
             .limit(1)
           orderNumber = order?.number ?? null
         }
@@ -698,8 +703,9 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             .where(and(eq(supportMessages.ticketId, row.ticketId), eq(supportMessages.direction, 'inbound')))
             .orderBy(sql`${supportMessages.sentAt} DESC NULLS LAST, ${supportMessages.createdAt} DESC, ${supportMessages.id} DESC`)
             .limit(1)
-          const auth = latestInbound?.authResults ?? null
-          authNote = auth !== null && /dmarc=pass/i.test(auth) ? 'auth: dmarc=pass' : 'auth: NOT verified'
+          // Shared with the enforcement gate (Task 18 review, M7) — see `senderAuthNote`'s own doc
+          // comment for why this must never be a second, locally-typed regex.
+          authNote = senderAuthNote(latestInbound?.authResults ?? null)
         }
 
         const [refundIssuedRow] = await deps.db
@@ -864,30 +870,50 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             }
 
             const status = decision === 'approve' ? 'approved' : 'rejected'
+            const isSupportRejectDecision = decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')
             try {
-              await applyProposalTransition(deps.db, id, 'pending', status, {
-                decidedBy: 'owner',
-                decidedAt: new Date(),
-                actionTokenHash: null,
-                ...(payloadToStore !== undefined ? { payload: payloadToStore } : {}),
-              })
+              if (isSupportRejectDecision) {
+                // Atomic (Task 18 review, M5): the reject transition, its own audit row, the
+                // sibling proposal's expiry+audit, and the ticket's escalation all land in ONE
+                // transaction — mirroring `apply-shared.ts`'s `failStaleAndHandBack` precedent. A
+                // throw anywhere inside rolls EVERYTHING back, including the transition itself, so
+                // this can never partially land (e.g. proposal rejected but the ticket left
+                // un-escalated).
+                await deps.db.transaction(async (tx) => {
+                  await applyProposalTransition(tx, id, 'pending', status, {
+                    decidedBy: 'owner',
+                    decidedAt: new Date(),
+                    actionTokenHash: null,
+                  })
+                  await tx.insert(auditLog).values({
+                    actor: 'owner',
+                    action: 'proposal.reject',
+                    entityType: 'proposal',
+                    entityId: id,
+                    detail: { via: 'admin', edited },
+                  })
+                  await onSupportProposalRejected(tx, { id, ticketId: row.ticketId, type: row.type })
+                })
+              } else {
+                await applyProposalTransition(deps.db, id, 'pending', status, {
+                  decidedBy: 'owner',
+                  decidedAt: new Date(),
+                  actionTokenHash: null,
+                  ...(payloadToStore !== undefined ? { payload: payloadToStore } : {}),
+                })
+                await deps.db.insert(auditLog).values({
+                  actor: 'owner',
+                  action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
+                  entityType: 'proposal',
+                  entityId: id,
+                  detail: { via: 'admin', edited },
+                })
+              }
             } catch (err) {
               if (err instanceof StaleProposalStatusError) {
                 return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Already handled.</p>`))
               }
               throw err
-            }
-
-            await deps.db.insert(auditLog).values({
-              actor: 'owner',
-              action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
-              entityType: 'proposal',
-              entityId: id,
-              detail: { via: 'admin', edited },
-            })
-
-            if (decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')) {
-              await onSupportProposalRejected(deps.db, { id, ticketId: row.ticketId, type: row.type })
             }
 
             if (decision === 'approve') {

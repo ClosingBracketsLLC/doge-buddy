@@ -4,6 +4,12 @@ import { and, eq } from 'drizzle-orm'
 import { hasLiveSiblingRefundProposal, validateReplyBody, validateRefundIntent, type ValidationFailure } from '../support/validator.ts'
 
 type Db = ReturnType<typeof createDb>['db']
+/** The type of the callback's `tx` parameter inside `db.transaction(async (tx) => {...})` — same
+ * alias `proposals/transitions.ts` and `support/ingest.ts` declare, for the same reason:
+ * `onSupportProposalRejected` (Task 18 review, M5) must be callable with a transaction handle so
+ * its writes can join the reject decision's own transition+audit atomically. */
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
+type DbOrTx = Db | Tx
 type ProposalRow = typeof proposals.$inferSelect
 
 /** The two support-decision proposal types this module knows about (support_reply / refund) — the
@@ -39,6 +45,10 @@ function isSupportProposalType(type: string): type is SupportProposalType {
  *
  * Called from BOTH decision surfaces (the session-authed admin POST and the public one-click `/a/`
  * route) — the owner's "no" means the same thing regardless of which surface they used to say it.
+ * Both callers pass their open transaction's `tx` (Task 18 review, M5) so the reject decision's own
+ * proposal transition+audit and everything this function does land as ONE atomic write — mirroring
+ * `apply-shared.ts`'s `failStaleAndHandBack` precedent, and for the same reason: a reject must never
+ * partially land (proposal rejected but the ticket not escalated, or vice versa).
  *
  * The ticket UPDATE is guarded on `status = 'awaiting_approval'` (the status a ticket is in for as
  * long as a proposal on it is undecided — see `jobs/support-agent-run.ts`'s own flip to
@@ -47,7 +57,7 @@ function isSupportProposalType(type: string): type is SupportProposalType {
  * discipline as every other guarded UPDATE in this codebase.
  */
 export async function onSupportProposalRejected(
-  db: Db,
+  db: DbOrTx,
   row: { id: string; ticketId: string | null; type: string },
 ): Promise<void> {
   if (row.ticketId === null || !isSupportProposalType(row.type)) return
@@ -108,7 +118,14 @@ export type SupportApprovalValidation = { ok: true; payload: unknown } | Validat
  *
  * `refund` re-runs `validateRefundIntent` against the row's own `ticketId`/`orderId` — a refund
  * payload carries no ticket id of its own, so the proposals row's columns are the only source for
- * it.
+ * it. Passes `row.id` as `excludeProposalId` (Task 18 review, CRITICAL 1): the row being approved
+ * is itself `pending` — one of the LIVE statuses the accumulation bound sums — so without excluding
+ * it, it counts against its own total and the bound degenerates to `amount > total - amount`,
+ * permanently refusing any refund over half the order (reproduced: a 100%-of-total refund always
+ * failed `refund_exceeds_total`). A null `row.ticketId` (Task 18 review, IMPORTANT 2) is refused
+ * EXPLICITLY here rather than coerced to `''` and handed to a uuid-typed column comparison — that
+ * coercion made Postgres throw, which this route's generic error handling turned into a misleading
+ * "already handled" page instead of a readable validation failure.
  *
  * On success, returns `{ ok: true, payload }` — for `support_reply` this is `payload` with `body`
  * REPLACED by `validateReplyBody`'s `normalizedBody` (Task 18 ruling: "what was screened is what
@@ -133,11 +150,15 @@ export async function validateSupportProposalForApproval(
   }
 
   if (row.type === 'refund') {
+    if (row.ticketId === null) {
+      return { ok: false, code: 'refund_unverified_order', detail: 'proposal has no linked ticket' }
+    }
     const parsed = RefundPayloadSchema.parse(payload)
     const result = await validateRefundIntent(
       db,
-      { id: row.ticketId ?? '', orderId: row.orderId },
+      { id: row.ticketId, orderId: row.orderId },
       { amountCents: parsed.amountCents, openCjDispute: parsed.openCjDispute, cjDisputeReasonId: parsed.cjDisputeReasonId },
+      row.id,
     )
     if (!result.ok) return result
     return { ok: true, payload: parsed }

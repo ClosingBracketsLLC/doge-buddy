@@ -1,4 +1,4 @@
-import { auditLog, createDb, orders, proposals, supportTickets } from '@doge-buddy/db'
+import { auditLog, createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import { and, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
@@ -52,6 +52,8 @@ describe('proposals queue + detail pages', () => {
       createdProposalIds = []
     }
     if (createdTicketIds.length > 0) {
+      // supportMessages.ticketId has no ON DELETE CASCADE — messages must go first.
+      await db.delete(supportMessages).where(inArray(supportMessages.ticketId, createdTicketIds))
       await db.delete(supportTickets).where(inArray(supportTickets.id, createdTicketIds))
       createdTicketIds = []
     }
@@ -143,17 +145,32 @@ describe('proposals queue + detail pages', () => {
     return ticket!
   }
 
-  async function seedOrder(number = '#4001') {
+  async function seedOrder(number = '#4001', totalCents?: number) {
     const [order] = await db
       .insert(orders)
       .values({
         shopifyOrderGid: `gid://shopify/Order/${crypto.randomUUID()}`,
         shopifyOrderNumber: number,
         isTest: true,
+        ...(totalCents !== undefined ? { totalCents } : {}),
       })
       .returning()
     createdOrderIds.push(order!.id)
     return order!
+  }
+
+  /** A dmarc=pass-authenticated inbound message on the ticket — `validateRefundIntent`'s
+   * sender-authentication check needs one before it will ever reach the accumulation bound. */
+  async function seedAuthenticatedInbound(ticketId: string): Promise<void> {
+    await db.insert(supportMessages).values({
+      ticketId,
+      gmailMessageId: `t18-msg-${crypto.randomUUID()}`,
+      direction: 'inbound',
+      fromEmail: 'buyer@example.com',
+      bodyText: 'please refund me',
+      authResults: 'dkim=pass; dmarc=pass; spf=pass',
+      sentAt: new Date(),
+    })
   }
 
   function supportReplyPayload(ticketId: string, body: string) {
@@ -608,4 +625,112 @@ describe('proposals queue + detail pages', () => {
 
     await app.close()
   })
+
+  // -- Fix round 1 (Task 18 review) ---------------------------------------------------------------
+
+  // CRITICAL 1: the accumulation bound must not count the row being approved against its own
+  // total — before the fix, `pending` (the row's own status while approving) was itself one of the
+  // LIVE statuses summed, so a 100%-of-total refund always failed `refund_exceeds_total` (reported
+  // remaining as 0 on a $50-on-$50 refund).
+  it('18. approve of a 100%-of-total refund succeeds: the row being approved is excluded from its own accumulation bound', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    await seedAuthenticatedInbound(ticket.id)
+    const order = await seedOrder('#4200', 5000)
+    const row = await seedProposal({
+      type: 'refund',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id, { amountCents: 5000 }),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/approve`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: '',
+    })
+
+    expect(res.statusCode).toBe(303)
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('approved')
+    expect(deps.enqueue).toHaveBeenCalledTimes(1)
+
+    await app.close()
+  })
+
+  // The self-exclusion must be exactly that — self only. A GENUINE second live refund proposal on
+  // the same order still counts against the bound.
+  it('19. approve of a refund still blocks on a GENUINE prior live refund proposal on the same order (exclusion is only of self)', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    await seedAuthenticatedInbound(ticket.id)
+    const order = await seedOrder('#4201', 5000)
+    // A genuine, DIFFERENT, already-approved refund proposal on the same order — 1000c live.
+    await seedProposal({
+      type: 'refund',
+      status: 'approved',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id, { amountCents: 1000 }),
+    })
+    const row = await seedProposal({
+      type: 'refund',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id, { amountCents: 4500 }), // 1000 + 4500 > 5000
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/approve`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: '',
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toContain('refund_exceeds_total')
+
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('pending')
+
+    await app.close()
+  })
+
+  // IMPORTANT 2: a refund proposal with a null ticketId must fail with a readable validation
+  // code, not `''` coerced into a uuid comparison (which made Postgres throw and rendered a
+  // misleading "already handled" page instead of a diagnosable error).
+  it('20. approve of a refund with a null ticketId -> 400 refund_unverified_order (readable error, not "already handled"), stays pending', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const order = await seedOrder()
+    const row = await seedProposal({
+      type: 'refund',
+      orderId: order.id,
+      payload: refundPayload(order.id),
+      // ticketId deliberately omitted -> NULL
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/approve`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: '',
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toContain('refund_unverified_order')
+    expect(res.body).not.toContain('Already handled')
+
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('pending')
+
+    await app.close()
+  })
+
 })

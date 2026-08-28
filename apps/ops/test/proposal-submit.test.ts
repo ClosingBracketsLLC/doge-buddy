@@ -510,4 +510,29 @@ describe('submitProposal', () => {
     expect(row).toBeDefined()
     expect(row!.actionTokenHash).toMatch(/^[a-f0-9]{64}$/)
   })
+
+  // Fix round 1 (Task 18 review), M8: the WHOLE assembled Telegram body must be capped, not any
+  // one field — a hostile/very-long ticket subject must not blow the send past Telegram's message
+  // limit and silently suppress the owner's page.
+  it('support_reply notify body: a 4000-char subject is capped — the assembled body never exceeds 3500 chars', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket({ subject: 'S'.repeat(4000) })
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: 'A short reply.', threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.body.length).toBeLessThanOrEqual(3500)
+  })
 })

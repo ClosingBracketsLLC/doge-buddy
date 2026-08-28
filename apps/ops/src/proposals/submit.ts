@@ -8,6 +8,7 @@ import { and, eq, sql } from 'drizzle-orm'
 import type { SendOpts } from '../fulfillment/types.ts'
 import type { NotifyOwner } from '../notify/notify.ts'
 import type { Settings, SettingKey } from '../settings.ts'
+import { senderAuthNote } from '../support/validator.ts'
 import { generateActionToken } from './tokens.ts'
 
 type Db = ReturnType<typeof createDb>['db']
@@ -59,6 +60,11 @@ export interface SubmitProposalDeps {
  * `validateRefundIntent` — "latest inbound message" must never depend on unstable row order when
  * two messages land the same second. A ticket with no inbound message at all (shouldn't happen for
  * a real ticket, but this is notify-body text, not a security gate) reads as unverified.
+ *
+ * The pass/fail JUDGMENT itself is `support/validator.ts`'s `senderAuthNote` (Task 18 review, M7)
+ * — this function only does the DB fetch. Before this fix it re-typed the regex locally
+ * (`/dmarc=pass/i`, no word boundaries), which could disagree with the actual refund gate
+ * (`DMARC_PASS_RE`, word-bounded) on a crafted header like `xdmarc=pass`.
  */
 async function senderAuthNoteForTicket(db: Db, ticketId: string): Promise<string> {
   const [latestInbound] = await db
@@ -67,8 +73,7 @@ async function senderAuthNoteForTicket(db: Db, ticketId: string): Promise<string
     .where(and(eq(supportMessages.ticketId, ticketId), eq(supportMessages.direction, 'inbound')))
     .orderBy(sql`${supportMessages.sentAt} DESC NULLS LAST, ${supportMessages.createdAt} DESC, ${supportMessages.id} DESC`)
     .limit(1)
-  const auth = latestInbound?.authResults ?? null
-  return auth !== null && /dmarc=pass/i.test(auth) ? 'auth: dmarc=pass' : 'auth: NOT verified'
+  return senderAuthNote(latestInbound?.authResults ?? null)
 }
 
 /**
@@ -149,6 +154,21 @@ interface NotifyBodyCtx {
 }
 
 /**
+ * Hard backstop under Telegram's ~4096-char message limit (Task 18 review, M8 — mirrors
+ * `support/escalate.ts`'s own `BODY_MAX_CHARS` + comment). Every field folded into a notify body
+ * here is untrusted, effectively-unbounded text — a ticket subject or a refund reason a customer
+ * (or a hostile one) controls the length of — that no per-field truncation above accounts for. A
+ * body over Telegram's limit fails the send outright, which would silently suppress the owner's
+ * page entirely; capping the WHOLE assembled string here is what keeps that from ever happening,
+ * at the cost of truncating what the owner sees rather than what they're warned about.
+ */
+const NOTIFY_BODY_MAX_CHARS = 3500
+
+function capNotifyBody(body: string): string {
+  return body.length > NOTIFY_BODY_MAX_CHARS ? body.slice(0, NOTIFY_BODY_MAX_CHARS) : body
+}
+
+/**
  * Per-type Telegram notify body (Task 18, spec §5). `support_reply` and `refund` get dedicated,
  * human-readable bodies built from the DB (see the two builders above); every other type
  * (`new_listing`, `deprecate_product`) keeps the ORIGINAL generic body verbatim — summary,
@@ -158,19 +178,21 @@ interface NotifyBodyCtx {
  */
 export async function buildProposalNotifyBody(type: ProposalType, payload: unknown, ctx: NotifyBodyCtx): Promise<string> {
   if (type === 'support_reply') {
-    return buildSupportReplyNotifyBody(ctx.db, payload as SupportReplyPayload)
+    return capNotifyBody(await buildSupportReplyNotifyBody(ctx.db, payload as SupportReplyPayload))
   }
   if (type === 'refund') {
-    return buildRefundNotifyBody(ctx.db, payload as RefundPayload, ctx.ticketId)
+    return capNotifyBody(await buildRefundNotifyBody(ctx.db, payload as RefundPayload, ctx.ticketId))
   }
 
-  return [
-    ctx.summary,
-    '',
-    '[ ] IP check done',
-    'Ritual: check TikTok Creative Center (Pet Supplies, US, 7d) — paste anything interesting into the dashboard',
-    `${ctx.adminBaseUrl}/admin/proposals/${ctx.id}`,
-  ].join('\n')
+  return capNotifyBody(
+    [
+      ctx.summary,
+      '',
+      '[ ] IP check done',
+      'Ritual: check TikTok Creative Center (Pet Supplies, US, 7d) — paste anything interesting into the dashboard',
+      `${ctx.adminBaseUrl}/admin/proposals/${ctx.id}`,
+    ].join('\n'),
+  )
 }
 
 export interface SubmitProposalInput {

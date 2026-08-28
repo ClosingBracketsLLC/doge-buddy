@@ -1,4 +1,4 @@
-import { createDb, proposals, auditLog, orders, supportTickets } from '@doge-buddy/db'
+import { createDb, proposals, auditLog, orders, supportMessages, supportTickets } from '@doge-buddy/db'
 import { and, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildServer } from '../src/server.ts'
@@ -35,6 +35,8 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
 
   afterEach(async () => {
     if (createdTicketIds.length > 0) {
+      // supportMessages.ticketId has no ON DELETE CASCADE — messages must go first.
+      await db.delete(supportMessages).where(inArray(supportMessages.ticketId, createdTicketIds))
       await db.delete(supportTickets).where(inArray(supportTickets.id, createdTicketIds))
       createdTicketIds = []
     }
@@ -85,17 +87,32 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
     return ticket!
   }
 
-  async function seedOrder(number = '#5001') {
+  async function seedOrder(number = '#5001', totalCents?: number) {
     const [order] = await db
       .insert(orders)
       .values({
         shopifyOrderGid: `gid://shopify/Order/${crypto.randomUUID()}`,
         shopifyOrderNumber: number,
         isTest: true,
+        ...(totalCents !== undefined ? { totalCents } : {}),
       })
       .returning()
     createdOrderIds.push(order!.id)
     return order!
+  }
+
+  /** A dmarc=pass-authenticated inbound message on the ticket — `validateRefundIntent`'s
+   * sender-authentication check needs one before it will ever reach the accumulation bound. */
+  async function seedAuthenticatedInbound(ticketId: string): Promise<void> {
+    await db.insert(supportMessages).values({
+      ticketId,
+      gmailMessageId: `t18-msg-${crypto.randomUUID()}`,
+      direction: 'inbound',
+      fromEmail: 'buyer@example.com',
+      bodyText: 'please refund me',
+      authResults: 'dkim=pass; dmarc=pass; spf=pass',
+      sentAt: new Date(),
+    })
   }
 
   async function seedSupportProposal(overrides: {
@@ -540,6 +557,36 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
 
     const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
     expect(after!.status).toBe('pending')
+
+    await app.close()
+  })
+
+  // -- Fix round 1 (Task 18 review) ---------------------------------------------------------------
+
+  // CRITICAL 1, one-click surface: the accumulation bound must exclude the row being approved from
+  // its own total (before the fix, `pending` — its own status while approving — was itself one of
+  // the LIVE statuses summed, so any refund over half the order, including a 100%-of-total refund,
+  // was permanently un-approvable).
+  it('15. one-click approve of a 100%-of-total refund succeeds: approved + enqueued', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    await seedAuthenticatedInbound(ticket.id)
+    const order = await seedOrder('#5200', 5000)
+    const { row, token } = await seedSupportProposal({
+      type: 'refund',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id, { amountCents: 5000 }),
+    })
+
+    const res = await app.inject({ method: 'POST', url: `/a/${row.id}/approve?t=${token}` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Approved')
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('approved')
+    expect(deps.enqueue).toHaveBeenCalledTimes(1)
 
     await app.close()
   })

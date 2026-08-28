@@ -1,5 +1,5 @@
 import { orders, proposals, supportMessages, type createDb } from '@doge-buddy/db'
-import { and, eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, inArray, ne, sql } from 'drizzle-orm'
 import type { SupportOutput } from '../agents/support-output-schema.ts'
 
 type Db = ReturnType<typeof createDb>['db']
@@ -16,6 +16,24 @@ export type ValidationResult = { ok: true; normalizedBody?: string } | Validatio
 
 function fail(code: string, detail: string): ValidationFailure {
   return { ok: false, code, detail }
+}
+
+/**
+ * SINGLE SOURCE OF TRUTH (Task 18 review, M7) for "is this sender authenticated" — the exact
+ * regex `validateRefundIntent`'s gate below enforces. Exported so every OTHER surface that needs
+ * to SHOW the same answer (submit.ts's Telegram body, the admin refund summary) reads it from
+ * here instead of re-typing a regex that could silently drift from what actually gates a refund —
+ * which is exactly what happened before this fix (those two call sites used `/dmarc=pass/i`, no
+ * word boundaries, so `xdmarc=pass` display-read as verified while the real gate below would have
+ * refused it).
+ */
+export const DMARC_PASS_RE = /\bdmarc=pass\b/i
+
+/** Cheap, human-readable sender-authentication note for display surfaces (Telegram body, admin
+ * refund summary) — NEVER a second opinion on whether a refund is allowed, just a rendering of
+ * the same `DMARC_PASS_RE` test `validateRefundIntent` runs. */
+export function senderAuthNote(authResults: string | null): string {
+  return authResults !== null && DMARC_PASS_RE.test(authResults) ? 'auth: dmarc=pass' : 'auth: NOT verified'
 }
 
 // -- Plain text --
@@ -388,11 +406,22 @@ export async function validateReplyBody(
  * authenticated (dmarc=pass on the ticket's latest inbound message), and — when the agent wants to
  * open a CJ dispute — a reason id. Every one of these re-derives from the DB; nothing here trusts
  * the agent's own numbers.
+ *
+ * `excludeProposalId` (Task 18 review, CRITICAL 1): the accumulation bound below sums every LIVE
+ * refund proposal on the order, and "LIVE" includes `pending` — which is exactly the status of the
+ * very row being approved when this runs at APPROVE time (Task 18's `validateSupportProposalForApproval`).
+ * Without excluding it, the row counts against its own total (`priorLiveSum` includes its own
+ * `amountCents`), degenerating the bound to `amount > total - amount` — permanently un-approvable
+ * for any refund over half the order total, including every 100%-of-total refund (reproduced:
+ * $50-on-$50 → `refund_exceeds_total`, remaining reported as 0). Draft-time callers
+ * (`validateSupportOutput`, called before any row exists) pass nothing — there is no self to
+ * exclude yet.
  */
 export async function validateRefundIntent(
   db: Db,
   ticket: { id: string; orderId: string | null },
   refund: { amountCents: number; openCjDispute: boolean; cjDisputeReasonId?: string },
+  excludeProposalId?: string,
 ): Promise<ValidationResult> {
   if (!ticket.orderId) return fail('refund_unverified_order', 'ticket has no linked order')
 
@@ -405,7 +434,8 @@ export async function validateRefundIntent(
   // `approved` refund is money the owner is one tap away from moving (an `approved` one is already
   // enqueued for apply), so summing only `applied` lets a second proposal be drafted, approved, and
   // applied on top of a first that lands moments later — a double refund past the order total, the
-  // exact outcome this bound exists to prevent.
+  // exact outcome this bound exists to prevent. `excludeProposalId` (see doc comment above) keeps
+  // the row being approved from counting against its own bound.
   const priorLive = await db
     .select({ amountCents: sql<number>`(${proposals.payload} ->> 'amountCents')::int` })
     .from(proposals)
@@ -414,6 +444,7 @@ export async function validateRefundIntent(
         eq(proposals.orderId, ticket.orderId),
         eq(proposals.type, 'refund'),
         inArray(proposals.status, [...LIVE_REFUND_PROPOSAL_STATUSES]),
+        ...(excludeProposalId ? [ne(proposals.id, excludeProposalId)] : []),
       ),
     )
   const priorLiveSum = priorLive.reduce((sum, row) => sum + (row.amountCents ?? 0), 0)
@@ -435,7 +466,7 @@ export async function validateRefundIntent(
     .orderBy(sql`${supportMessages.sentAt} DESC NULLS LAST, ${supportMessages.createdAt} DESC, ${supportMessages.id} DESC`)
     .limit(1)
 
-  if (!latestInbound || latestInbound.authResults === null || !/\bdmarc=pass\b/i.test(latestInbound.authResults)) {
+  if (!latestInbound || latestInbound.authResults === null || !DMARC_PASS_RE.test(latestInbound.authResults)) {
     return fail('refund_sender_unauthenticated', 'latest inbound message is not dmarc=pass authenticated')
   }
 

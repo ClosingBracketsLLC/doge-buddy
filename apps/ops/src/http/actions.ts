@@ -176,30 +176,49 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
       }
 
       const status = decision === 'approve' ? 'approved' : 'rejected'
+      const isSupportRejectDecision = decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')
       try {
-        await applyProposalTransition(deps.db, proposalId, 'pending', status, {
-          decidedBy: 'owner',
-          decidedAt: new Date(),
-          actionTokenHash: null,
-          ...(payloadToStore !== undefined ? { payload: payloadToStore } : {}),
-        })
+        if (isSupportRejectDecision) {
+          // Atomic (Task 18 review, M5): same shape as the admin surface's decision route — the
+          // reject transition, its own audit row, and everything `onSupportProposalRejected` does
+          // (sibling expiry+audit, ticket escalation) land in ONE transaction, mirroring
+          // `apply-shared.ts`'s `failStaleAndHandBack` precedent. A throw anywhere inside rolls
+          // EVERYTHING back, including the transition itself.
+          await deps.db.transaction(async (tx) => {
+            await applyProposalTransition(tx, proposalId, 'pending', status, {
+              decidedBy: 'owner',
+              decidedAt: new Date(),
+              actionTokenHash: null,
+            })
+            await tx.insert(auditLog).values({
+              actor: 'owner',
+              action: 'proposal.reject',
+              entityType: 'proposal',
+              entityId: proposalId,
+              detail: { via: 'link' },
+            })
+            await onSupportProposalRejected(tx, { id: row.id, ticketId: row.ticketId, type: row.type })
+          })
+        } else {
+          await applyProposalTransition(deps.db, proposalId, 'pending', status, {
+            decidedBy: 'owner',
+            decidedAt: new Date(),
+            actionTokenHash: null,
+            ...(payloadToStore !== undefined ? { payload: payloadToStore } : {}),
+          })
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
+            entityType: 'proposal',
+            entityId: proposalId,
+            detail: { via: 'link' },
+          })
+        }
       } catch (err) {
         // Someone else's request (or another tab, or a race) already decided this row between
         // our lookup and our guarded UPDATE — the single-use mechanism worked, just not for us.
         if (err instanceof StaleProposalStatusError) return friendlyPage()
         throw err
-      }
-
-      await deps.db.insert(auditLog).values({
-        actor: 'owner',
-        action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
-        entityType: 'proposal',
-        entityId: proposalId,
-        detail: { via: 'link' },
-      })
-
-      if (decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')) {
-        await onSupportProposalRejected(deps.db, { id: row.id, ticketId: row.ticketId, type: row.type })
       }
 
       if (decision === 'approve') {
