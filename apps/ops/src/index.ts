@@ -6,10 +6,12 @@ import {
   fulfillmentTrackingInfoUpdate,
   listPublications,
   orderFulfillmentOrders,
+  orderRefundState,
   ordersUpdatedSince,
   productSet,
   productVariantsByProductId,
   publishablePublish,
+  refundCreate,
   ShopifyAdminClient,
   ShopifyTokenManager,
 } from '@doge-buddy/shopify-admin'
@@ -33,7 +35,7 @@ import { supportPollGmailHandler, SUPPORT_POLL_QUEUE, type SupportPollDeps } fro
 import { loadDotEnv } from './load-env.ts'
 import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
 import { createTelegramNotifier } from './notify/telegram.ts'
-import type { ProposalShopifyOps } from './proposals/run-apply.ts'
+import type { ProposalShopifyOps, RefundOps } from './proposals/run-apply.ts'
 import { createQueueRetrying, registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
@@ -216,6 +218,17 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       productVariantsByProductId: shopifyNotConfigured,
     }
 
+// Same shape again, for `proposal.apply`'s `refund` executor (Task 16). `null` — not a
+// throwing stub — when Shopify is unconfigured: `applyRefund` checks for exactly that and fails the
+// proposal loudly (owner `notify()`) rather than throwing, retrying and dead-lettering its way to
+// the same place. This one MOVES MONEY, so it stays a hand-picked two-method surface.
+const refundOps: RefundOps | null = shopifyClient
+  ? {
+      orderRefundState: (orderGid) => orderRefundState(shopifyClient, orderGid),
+      refundCreate: (input, idempotencyKey) => refundCreate(shopifyClient, input, idempotencyKey),
+    }
+  : null
+
 // Built here — before `startQueue` — because `proposal.apply`'s `support_reply` executor
 // (Task 15) needs a `gmail` dep at registration time via `ApplyProposalDeps`, same reasoning as
 // `shopifyClient` above. `null` whenever `config.gmail` is unset (dev without Gmail creds) —
@@ -238,7 +251,7 @@ queue = await startQueue(config.databaseUrl, {
   adapter: supplierAdapter, settings, alert, shopify: shopifyOps, proposalShopify,
   gmail: gmailClient, supportAddress: config.gmail?.supportAddress ?? '', notify,
   adminBaseUrl: config.adminBaseUrl ?? '',
-  refundOps: null, // Task 16 wires the real one
+  refundOps,
 })
 
 // Task 11's day-claim breaker self-heal: flip any `agent_runs` row left stuck in 'running' past

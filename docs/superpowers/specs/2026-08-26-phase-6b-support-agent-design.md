@@ -444,19 +444,36 @@ blind.)*
 
 ### `refund`
 
-1. Load proposal + ticket + order. **Staleness guard** (same watermark, same consequence as
-   reply step 2 — ticket transition attempted `awaiting_approval → triaged` + stamp clear,
-   0 rows fine): a customer's "package arrived, cancel my refund request" must gate money
-   exactly as it gates words. Hard pre-checks: verified `order_id`; `total_cents` non-NULL.
+*(Step order amended 2026-08-27, Task 16 implementation — same amendment, same reason, as the
+`support_reply` note above: the idempotency **pre-check now runs BEFORE the staleness guard**. A
+completed refund is a fait accompli. Under the original order, a crash between `refundCreate` and
+the `applied` transition plus a customer message in the retry window ("never mind, it turned up")
+failed a proposal whose money had already moved — and that failure is not inert: the ticket goes
+back to the agent, which re-drafts, and §3's accumulation bound counts only **applied** refund
+proposals, so the re-drafted refund is invisible to it and the owner is asked to approve a SECOND
+payout for the same complaint. Only the checks that make recovery itself impossible run ahead of
+the pre-check.)*
+
+1. Load proposal + ticket + order, then the **recovery-blocking** hard pre-checks (each →
+   `applying → failed` + audit + owner `notify()`): refund ops unconfigured; verified `order_id`
+   resolves to a row; `total_cents` non-NULL.
 2. **`orderRefundState(orderGid)`** — new shopify-admin op, ONE query returning existing refunds
    (id, note, totalRefunded) and the parent transaction id/gateway (for
    `RefundInput.transactions`). Fixture-tested; FIXTURE-ASSUMPTION flagged until the first live
-   run (house convention). Fetched FIRST because two checks consume it:
-   `amountCents ≤ total_cents − totalRefunded` (re-verified at apply time — sibling history may
-   have moved money since the validator ran), and the idempotency pre-check.
+   run (house convention). Fetched FIRST because two checks consume it: the idempotency pre-check
+   (step 3) and `amountCents ≤ total_cents − totalRefunded` (step 3b — re-verified at apply time,
+   since sibling history may have moved money since the validator ran). Amounts are parsed with
+   `usdToCents`, not `Math.round(parseFloat(x) * 100)`: half-up on the decimal string, and a
+   THROW rather than a NaN on a malformed amount (every comparison against NaN is false, so a NaN
+   total would wave an unbounded refund straight through).
 3. **Pre-check** (parent rule — idempotency keys live only 24h): a refund whose note is
    `db-proposal-<proposalId>` already on the order → treat as applied (recover, transition,
-   done).
+   done). Then, and only then, the refusable checks: ticket row present (no ticket, no staleness
+   gate); **staleness guard** (same watermark, same consequence as reply step 2 — ticket
+   transition attempted `awaiting_approval → triaged` + stamp clear, 0 rows fine, and the owner
+   notification says *re-approve after the agent re-drafts* rather than reading as an error): a
+   customer's "package arrived, cancel my refund request" must gate money exactly as it gates
+   words. Then (3b) the accumulation bound, and a non-NULL parent transaction to refund against.
 4. `refundCreate(input, idempotencyKey = proposalId)` with `note: 'db-proposal-<proposalId>'`,
    `notify: true`, one `transactions` entry refunding `amountCents` against the parent
    transaction. UserErrors → throw (retry → dead-letter → `failed` + escalate + notify per the

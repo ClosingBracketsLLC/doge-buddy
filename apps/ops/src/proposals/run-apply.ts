@@ -1,6 +1,7 @@
 import { auditLog, proposals, supportTickets } from '@doge-buddy/db'
 import { and, eq } from 'drizzle-orm'
 import { applyNewListing } from './apply-new-listing.ts'
+import { applyRefund } from './apply-refund.ts'
 import type { ApplyProposalDeps, ProposalRow } from './apply-shared.ts'
 import { applySupportReply } from './apply-support-reply.ts'
 import { applyProposalTransition, StaleProposalStatusError } from './transitions.ts'
@@ -16,13 +17,14 @@ export { proposalHandle } from './apply-shared.ts'
 export type { ApplyProposalDeps, OrderRefundState, ProposalRow, ProposalShopifyOps, RefundOps } from './apply-shared.ts'
 
 /**
- * Type-keyed apply-executor dispatch (Task 14). `refund` is added by Task 16 — until then,
+ * Type-keyed apply-executor dispatch (Task 14). `deprecate_product` has no executor yet, so
  * dispatching it falls through to `executeApplyProposal`'s own `unimplemented proposal type` throw
  * below, same as `new_listing` did before this pipeline existed.
  */
 const executors: Record<string, (deps: ApplyProposalDeps, row: ProposalRow) => Promise<void>> = {
   new_listing: applyNewListing,
   support_reply: applySupportReply,
+  refund: applyRefund,
 }
 
 /**
@@ -81,9 +83,9 @@ export async function executeApplyProposal(deps: ApplyProposalDeps, proposalId: 
     return
   }
 
-  // Type-keyed dispatch (Task 14): `support_reply`/`refund` fall through to the same
-  // `unimplemented proposal type` throw `new_listing` itself used to hit before this pipeline
-  // existed, until Tasks 15/16 add their executors to the `executors` map above.
+  // Type-keyed dispatch (Task 14): a type with no entry in the `executors` map above falls through
+  // to the same `unimplemented proposal type` throw `new_listing` itself used to hit before this
+  // pipeline existed (today: `deprecate_product`).
   const exec = executors[row.type]
   if (!exec) {
     throw new Error(`unimplemented proposal type: ${row.type}`)

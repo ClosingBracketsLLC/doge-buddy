@@ -2,16 +2,23 @@ import { SupportReplyPayloadSchema, type SupportReplyPayload } from '@doge-buddy
 import { auditLog, supportMessages, supportTickets } from '@doge-buddy/db'
 import { PROPOSAL_MARKER_HEADER, isMessageGone, type GmailClient } from '@doge-buddy/gmail'
 import { and, asc, eq, lte } from 'drizzle-orm'
-import { enqueueSupportAgentRun } from '../jobs/support-agent-run.ts'
-import type { ApplyProposalDeps, ProposalRow } from './apply-shared.ts'
+import {
+  PROPOSAL_APPLIED_ACTION,
+  PROPOSAL_APPLY_FAILED_ACTION,
+  STALE_APPLY_ERROR,
+  failStaleAndHandBack,
+  notifyOwnerBestEffort,
+  type ApplyProposalDeps,
+  type ProposalRow,
+} from './apply-shared.ts'
 import { applyProposalTransition } from './transitions.ts'
 
-/** Audit action for every terminal apply refusal below (pre-check or staleness). */
-export const PROPOSAL_APPLY_FAILED_ACTION = 'proposal.apply_failed'
-/** Audit action for a completed send — same string `applyNewListing` writes. */
-export const PROPOSAL_APPLIED_ACTION = 'proposal.applied'
-/** `applyError` written when the customer wrote again after the agent took its snapshot. */
-export const STALE_APPLY_ERROR = 'stale: newer customer message'
+/**
+ * These three now live in `apply-shared.ts` — both support executors write the same audit actions
+ * and the same stale `applyError` (Task 16). Re-exported here so every existing importer (this
+ * file's test included) keeps working unchanged.
+ */
+export { PROPOSAL_APPLIED_ACTION, PROPOSAL_APPLY_FAILED_ACTION, STALE_APPLY_ERROR }
 
 /**
  * References cap (spec §4.3, "the last ~20"). A long thread's full id list would bloat every
@@ -155,44 +162,17 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
     (m) => m.direction === 'inbound' && m.sentAt !== null && m.sentAt > threadSnapshotAt,
   )
   if (newerInbound) {
-    await db.transaction(async (tx) => {
-      await applyProposalTransition(tx, proposalId, 'applying', 'failed', { applyError: STALE_APPLY_ERROR })
-      // `last_agent_run_at: null` is load-bearing, not hygiene: the stale message's Gmail
-      // internalDate can predate the wall-clock claim stamp of the run that produced this draft,
-      // in which case the re-run's claim CAS (`last_inbound_at > last_agent_run_at`) sees no new
-      // inbound and no-ops until the 20-minute stuck branch finally fires. Clearing the stamp puts
-      // the ticket back in "never run" territory so the re-run claims immediately.
-      // Guarded on `awaiting_approval`; 0 rows is a normal outcome (another writer moved it).
-      await tx
-        .update(supportTickets)
-        .set({ status: 'triaged', lastAgentRunAt: null })
-        .where(and(eq(supportTickets.id, ticket.id), eq(supportTickets.status, 'awaiting_approval')))
-      await tx.insert(auditLog).values({
-        actor: 'system',
-        action: PROPOSAL_APPLY_FAILED_ACTION,
-        entityType: 'proposal',
-        entityId: proposalId,
-        detail: {
-          reason: STALE_APPLY_ERROR,
-          ticketId: ticket.id,
-          threadSnapshotAt: payload.threadSnapshotAt,
-          newerInboundAt: newerInbound.sentAt?.toISOString() ?? null,
-        },
-      })
+    // Shared with `applyRefund` — see `failStaleAndHandBack`'s own doc comment for why the ticket
+    // hand-back clears the claim stamp in the same transaction.
+    await failStaleAndHandBack(deps, row, {
+      ticketId: ticket.id,
+      threadSnapshotAt: payload.threadSnapshotAt,
+      newerInboundAt: newerInbound.sentAt,
+      notifyTitle: NOT_SENT_TITLE,
+      notifyBody: `${row.summary}\n\nReason: ${STALE_APPLY_ERROR}`,
+      enqueueAlertKind: 'support_reply_stale_enqueue_failed',
+      notifyAlertKind: NOTIFY_FAILED_ALERT,
     })
-
-    await notifyOwner(deps, row, STALE_APPLY_ERROR)
-    // Best-effort: the ticket is already `triaged`, so the poll's own selection stage is the
-    // backstop that re-runs the agent even if this enqueue never lands.
-    await enqueueSupportAgentRun(deps.enqueue, ticket.id).catch((err) =>
-      deps
-        .alert('warning', 'support_reply_stale_enqueue_failed', {
-          proposalId,
-          ticketId: ticket.id,
-          error: err instanceof Error ? err.message : String(err),
-        })
-        .catch(() => {}),
-    )
     return
   }
 
@@ -377,6 +357,11 @@ function buildReferences(messages: MessageRow[], inReplyTo: string): string[] {
   return [ordered[0]!, ...ordered.slice(-(REFERENCES_CAP - 1))]
 }
 
+/** Owner-facing title for every refusal below: their approved reply did NOT go out. */
+const NOT_SENT_TITLE = 'Approved support_reply was NOT sent'
+/** Alert kind when the owner notification itself fails. */
+const NOTIFY_FAILED_ALERT = 'support_reply_notify_failed'
+
 /**
  * The terminal-refusal path shared by every hard pre-check: `applying -> failed` with the reason,
  * an audit row, and an owner notification — then the caller returns. Never throws.
@@ -395,27 +380,9 @@ async function failTerminal(
     entityId: row.id,
     detail: { reason: applyError, ticketId },
   })
-  await notifyOwner(deps, row, applyError)
-}
-
-/**
- * Tells the owner their approved reply did NOT go out. `NotifyOwner` never rejects by its own
- * contract, but this guards anyway — a notify failure must never turn a clean terminal refusal
- * into a thrown, retried, dead-lettered one.
- */
-async function notifyOwner(deps: ApplyProposalDeps, row: ProposalRow, reason: string): Promise<void> {
-  await deps
-    .notify({
-      title: 'Approved support_reply was NOT sent',
-      body: `${row.summary}\n\nReason: ${reason}`,
-      actions: [{ label: 'View', url: `${deps.adminBaseUrl}/admin/proposals/${row.id}` }],
-    })
-    .catch((err) =>
-      deps
-        .alert('warning', 'support_reply_notify_failed', {
-          proposalId: row.id,
-          error: err instanceof Error ? err.message : String(err),
-        })
-        .catch(() => {}),
-    )
+  await notifyOwnerBestEffort(deps, row, {
+    title: NOT_SENT_TITLE,
+    body: `${row.summary}\n\nReason: ${applyError}`,
+    alertKind: NOTIFY_FAILED_ALERT,
+  })
 }

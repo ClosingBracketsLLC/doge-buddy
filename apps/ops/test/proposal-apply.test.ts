@@ -17,15 +17,12 @@ function newListingPayload() {
   }
 }
 
-function refundPayload() {
+/** The one proposal type still without an apply executor — test 8's "unimplemented" fixture. */
+function deprecateProductPayload() {
   return {
-    type: 'refund',
-    orderId: crypto.randomUUID(),
-    shopifyOrderGid: 'gid://shopify/Order/123',
-    amountCents: 500,
-    reason: 'damaged',
-    openCjDispute: false,
-    threadSnapshotAt: '2026-08-27T12:00:00.000Z',
+    type: 'deprecate_product',
+    productId: crypto.randomUUID(),
+    evidence: { unitsSold28d: 0, refundCount28d: 3, ticketCount28d: 4, daysLive: 45 },
   }
 }
 
@@ -170,7 +167,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
 
   async function seedProposal(opts: {
     status: 'approved' | 'applying' | 'applied' | 'rejected'
-    type?: 'new_listing' | 'refund' | 'support_reply'
+    type?: 'new_listing' | 'refund' | 'support_reply' | 'deprecate_product'
     payload?: unknown
     ticketId?: string
   }) {
@@ -539,7 +536,9 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
   // 8. Unimplemented type -> throws, dead-letters to failed
   // ---------------------------------------------------------------------------
   it('8. unimplemented proposal type throws, then dead-letters to failed', async () => {
-    const row = await seedProposal({ status: 'approved', type: 'refund', payload: refundPayload() })
+    // `deprecate_product` is the only type left with no executor — `refund` used to stand in here
+    // until Task 16 gave it one.
+    const row = await seedProposal({ status: 'approved', type: 'deprecate_product', payload: deprecateProductPayload() })
     const shopify = fakeShopify()
     const alert = vi.fn(async () => {})
 
@@ -548,7 +547,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const midway = await loadProposal(row.id)
     expect(midway!.status).toBe('applying')
 
-    const err = new Error('unimplemented proposal type: refund')
+    const err = new Error('unimplemented proposal type: deprecate_product')
     await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id, err)
 
     const after = await loadProposal(row.id)
