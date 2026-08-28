@@ -401,7 +401,9 @@ describe('applyRefund', () => {
     })
     // ...and in the retry window the customer wrote again. Refusing here as "stale" would fail a
     // proposal whose money already moved — and the re-drafted refund that follows would be a
-    // SECOND payout (a failed proposal is invisible to the validator's applied-refund bound).
+    // SECOND payout: the validator's accumulation bound counts only LIVE proposals
+    // (`LIVE_REFUND_PROPOSAL_STATUSES` = pending/approved/applying/applied), and a `failed` one is
+    // excluded from that set, so the crashed attempt's money is invisible to it.
     await addNewerInbound(s)
 
     await applyRefund(makeDeps({ refundOps }), proposal)
@@ -595,6 +597,42 @@ describe('applyRefund', () => {
     expect(notify).not.toHaveBeenCalled()
   })
 
+  it('writes proposal.refund_issued the instant refundCreate returns — the money-moved receipt survives a crash on any later step', async () => {
+    const s = await seed()
+    const proposal = await seedProposal(s)
+    const refundOps = fakeRefundOps()
+    // The refund lands, then the process dies before the bookkeeping. Simulated by breaking the
+    // `applying -> applied` UPDATE, the very next write after the receipt. Without the receipt this
+    // state is indistinguishable from "nothing happened": the owner gets a "FAILED to apply" page
+    // while the customer has the cash, and only the Shopify admin can tell them apart.
+    const failingDb = new Proxy(db, {
+      get: (target, prop, receiver) =>
+        prop === 'update'
+          ? () => {
+              throw new Error('db gone')
+            }
+          : Reflect.get(target, prop, receiver),
+    })
+
+    await expect(
+      applyRefund(makeDeps({ refundOps, db: failingDb as typeof db }), proposal),
+    ).rejects.toThrow('db gone')
+
+    // Money moved exactly once...
+    expect(refundOps.refundCalls).toHaveLength(1)
+    // ...and the receipt is on the audit trail even though the proposal never reached `applied`.
+    const rows = await db.select().from(auditLog).where(eq(auditLog.entityId, proposal.id))
+    const issued = rows.find((r) => r.action === 'proposal.refund_issued')
+    expect(issued).toBeDefined()
+    expect(issued!.detail).toMatchObject({
+      refundId: 'gid://shopify/Refund/1',
+      amountCents: REFUND_CENTS,
+      orderGid: s.shopifyOrderGid,
+    })
+    expect(rows.map((r) => r.action)).not.toContain(PROPOSAL_APPLIED_ACTION)
+    expect((await readProposal(proposal.id)).status).toBe('applying')
+  })
+
   // -------------------------------------------------------------------------
   // CJ dispute
   // -------------------------------------------------------------------------
@@ -621,11 +659,69 @@ describe('applyRefund', () => {
 
     const applied = await readProposal(proposal.id)
     expect(applied.status).toBe('applied')
+    // `threadSnapshotAt` is asserted deliberately: jsonb `||` is a SHALLOW merge, so every sibling
+    // key must survive the `cjDispute` write. If a future change deep-merges or rebuilds the
+    // payload, the staleness guard would silently lose its watermark.
     expect(applied.payload).toMatchObject({
       type: 'refund',
       amountCents: REFUND_CENTS,
+      threadSnapshotAt: s.snapshotAt.toISOString(),
       cjDispute: { id: 'cjd-99' },
     })
+  })
+
+  it('dispute: a kind CJ does not allow for this order skips the dispute, alerts, and STILL applies the refund', async () => {
+    const s = await seed()
+    const proposal = await seedProposal(s, { openCjDispute: true, cjDisputeReasonId: CJ_REASON_ID })
+    const refundOps = fakeRefundOps()
+    // CJ offers only a reissue here — but the customer already has cash back, so a reissue is not
+    // a substitute for the refund dispute we asked for.
+    const adapter = fakeAdapter({
+      options: {
+        disputable: true,
+        maxRefundCents: ORDER_TOTAL_CENTS,
+        reasons: [{ id: CJ_REASON_ID, label: 'damaged' }],
+        allowedKinds: ['reissue'],
+      },
+    })
+
+    await applyRefund(makeDeps({ refundOps, adapter: adapter as unknown as ApplyProposalDeps['adapter'] }), proposal)
+
+    expect(adapter.openDispute).not.toHaveBeenCalled()
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      CJ_DISPUTE_SKIPPED_ALERT,
+      expect.objectContaining({ reason: 'kind_not_allowed' }),
+    )
+    expect((await readProposal(proposal.id)).status).toBe('applied')
+  })
+
+  it('dispute: a cjDispute.id already in the payload blocks a second open — read fresh, not off the row snapshot', async () => {
+    const s = await seed()
+    const proposal = await seedProposal(s, { openCjDispute: true, cjDisputeReasonId: CJ_REASON_ID })
+    const refundOps = fakeRefundOps()
+    const adapter = fakeAdapter()
+    // A concurrent apply (or a re-entry after the merge committed) already opened it. `row` in hand
+    // is the pre-refund snapshot and does NOT carry this — only a fresh read does.
+    await db
+      .update(proposals)
+      .set({ payload: { ...payloadFor(s, { openCjDispute: true, cjDisputeReasonId: CJ_REASON_ID }), cjDispute: { id: 'cjd-existing' } } })
+      .where(eq(proposals.id, proposal.id))
+
+    await applyRefund(makeDeps({ refundOps, adapter: adapter as unknown as ApplyProposalDeps['adapter'] }), proposal)
+
+    // `openDispute` promises idempotency nowhere in SupplierAdapter's contract, so this guard is
+    // the only thing standing between a race and two disputes on one supplier order.
+    expect(adapter.openDispute).not.toHaveBeenCalled()
+    expect(adapter.getDisputeOptions).not.toHaveBeenCalled()
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      CJ_DISPUTE_SKIPPED_ALERT,
+      expect.objectContaining({ reason: 'already_open', disputeId: 'cjd-existing' }),
+    )
+    const applied = await readProposal(proposal.id)
+    expect(applied.status).toBe('applied')
+    expect(applied.payload).toMatchObject({ cjDispute: { id: 'cjd-existing' } })
   })
 
   it('dispute: an invalid reason id skips the dispute, alerts, and STILL applies the refund', async () => {

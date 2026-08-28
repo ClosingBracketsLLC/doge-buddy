@@ -17,6 +17,14 @@ import { applyProposalTransition } from './transitions.ts'
  * un-apply, retry, or fail the proposal. */
 export const CJ_DISPUTE_SKIPPED_ALERT = 'cj_dispute_skipped'
 
+/**
+ * Audit action written the instant `refundCreate` returns — the local record that money actually
+ * left the account, independent of whether this apply goes on to succeed. Deliberately separate
+ * from `proposal.applied`: those two say different things, and after a crash the difference between
+ * them ("refund issued, bookkeeping incomplete" vs "nothing happened") is the whole question.
+ */
+export const PROPOSAL_REFUND_ISSUED_ACTION = 'proposal.refund_issued'
+
 /** Owner-facing title for a refund that did NOT go out for a terminal reason. */
 const NOT_APPLIED_TITLE = 'Approved refund was NOT applied'
 /** Alert kind when the owner notification itself fails. */
@@ -51,10 +59,12 @@ type OrderRow = typeof orders.$inferSelect
  * If a crash lands between `refundCreate` and the `applied` transition, and the customer writes
  * again in the retry window ("never mind, it turned up"), a staleness-first order would fail a
  * proposal whose money ALREADY moved — and that failure is not inert: the ticket goes back to the
- * agent, which re-drafts, and the validator's accumulation bound only counts *applied* refund
- * proposals, so the re-drafted refund is invisible to it and the owner is asked to approve a
- * SECOND payout for the same complaint. Only the checks that make recovery itself impossible
- * (unconfigured ops, a missing order row, a NULL total) run ahead of the pre-check.
+ * agent, which re-drafts, and the validator's accumulation bound counts only LIVE refund proposals
+ * (`LIVE_REFUND_PROPOSAL_STATUSES` = pending/approved/applying/applied — widened from applied-only
+ * by Task 12's M11). The crashed attempt is `failed`, which that set excludes, so the re-drafted
+ * refund is invisible to the bound and the owner is asked to approve a SECOND payout for the same
+ * complaint. Only the checks that make recovery itself impossible (unconfigured ops, a missing
+ * order row, a NULL total) run ahead of the pre-check.
  *
  * Full order: parse -> load ticket + order -> recovery-blocking checks -> `orderRefundState` ->
  * note pre-check (hit -> applied, done) -> ticket pre-check -> staleness -> accumulation bound ->
@@ -194,6 +204,20 @@ export async function applyRefund(deps: ApplyProposalDeps, row: ProposalRow): Pr
     proposalId,
   )
 
+  // The money-moved receipt, written IMMEDIATELY and on its own — before the CJ step, before the
+  // `applied` transition. It is the only LOCAL trace that this refund happened if anything after
+  // this line dead-letters: without it the owner gets a "FAILED to apply" page while the customer
+  // has the cash, and the only way to tell the difference is opening the Shopify admin. With it,
+  // `proposal.refund_issued` on the proposal's audit trail says plainly that the payout landed and
+  // only the bookkeeping did not.
+  await db.insert(auditLog).values({
+    actor: 'system',
+    action: PROPOSAL_REFUND_ISSUED_ACTION,
+    entityType: 'proposal',
+    entityId: proposalId,
+    detail: { refundId, amountCents: payload.amountCents, orderGid: order.shopifyOrderGid },
+  })
+
   // --- CJ dispute (spec §4 refund step 5), best-effort ---
 
   if (payload.openCjDispute) {
@@ -306,6 +330,20 @@ async function openCjDispute(
     return
   }
 
+  // Concurrent-duplicate guard, read FRESH from the row rather than from `row.payload` (a snapshot
+  // taken before the refund even ran). `openDispute` promises idempotency on `idempotencyKey`
+  // nowhere in `SupplierAdapter`'s contract, so a second apply racing this one — or any path that
+  // re-enters after the merge below committed — must not open a second dispute. The merged id is
+  // the only durable evidence one already exists.
+  const [fresh] = await deps.db
+    .select({ existingDisputeId: sql<string | null>`${proposals.payload} -> 'cjDispute' ->> 'id'` })
+    .from(proposals)
+    .where(eq(proposals.id, row.id))
+  if (fresh?.existingDisputeId) {
+    await skip('already_open', { disputeId: fresh.existingDisputeId })
+    return
+  }
+
   let disputeId: string
   try {
     const options = await deps.adapter.getDisputeOptions(supplierOrderId)
@@ -322,6 +360,12 @@ async function openCjDispute(
     }
     if (options.maxRefundCents !== undefined && payload.amountCents > options.maxRefundCents) {
       await skip('amount_above_max', { amountCents: payload.amountCents, maxRefundCents: options.maxRefundCents })
+      return
+    }
+    if (!options.allowedKinds.includes('refund')) {
+      // CJ will only offer a reissue on this order. We already refunded the customer in cash, so a
+      // reissue is not a substitute — skip rather than silently open the wrong kind of dispute.
+      await skip('kind_not_allowed', { allowedKinds: options.allowedKinds })
       return
     }
 
@@ -344,6 +388,13 @@ async function openCjDispute(
   // Merged into the payload DB-side (`||`) rather than read-modify-written from `row.payload`:
   // that snapshot is already stale by this point, and the merge is what `cj.dispute-poll` later
   // selects on and writes its terminal marker into.
+  //
+  // WARNING for Task 17: jsonb `||` is a SHALLOW merge — it replaces the whole `cjDispute` value,
+  // it does not deep-merge into it. When the poll adds `status`/`closedAt` it must write the
+  // COMPLETE object (`{ id, status, closedAt }`), never a partial like `{ status }`, or the `id`
+  // this line just stored is destroyed and the dispute becomes unpollable. Every other top-level
+  // payload key (`threadSnapshotAt`, `amountCents`, …) survives untouched because they sit beside
+  // `cjDispute`, not inside it — the happy-path test asserts exactly that.
   await deps.db
     .update(proposals)
     .set({ payload: sql`${proposals.payload} || ${JSON.stringify({ cjDispute: { id: disputeId } })}::jsonb` })

@@ -303,8 +303,14 @@ requires `reply` — a refund the customer isn't told about is a bug).
    off-platform contact channel buried in the tail would otherwise ship sight-unseen.)
 5. **Refund rules:** requires an ownership-VERIFIED linked order (`order_id` set — claimed,
    unverified is not good enough to move money); `orders.total_cents` non-NULL;
-   `amountCents ≤ total_cents − Σ(amountCents of prior applied refund proposals for this
-   order)` (partials must not accumulate past the total); the ticket's latest inbound message
+   `amountCents ≤ total_cents − Σ(amountCents of prior LIVE refund proposals for this order)`
+   (partials must not accumulate past the total). *Live* = `pending`/`approved`/`applying`/
+   `applied` (`LIVE_REFUND_PROPOSAL_STATUSES`, widened from applied-only by Task 12's M11 — an
+   approved-but-not-yet-applied sibling is money already committed, and counting only `applied`
+   let two concurrent proposals each pass the bound). `rejected`/`expired`/`failed` are excluded
+   because that money is cancelled — which is also precisely why §4's refund executor runs its
+   idempotency pre-check BEFORE the staleness guard: a crashed-after-refund attempt left `failed`
+   would otherwise be invisible here and re-proposable. The ticket's latest inbound message
    must carry `dmarc=pass` in its stored `auth_results` (NULL — e.g. a pre-6B message — counts
    as non-pass; **new**: ingest records the topmost
    `Authentication-Results` header per inbound message — From is attacker-forgeable under
@@ -449,10 +455,11 @@ blind.)*
 completed refund is a fait accompli. Under the original order, a crash between `refundCreate` and
 the `applied` transition plus a customer message in the retry window ("never mind, it turned up")
 failed a proposal whose money had already moved — and that failure is not inert: the ticket goes
-back to the agent, which re-drafts, and §3's accumulation bound counts only **applied** refund
-proposals, so the re-drafted refund is invisible to it and the owner is asked to approve a SECOND
-payout for the same complaint. Only the checks that make recovery itself impossible run ahead of
-the pre-check.)*
+back to the agent, which re-drafts, and §3's accumulation bound counts only **live** refund
+proposals (`pending`/`approved`/`applying`/`applied` — the M11 set). The crashed attempt is
+`failed`, which that set excludes, so the re-drafted refund is invisible to the bound and the owner
+is asked to approve a SECOND payout for the same complaint. Only the checks that make recovery
+itself impossible run ahead of the pre-check.)*
 
 1. Load proposal + ticket + order, then the **recovery-blocking** hard pre-checks (each →
    `applying → failed` + audit + owner `notify()`): refund ops unconfigured; verified `order_id`
