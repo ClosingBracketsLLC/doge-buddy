@@ -18,6 +18,7 @@ import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { FULFILLMENT_RETRY_OPTS } from '../../fulfillment/run-place-order.ts'
 import { applyTransition, IllegalTransitionError, StaleStatusError } from '../../fulfillment/transitions.ts'
 import type { SendOpts } from '../../fulfillment/types.ts'
+import { SUPPORT_AGENT_MAX_RUNS_PER_DAY } from '../../jobs/support-agent-run.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
 import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts'
 import { onSupportProposalRejected, validateSupportProposalForApproval } from '../../proposals/support-decision.ts'
@@ -46,7 +47,9 @@ import {
   renderTicketsList,
   TICKET_STATUSES,
   type LinkedOrderSummary,
+  type TicketAgentRunRow,
   type TicketListRow,
+  type TicketProposalRow,
 } from './render-tickets.ts'
 
 const PROPOSAL_STATUSES = proposalStatus.enumValues
@@ -74,6 +77,8 @@ function renderHealthStrip(h: HealthStrip): RawHtml {
     <p>Paused for funds: ${h.pausedForFunds ? 'ON' : 'OFF'}</p>
     <p>Pending proposals: ${h.pendingProposals}</p>
     <p>support poll: last ok ${h.supportPollLastSuccessAt ? h.supportPollLastSuccessAt.toISOString() : 'never'} (${h.supportPollConsecutiveFailures} consecutive failures)</p>
+    <p>support agent: ${h.supportAgentRunsToday} runs today / ${SUPPORT_AGENT_MAX_RUNS_PER_DAY}</p>
+    <p>support agent last run: ${h.supportAgentLastRun ? `${h.supportAgentLastRun.status} at ${h.supportAgentLastRun.startedAt.toISOString()}` : 'none'}</p>
   </section>`
 }
 
@@ -457,10 +462,33 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             linkedOrder = orderRow ?? null
           }
 
+          // Task 19: this ticket's own proposal history (newest first — the most recent decision
+          // is what an operator wants to see first) and its last handful of support-agent runs
+          // (`workflow = 'support'` — the same value support-agent-run.ts's `agent_runs` insert
+          // writes — filtered by `trigger_ref = ticketId`, that job's own linking column).
+          const ticketProposals: TicketProposalRow[] = await deps.db
+            .select({
+              id: proposals.id,
+              type: proposals.type,
+              status: proposals.status,
+              summary: proposals.summary,
+              createdAt: proposals.createdAt,
+            })
+            .from(proposals)
+            .where(eq(proposals.ticketId, id))
+            .orderBy(desc(proposals.createdAt))
+
+          const ticketAgentRuns: TicketAgentRunRow[] = await deps.db
+            .select({ id: agentRuns.id, status: agentRuns.status, startedAt: agentRuns.startedAt })
+            .from(agentRuns)
+            .where(and(eq(agentRuns.workflow, 'support'), eq(agentRuns.triggerRef, id)))
+            .orderBy(desc(agentRuns.startedAt))
+            .limit(5)
+
           return reply
             .code(200)
             .type('text/html; charset=utf-8')
-            .send(layout('Ticket', renderTicketDetail(ticket, messages, linkedOrder)))
+            .send(layout('Ticket', renderTicketDetail(ticket, messages, linkedOrder, ticketProposals, ticketAgentRuns)))
         })
       })
 
