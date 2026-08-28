@@ -1,6 +1,7 @@
 import { type createSdkMcpServer, type SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { policiesAsText } from '@doge-buddy/core'
 import { type createDb } from '@doge-buddy/db'
+import { dmarcPasses } from '../support/validator.ts'
 import { runAgentQuery, type HarnessResult, type QueryFn } from './run-harness.ts'
 import { SUPPORT_PROJECT_KEY } from './session-store.ts'
 import { SUPPORT_OUTPUT_JSON_SCHEMA, SupportOutputSchema, type SupportOutput } from './support-output-schema.ts'
@@ -133,8 +134,11 @@ function senderAuthNote(messages: SupportRunContext['messages']): string {
       const mTime = m.sentAt ? m.sentAt.getTime() : -Infinity
       return mTime > latestTime ? m : latest
     }, null)
-  const auth = latestInbound?.authResults ?? null
-  if (auth !== null && /dmarc=pass/i.test(auth)) return 'sender authentication: dmarc=pass'
+  // FR1b: the shared `dmarcPasses` parser is the SAME judgment the refund money-gate
+  // (`validateRefundIntent`) and the display note (`senderAuthNote`) use — the agent's prompt note
+  // must never disagree with what actually gates a refund. Before this it re-typed `/dmarc=pass/i`,
+  // a substring test an attacker-forged `smtp.mailfrom=dmarc=pass@evil` header would fool.
+  if (dmarcPasses(latestInbound?.authResults ?? null)) return 'sender authentication: dmarc=pass'
   return 'sender authentication: NOT verified (refunds cannot be backed by this sender)'
 }
 

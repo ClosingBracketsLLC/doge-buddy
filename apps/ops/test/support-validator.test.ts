@@ -1,7 +1,7 @@
 import { createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import { eq, like } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { validateReplyBody, validateRefundIntent, validateSupportOutput, senderAuthNote } from '../src/support/validator.ts'
+import { validateReplyBody, validateRefundIntent, validateSupportOutput, senderAuthNote, dmarcPasses } from '../src/support/validator.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -98,6 +98,50 @@ describe('support validator', () => {
     it('accepts an ordinary plain-text body, returning the (unchanged) normalizedBody', async () => {
       const ticketId = await seedTicket()
       const body = 'Thanks for reaching out, we will look into it.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+  })
+
+  // -- FR5: zero-width / format characters must not defeat any screen --
+  // A single default-ignorable format char (U+200B ZWSP, U+FEFF, U+00AD soft hyphen, …) renders
+  // invisibly to the customer but breaks every token regex. They are stripped before AND after
+  // NFKC, and the returned normalizedBody is the stripped string (what actually gets sent).
+  describe('validateReplyBody: zero-width / format character stripping', () => {
+    const ZWSP = '\u200B' // zero-width space
+    const BOM = '\uFEFF' // zero-width no-break space (BOM)
+
+    it('a promise broken by a ZWSP inside "refund" still trips promised_action (no refund object)', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, `Your ref${ZWSP}und has been issued today.`, noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('promised_action')
+    })
+
+    it('a phone number broken by a ZWSP still trips contact_channel', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, `Call 888${ZWSP}5550142 for help.`, noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('contact_channel')
+    })
+
+    it('a bare domain broken by a ZWSP still trips url_not_allowed', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, `Visit evil${ZWSP}.com for more.`, noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('url_not_allowed')
+    })
+
+    it('a bare domain broken by a U+FEFF (BOM) variant still trips url_not_allowed', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, `Visit evil${BOM}.com for more.`, noRefund)
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('url_not_allowed')
+    })
+
+    it('a legit body with no format chars is unchanged and normalizedBody equals input', async () => {
+      const ticketId = await seedTicket()
+      const body = 'Thanks for reaching out — we will look into your order and follow up shortly.'
       const result = await validateReplyBody(db, ticketId, body, noRefund)
       expect(result).toEqual({ ok: true, normalizedBody: body })
     })
@@ -679,6 +723,58 @@ describe('support validator', () => {
       const result = await validateRefundIntent(db, { id: ticketId, orderId }, { amountCents: 500, openCjDispute: false })
       expect(result.ok).toBe(false)
       expect((result as { code: string }).code).toBe('refund_sender_unauthenticated')
+    })
+
+    // FR1: the gate PARSES the top-level dmarc method result — a `dmarc=pass` substring inside an
+    // attacker-influenceable param (smtp.mailfrom) must NOT pass. Forged strings from the reviewer.
+    const FORGED_GOOGLE_AR =
+      'mx.google.com; dkim=pass header.i=@evil.example; spf=pass (google.com: domain of dmarc=pass@evil.example ' +
+      'designates 1.2.3.4 as permitted sender) smtp.mailfrom=dmarc=pass@evil.example; ' +
+      'dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=victim.example'
+    const GENUINE_GOOGLE_AR =
+      'mx.google.com; dkim=pass header.i=@x.example header.s=sel; spf=pass (google.com: domain of a@x.example) ' +
+      'smtp.mailfrom=a@x.example; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=x.example'
+    const QUOTED_LOCALPART_AR =
+      'mx.google.com; spf=pass (google.com: domain of "x;dmarc=pass"@evil.example designates 1.2.3.4 as permitted ' +
+      'sender) smtp.mailfrom="x;dmarc=pass"@evil.example; dmarc=fail (p=NONE) header.from=victim.example'
+
+    describe('dmarcPasses parses the top-level dmarc method result (FR1)', () => {
+      it('the forged Google-shaped smtp.mailfrom=dmarc=pass header is NOT pass (Gmail stamped dmarc=fail)', () => {
+        expect(dmarcPasses(FORGED_GOOGLE_AR)).toBe(false)
+      })
+      it('a genuine dmarc=pass method IS pass', () => {
+        expect(dmarcPasses(GENUINE_GOOGLE_AR)).toBe(true)
+      })
+      it('the quoted-local-part "x;dmarc=pass"@evil forgery is NOT pass', () => {
+        expect(dmarcPasses(QUOTED_LOCALPART_AR)).toBe(false)
+      })
+      it('null / empty auth_results is NOT pass', () => {
+        expect(dmarcPasses(null)).toBe(false)
+        expect(dmarcPasses('')).toBe(false)
+      })
+      it('a word-embedded xdmarc=pass clause is NOT pass', () => {
+        expect(dmarcPasses('xdmarc=pass')).toBe(false)
+      })
+      it('a plain dmarc=pass with trailing params after whitespace IS pass', () => {
+        expect(dmarcPasses('dkim=pass; dmarc=pass action=none')).toBe(true)
+      })
+    })
+
+    it('the refund gate refuses the forged Google-shaped header (money-path regression pin, FR1)', async () => {
+      const orderId = await seedOrder(2000)
+      const ticketId = await seedTicket({ orderId })
+      await seedInboundMessage(ticketId, { authResults: FORGED_GOOGLE_AR })
+      const result = await validateRefundIntent(db, { id: ticketId, orderId }, { amountCents: 500, openCjDispute: false })
+      expect(result.ok).toBe(false)
+      expect((result as { code: string }).code).toBe('refund_sender_unauthenticated')
+    })
+
+    it('the refund gate accepts a genuine dmarc=pass header (FR1 happy path)', async () => {
+      const orderId = await seedOrder(2000)
+      const ticketId = await seedTicket({ orderId })
+      await seedInboundMessage(ticketId, { authResults: GENUINE_GOOGLE_AR })
+      const result = await validateRefundIntent(db, { id: ticketId, orderId }, { amountCents: 500, openCjDispute: false })
+      expect(result).toEqual({ ok: true })
     })
 
     it('fails refund_sender_unauthenticated when there is no inbound message at all', async () => {

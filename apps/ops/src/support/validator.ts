@@ -19,21 +19,54 @@ function fail(code: string, detail: string): ValidationFailure {
 }
 
 /**
- * SINGLE SOURCE OF TRUTH (Task 18 review, M7) for "is this sender authenticated" — the exact
- * regex `validateRefundIntent`'s gate below enforces. Exported so every OTHER surface that needs
- * to SHOW the same answer (submit.ts's Telegram body, the admin refund summary) reads it from
- * here instead of re-typing a regex that could silently drift from what actually gates a refund —
- * which is exactly what happened before this fix (those two call sites used `/dmarc=pass/i`, no
- * word boundaries, so `xdmarc=pass` display-read as verified while the real gate below would have
- * refused it).
+ * A single top-level `Authentication-Results` method clause's opening `dmarc=<result>` token. The
+ * lookahead `(?=$|\s|\()` requires the result word to be TERMINATED by whitespace, an opening
+ * paren (the params group), or the clause end — which is exactly what distinguishes a genuine
+ * `dmarc=pass` method from an attacker-forged look-alike buried in a param value (FR1). See
+ * `dmarcPasses` for the full mechanism.
  */
-export const DMARC_PASS_RE = /\bdmarc=pass\b/i
+const DMARC_METHOD_RE = /^dmarc\s*=\s*(\w+)(?=$|\s|\()/i
+
+/**
+ * SINGLE SOURCE OF TRUTH (Task 18 review, M7; hardened FR1) for "is this sender authenticated" —
+ * the exact test `validateRefundIntent`'s money gate below enforces, and the one every display
+ * surface (submit.ts's Telegram body, the admin refund summary) and the agent's own prompt note
+ * (`agents/support-run.ts`) render, so none can silently drift from what actually gates a refund.
+ *
+ * WHY a parser and not a substring test (FR1, live-reproduced): the header value is
+ * attacker-INFLUENCEABLE. `Authentication-Results` is `<authserv-id>; method=result params;
+ * method=result params; ...` — methods are `;`-separated, and the params inside a method (e.g.
+ * `smtp.mailfrom=...` inside the spf method) are space-separated. An attacker sending
+ * `MAIL FROM: dmarc=pass@evil.example` (From: a victim under `p=none`) makes Gmail stamp
+ * `...spf=... smtp.mailfrom=dmarc=pass@evil.example; dmarc=fail (p=NONE)...` — a naive
+ * `\bdmarc=pass\b` substring test then matches the mailfrom param and waves through a message
+ * Gmail itself stamped dmarc=FAIL.
+ *
+ * Mechanism: split on `;`, trim each clause, and read the result only from a clause that BEGINS
+ * with a real `dmarc=<result>` method token (`DMARC_METHOD_RE`). A `smtp.mailfrom=dmarc=pass@evil`
+ * fragment never begins a clause (it sits after `smtp.mailfrom=` inside the spf clause), so it is
+ * never read as dmarc. A quoted-local-part forgery `smtp.mailfrom="x;dmarc=pass"@evil` splits out a
+ * `dmarc=pass"@evil...` fragment, but the `"` immediately after `pass` is not a valid method
+ * terminator (the lookahead rejects it), so that fragment is not read as dmarc either. When more
+ * than one clause matches (only reachable via injection), the LAST wins — Gmail appends the real
+ * dmarc verdict as the FINAL method, after the dkim/spf clauses any mailfrom forgery lands in.
+ * NULL/empty → not pass (a pre-6B message with no stored header counts as non-pass).
+ */
+export function dmarcPasses(authResults: string | null): boolean {
+  if (authResults === null) return false
+  let result: string | null = null
+  for (const clause of authResults.split(';')) {
+    const m = DMARC_METHOD_RE.exec(clause.trim())
+    if (m) result = m[1]!.toLowerCase()
+  }
+  return result === 'pass'
+}
 
 /** Cheap, human-readable sender-authentication note for display surfaces (Telegram body, admin
  * refund summary) — NEVER a second opinion on whether a refund is allowed, just a rendering of
- * the same `DMARC_PASS_RE` test `validateRefundIntent` runs. */
+ * the same `dmarcPasses` parse `validateRefundIntent` runs. */
 export function senderAuthNote(authResults: string | null): string {
-  return authResults !== null && DMARC_PASS_RE.test(authResults) ? 'auth: dmarc=pass' : 'auth: NOT verified'
+  return dmarcPasses(authResults) ? 'auth: dmarc=pass' : 'auth: NOT verified'
 }
 
 // -- Plain text --
@@ -374,7 +407,18 @@ export async function validateReplyBody(
   // LEADER, U+FF0E FULLWIDTH FULL STOP, etc.) down to their plain ASCII equivalents, so a body
   // using `evil․com` or `evil．com` to dodge the literal `.` in the domain regexes is screened
   // exactly like `evil.com`.
-  const body = rawBody.normalize('NFKC')
+  //
+  // Strip default-ignorable FORMAT characters (\p{Cf}: U+200B ZWSP, U+FEFF BOM, U+200C/D ZWNJ/ZWJ,
+  // U+2060 WORD JOINER, and U+00AD SOFT HYPHEN — all category Cf) both BEFORE and AFTER NFKC (FR5,
+  // live-reproduced). NFKC does NOT remove these — a single invisible char inside a token
+  // (`Your ref​und`, `evil​.com`, `888​5550142`) breaks every promise/domain/phone regex while
+  // rendering identically to the customer. Same precedent as `sourcing/guards.ts`. Stripping runs
+  // twice because NFKC can expand a compatibility char into a sequence that itself contains a format
+  // char. The STRIPPED+normalized string is returned as `normalizedBody` — it is what gets stored
+  // and SENT, so removing invisibles from outbound mail is correct, not merely a screening
+  // convenience.
+  const stripFormat = (s: string): string => s.replace(/\p{Cf}/gu, '')
+  const body = stripFormat(stripFormat(rawBody).normalize('NFKC'))
 
   if (HTML_TAG_RE.test(body)) return fail('html_not_allowed', 'reply body contains an HTML tag')
   if (body.length > MAX_BODY_LEN) return fail('body_too_long', `reply body is ${body.length} chars (max ${MAX_BODY_LEN})`)
@@ -466,7 +510,7 @@ export async function validateRefundIntent(
     .orderBy(sql`${supportMessages.sentAt} DESC NULLS LAST, ${supportMessages.createdAt} DESC, ${supportMessages.id} DESC`)
     .limit(1)
 
-  if (!latestInbound || latestInbound.authResults === null || !DMARC_PASS_RE.test(latestInbound.authResults)) {
+  if (!latestInbound || !dmarcPasses(latestInbound.authResults)) {
     return fail('refund_sender_unauthenticated', 'latest inbound message is not dmarc=pass authenticated')
   }
 

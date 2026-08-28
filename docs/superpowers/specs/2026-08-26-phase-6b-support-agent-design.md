@@ -310,12 +310,15 @@ requires `reply` — a refund the customer isn't told about is a bug).
    let two concurrent proposals each pass the bound). `rejected`/`expired`/`failed` are excluded
    because that money is cancelled — which is also precisely why §4's refund executor runs its
    idempotency pre-check BEFORE the staleness guard: a crashed-after-refund attempt left `failed`
-   would otherwise be invisible here and re-proposable. The ticket's latest inbound message
-   must carry `dmarc=pass` in its stored `auth_results` (NULL — e.g. a pre-6B message — counts
-   as non-pass; **new**: ingest records the topmost
+   would otherwise be invisible here and re-proposable. For the ticket's latest inbound message,
+   **the parsed top-level dmarc method result must be `pass`** (NULL/missing header — e.g. a
+   pre-6B message — counts as non-pass; **new**: ingest records the topmost
    `Authentication-Results` header per inbound message — From is attacker-forgeable under
    `p=none`, and 6B is the first phase that moves money on the ownership link; an unauthenticated
-   sender can spoof a victim's From and guess their sequential order number). Non-pass → the
+   sender can spoof a victim's From and guess their sequential order number). **The gate PARSES the
+   `dmarc=` METHOD result out of the header (FR1) — it is NOT a `dmarc=pass` substring test, which a
+   crafted `MAIL FROM: dmarc=pass@evil` (stamped by Gmail into the spf method's `smtp.mailfrom=`
+   param) would fool into passing a message Gmail itself marked dmarc=fail.** Non-pass → the
    refund output is rejected (reply-only is still fine); the agent's system prompt tells it to
    escalate refund requests it cannot back. `cjDisputeReasonId` required when `openCjDispute`
    (core zod already enforces).

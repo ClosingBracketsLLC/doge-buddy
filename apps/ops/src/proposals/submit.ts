@@ -61,10 +61,11 @@ export interface SubmitProposalDeps {
  * two messages land the same second. A ticket with no inbound message at all (shouldn't happen for
  * a real ticket, but this is notify-body text, not a security gate) reads as unverified.
  *
- * The pass/fail JUDGMENT itself is `support/validator.ts`'s `senderAuthNote` (Task 18 review, M7)
- * — this function only does the DB fetch. Before this fix it re-typed the regex locally
- * (`/dmarc=pass/i`, no word boundaries), which could disagree with the actual refund gate
- * (`DMARC_PASS_RE`, word-bounded) on a crafted header like `xdmarc=pass`.
+ * The pass/fail JUDGMENT itself is `support/validator.ts`'s `senderAuthNote` (Task 18 review, M7;
+ * FR1) — this function only does the DB fetch. `senderAuthNote` and the refund money-gate both run
+ * the SAME `dmarcPasses` parser, so this display note can never disagree with what actually gates a
+ * refund — including on an attacker-forged header (`smtp.mailfrom=dmarc=pass@evil`) that a naive
+ * substring test would misread as verified.
  */
 async function senderAuthNoteForTicket(db: Db, ticketId: string): Promise<string> {
   const [latestInbound] = await db
