@@ -279,7 +279,11 @@ requires `reply` — a refund the customer isn't told about is a bug).
    (`pending`/`approved`/`applying`/`applied`) refund proposal exists for the same ticket (the
    two-proposal split means a legitimately refund-announcing draft's refund object lives in the
    SIBLING proposal — and the owner edit path (§5) re-runs this validator, which without the
-   sibling lookup would reject every legitimate edit). Known cost, accepted: verbatim policy
+   sibling lookup would reject every legitimate edit). This exemption lets a reply SHIP on the
+   strength of a live sibling refund; **FR2 closes the far side of it** — if that backing later dies
+   (the refund is rejected, or expires via the sweep) after the reply has shipped, the ticket
+   re-escalates with a page (§1's FR2a reject row + FR2b selection backstop), so a refund-promising
+   reply can never end up permanently unbacked and silent. Known cost, accepted: verbatim policy
    quotes ("refunds are processed within 5 days") in a no-refund reply false-positive into an
    escalation — conservative by design. **Deviation from parent §(c)3, stated:** the parent's
    "promised actions outside the allowed set" is implemented as this enumerated
