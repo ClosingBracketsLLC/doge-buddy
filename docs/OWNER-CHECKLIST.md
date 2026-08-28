@@ -26,6 +26,61 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 - [x] ~~Ask Shopify support about the launch-store type.~~ **Skipped by choice (2026-08-23):** Robert created a Shopify Partner account and a client-transfer store directly, without confirming with Shopify support first — his call, his store, willing to eat any cost if the transfer assumption turns out wrong. This store is now doing double duty as both the dev/test store (item below) and the intended Phase 7 launch store.
 
+## Phase 6B live bring-up (next)
+
+Phase 6B — the support **agent** (per-ticket Agent SDK sessions, read-only tools, drafted replies
+and refunds behind your approval) — is built and reviewed; everything below is its live tier.
+Claude drives the technical steps with you; only the two ⚪ items need your hands on a browser.
+
+- [ ] 🟡 **Push, then run migrations 0005 + 0006 on Railway.** (0) `git push origin main` after the
+  6B merge. (1) **Railway does NOT auto-migrate** — run them yourself, same as 6A's step:
+  `DATABASE_URL='<railway url>' pnpm --filter @doge-buddy/db migrate`. Do it BEFORE (or right
+  after) the redeploy lands: the deployed poll and `/admin` read columns those two add
+  (`agent_session_entries` + `support_messages.auth_results` + the ticket agent watermarks in 0005,
+  `support_tickets.last_agent_finished_at` in 0006), and a poll against a pre-migration DB errors
+  on every single cycle. (2) **No new env vars this phase** — 6B adds no config at all; it reuses
+  the `GMAIL_*` / `SUPPORT_ADDRESS` set from 6A and `ANTHROPIC_API_KEY` from Phase 5, all already
+  in Railway.
+- [ ] ⚪ **Gmail "Send mail as" check** (carried from 6A's list — now actually load-bearing, since
+  6B is the first phase that SENDS): in Gmail as `admin@` → Settings → Accounts → confirm
+  `support@dogebuddy.com` is listed under "Send mail as" (add it if not — no verification step for
+  your own alias). Every drafted reply goes out `From: support@dogebuddy.com`.
+- [ ] ⚪ **An Outlook-reachable test address** — a free `outlook.com` account is enough. Threading
+  is the one behaviour Gmail-to-Gmail cannot prove: Gmail groups a conversation on its own thread
+  id, Outlook groups it on `In-Reply-To`/`References`, so a reply that threads perfectly in Gmail
+  can still fork into a second conversation in Outlook. This address is how we see that.
+- [ ] 🟡 **Tier-2 walk (spec §8 + the exit criteria).** Four checks, run with Claude:
+  1. **Email → approve-from-phone → threading.** Send a real support email → categorized ticket
+     with an agent-drafted reply proposal on Telegram + `/admin/proposals` → approve from your
+     phone → the reply lands in the customer mailbox, `From: support@dogebuddy.com`, **threaded as
+     ONE conversation in Gmail AND in Outlook** (this is why the outlook.com address above exists).
+  2. **Bogus-gateway refund, delivered twice.** Place a test order through the test payment gateway
+     → let the agent draft a refund → approve it → deliver the apply job a second time → **exactly
+     one refund** in the Shopify admin (Shopify's idempotency key covers the fast duplicate; the
+     `db-proposal-<id>` refund NOTE is the durable half, since those keys expire in ~24h).
+  3. **Follow-up resume across a redeploy.** Reply again on an already-answered ticket, redeploy
+     Railway in between, then let the next run go: the session id stays stable and the run's
+     transcript shows the prior context (the transcript lives in Postgres, not on Railway's
+     ephemeral disk — that separation is exactly what this check proves).
+  4. **`openCjDispute` against the CJ sandbox.** A refund proposal that also opens a CJ dispute —
+     dispute-WRITE bodies are CJ's only never-live-verified surface, and this closes them.
+- [ ] 🟡 **Re-record the Gmail fixtures live** (`GMAIL_CONTRACT=1`) — deferred from the 6B branch
+  because `apps/ops/.env` is gitignored and exists only in the main checkout, so run it from there
+  after the merge, with one owner-seeded test email in the mailbox first. Heads-up carried from the
+  build: a live re-record changes the recorded message/thread ids, so `packages/gmail/test/client.test.ts`'s
+  call-site id literals have to be updated in the same commit.
+- [ ] 🟡 **BEFORE the first live refund: verify the mutation shape against the pinned 2026-07
+  schema.** `RefundInput` / `OrderTransactionInput` are written from documentation, never yet
+  executed against a real store. Two specific suspicions to settle first: whether `gateway` is
+  nullable on a transaction entry (we send the parent transaction's gateway verbatim), and whether
+  each transaction entry needs its own `orderId` alongside the top-level one. A wrong shape here
+  fails loudly rather than silently, but it fails on a real order — check the schema first.
+- [ ] 🟡 **Right after that test refund, read the state back.** Call `orderRefundState` on the order
+  and confirm two things: the `db-proposal-<id>` note round-trips **verbatim** (it is the durable
+  half of the never-refund-twice guarantee — if Shopify trims or rewrites it, that guarantee is
+  gone), and the `refunds` list is **not page-capped** (we select it as a plain unpaginated list;
+  if the live API paginates it instead, a busy order could hide our own prior refund and re-pay).
+
 ## Phase 1–3 window
 
 - [x] ~~Railway account + deploy ops.~~ **Done (2026-08-23):** ops + Postgres live at `https://doge-buddyops-production.up.railway.app` — healthz green (`db:ok, queue:ok`), demo job processed on the deployed instance (**Phase 0 exit criterion closed**), and the webhook-audit cron self-registered all three Shopify webhook topics (ORDERS_PAID, ORDERS_CANCELLED, REFUNDS_CREATE) at the Railway URL. *Follow-up closed same day:* CJ webhooks are registered and **proven end-to-end live** — the diagnostic capture revealed the signature rides in the `sign` header (fixed in 2a2e0e5), registration then succeeded, and real sandbox-order events flowed CJ → HMAC verified → recorded → processed on the deployed instance. Nothing on the CJ adapter remains unverified except dispute-write bodies and STOCK/PRODUCT event shapes.
@@ -63,6 +118,6 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ---
 
-*Maintained by Claude; last updated 2026-08-25 (Phase 5 CLOSED on every tier: run `9bb475d9` → 2 proposals → Robert approved one from the dashboard → ACTIVE product 8949329592408 with CJ mapping. Phase 4B's live tier closed by the same tap). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
+*Maintained by Claude; last updated 2026-08-27 (Phase 6B built + reviewed on its branch; its live bring-up is the new section above). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** **Close 6A's live tier, then brainstorm Phase 6B.** Phase 6A (support email plumbing) is BUILT, fully reviewed (14 task gates + 4-lens final whole-branch review; 764 tests), and MERGED to main (65b84ac). The live bring-up is the checklist item above: Robert pushes main, runs migration 0004 on Railway, adds the 4 GMAIL_* vars; then Claude drives the `GMAIL_CONTRACT=1` fixture re-record and the test-email Tier-2 (ticket on /admin/tickets + chargeback→Telegram + reply-from-Gmail checks). **Before 6B's first sendReply caller, fix the parked items** (ledgered in the 6A plan's final review): the `isAbortError` TimeoutError-name bug in packages/gmail/src/client.ts, plus rfc2822's missing MIME-Version and RFC 2047 folding. **Phase 6B** = the support agent (Agent SDK per-ticket sessions, read-only tools + create_proposal) + support_reply/refund apply workers, per parent spec §(c)3-4 — house pattern: prework → brainstorm with Robert → spec → adversarial panel → plan → SDD with both review layers. DMARC DNS record due ~48h after DKIM (item above); DB password rotation still open.
+**Next build session starts here →** **6B's live bring-up, then Phase 7.** Phase 6B (the support agent) is BUILT and fully reviewed — 20 task gates, every one closed clean or after its own fix rounds, plus a mailbox-to-mailbox E2E suite; 1,349 tests green workspace-wide, typecheck clean. 6A's parked items (the `isAbortError` TimeoutError bug, MIME-Version, RFC 2047 folding) were cleared first, on this same branch, before anything called `sendReply`. What remains is entirely live: the **Phase 6B live bring-up** section above — push, migrations 0005+0006 on Railway (no auto-migrate, no new env vars), the two owner items (Send-mail-as, an outlook.com address), the four-check Tier-2 walk, and the three carried verifications (live `GMAIL_CONTRACT=1` re-record from the main checkout, the `RefundInput`/`OrderTransactionInput` schema check BEFORE the first live refund, and the `orderRefundState` note/pagination read-back right after it). **Phase 7** = the canary launch, per parent spec §(c)5 — it needs the CJ wallet top-up and the policy-page paste, both already listed below. DMARC DNS record still open (item below); DB password rotation still open.
