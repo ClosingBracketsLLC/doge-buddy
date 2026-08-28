@@ -32,8 +32,11 @@ import { createGmailClient } from '../src/client.ts'
  *
  * Recorded endpoints: getProfile, listHistory (1 page — no pageToken follow-up), listMessages,
  * getThread, getMessage (format=full for one nested-multipart + one single-part owner-seeded test
- * message, format=metadata for the nested one), listLabels. Everything else in the fixtures
- * directory (404/error fixtures, label-create, send-reply) is hand-authored and left untouched.
+ * message; format=metadata for the nested one AND for a message carrying an Authentication-Results
+ * header — the money gate's input, FR9), listLabels. See `RECORDED_FIXTURE_NAMES` for the exact
+ * file list. Everything else in the fixtures directory (404/error fixtures, label-create,
+ * send-reply, message-metadata-proposal-marker) is hand-authored and left untouched — the
+ * X-DogeBuddy-Proposal marker only rides OUR OWN sends, which the recorder never performs.
  *
  * NEVER records:
  *   - sendReply — no unsolicited sends against a real mailbox.
@@ -53,6 +56,31 @@ interface CapturedFixture {
   request: { method: string; path: string; query?: Record<string, string | string[]> }
   response: { status: number; body: unknown }
 }
+
+/**
+ * The fixture files a live `GMAIL_CONTRACT=1` run (re)writes, as an explicit exported list so a unit
+ * test can assert the money-gate inputs are among them (FR9). `message-metadata-auth-results.json`
+ * is the money gate's own input: the refund sender-auth check parses the topmost
+ * `Authentication-Results` header, and before this it was backed ONLY by a hand-authored fixture, so
+ * a live re-record could never validate `authenticationResults` normalization against real Gmail.
+ *
+ * NOT in this list (deliberate): `message-metadata-proposal-marker.json`. The `X-DogeBuddy-Proposal`
+ * marker only appears on OUR OWN sends, which the recorder never performs (no unsolicited sends
+ * against a real mailbox) — its real-Gmail verification is the OWNER-CHECKLIST Tier-2 metadata
+ * assertion, not this recorder. The remaining hand-authored fixtures (404/error, label-create,
+ * send-reply) are also intentionally absent — the recorder leaves them untouched.
+ */
+export const RECORDED_FIXTURE_NAMES = [
+  'profile.json',
+  'history-page1.json',
+  'messages-list.json',
+  'thread-get.json',
+  'message-full-nested.json',
+  'message-full-singlepart.json',
+  'message-metadata.json',
+  'message-metadata-auth-results.json',
+  'labels-list.json',
+] as const
 
 export interface FixtureFile {
   name: string
@@ -205,12 +233,16 @@ async function recordFixtures(): Promise<void> {
   await client.getThread(firstMessage.threadId)
 
   // Classify owner-seeded messages by real payload shape (payload.parts present -> nested
-  // multipart) rather than guessing from listMessages alone, which carries no structural info.
+  // multipart) rather than guessing from listMessages alone, which carries no structural info. The
+  // same full-format scan ALSO finds a message that carries an `Authentication-Results` header
+  // (FR9) — a real received email naturally has Google's A-R stamp — so its metadata fetch below
+  // exercises the money gate's own normalization against real Gmail.
   let nestedId: string | null = null
   let singlepartId: string | null = null
+  let authResultsId: string | null = null
 
   for (const { id } of messages.ids) {
-    if (nestedId && singlepartId) break
+    if (nestedId && singlepartId && authResultsId) break
 
     const scratchKey = `candidate:${id}`
     target.current = scratchKey
@@ -219,7 +251,9 @@ async function recordFixtures(): Promise<void> {
     captured.delete(scratchKey)
     if (!raw) continue
 
-    const body = raw.response.body as { payload?: { parts?: unknown[] } }
+    const body = raw.response.body as {
+      payload?: { parts?: unknown[]; headers?: { name?: string; value?: string }[] }
+    }
     const isNested = Array.isArray(body.payload?.parts) && (body.payload?.parts?.length ?? 0) > 0
 
     if (isNested && !nestedId) {
@@ -229,6 +263,11 @@ async function recordFixtures(): Promise<void> {
       singlepartId = id
       captured.set('message-full-singlepart.json', raw)
     }
+
+    const hasAuthResults = (body.payload?.headers ?? []).some(
+      (h) => h.name?.toLowerCase() === 'authentication-results',
+    )
+    if (hasAuthResults && !authResultsId) authResultsId = id
   }
 
   if (!nestedId || !singlepartId) {
@@ -238,9 +277,22 @@ async function recordFixtures(): Promise<void> {
         `Seed one of each (see this script's header comment) and retry.`,
     )
   }
+  if (!authResultsId) {
+    throw new Error(
+      'record-fixtures: no inbound message carrying an Authentication-Results header was found — ' +
+        'seed a real received email (its Google A-R stamp is the refund money-gate\'s input) so ' +
+        'message-metadata-auth-results.json exercises authenticationResults normalization live.',
+    )
+  }
 
   target.current = 'message-metadata.json'
   await client.getMessage(nestedId, { format: 'metadata' })
+
+  // FR9: metadata for a message that carries Authentication-Results — the topmost A-R header is the
+  // refund sender-auth gate's input, and `getMessage(format:'metadata')` requests it (it is in
+  // METADATA_HEADERS), so this fixture validates that normalization against real Gmail.
+  target.current = 'message-metadata-auth-results.json'
+  await client.getMessage(authResultsId, { format: 'metadata' })
 
   target.current = 'labels-list.json'
   await client.listLabels()

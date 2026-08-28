@@ -32,15 +32,20 @@ Phase 6B — the support **agent** (per-ticket Agent SDK sessions, read-only too
 and refunds behind your approval) — is built and reviewed; everything below is its live tier.
 Claude drives the technical steps with you; only the two ⚪ items need your hands on a browser.
 
-- [ ] 🟡 **Push, then run migrations 0005 + 0006 on Railway.** (0) `git push origin main` after the
-  6B merge. (1) **Railway does NOT auto-migrate** — run them yourself, same as 6A's step:
-  `DATABASE_URL='<railway url>' pnpm --filter @doge-buddy/db migrate`. Do it BEFORE (or right
-  after) the redeploy lands: the deployed poll and `/admin` read columns those two add
-  (`agent_session_entries` + `support_messages.auth_results` + the ticket agent watermarks in 0005,
-  `support_tickets.last_agent_finished_at` in 0006), and a poll against a pre-migration DB errors
-  on every single cycle. (2) **No new env vars this phase** — 6B adds no config at all; it reuses
-  the `GMAIL_*` / `SUPPORT_ADDRESS` set from 6A and `ANTHROPIC_API_KEY` from Phase 5, all already
-  in Railway.
+- [ ] 🟡 **Run migrations 0005 + 0006 on Railway FIRST, THEN `git push`.** Order is load-bearing —
+  do NOT push before migrating. (1) **Railway does NOT auto-migrate** — run them yourself, same as
+  6A's step: `DATABASE_URL='<railway url>' pnpm --filter @doge-buddy/db migrate`. Run them
+  **STRICTLY BEFORE** `git push origin main` triggers the redeploy. The new 6B ingest/claim code and
+  `/admin` read columns those two migrations add (`agent_session_entries` +
+  `support_messages.auth_results` + the ticket agent watermarks in 0005,
+  `support_tickets.last_agent_finished_at` in 0006). If the redeploy lands against a pre-0005 schema,
+  the poll throws on **every single cycle** (the columns don't exist) — and `/healthz` stays green
+  (it's a bare `SELECT 1`), so Railway happily retires the old 6A instance and you get a ~20-minute
+  SILENT mail outage. The reverse overlap is safe: a migrated schema running the OLD 6A code during
+  the brief deploy window is fine, because migrations 0005/0006 are **purely additive** (new
+  columns/tables only — 6A code never selects them, so nothing breaks). Migrate, confirm, then push.
+  (2) **No new env vars this phase** — 6B adds no config at all; it reuses the `GMAIL_*` /
+  `SUPPORT_ADDRESS` set from 6A and `ANTHROPIC_API_KEY` from Phase 5, all already in Railway.
 - [ ] ⚪ **Gmail "Send mail as" check** (carried from 6A's list — now actually load-bearing, since
   6B is the first phase that SENDS): in Gmail as `admin@` → Settings → Accounts → confirm
   `support@dogebuddy.com` is listed under "Send mail as" (add it if not — no verification step for
@@ -49,11 +54,21 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   is the one behaviour Gmail-to-Gmail cannot prove: Gmail groups a conversation on its own thread
   id, Outlook groups it on `In-Reply-To`/`References`, so a reply that threads perfectly in Gmail
   can still fork into a second conversation in Outlook. This address is how we see that.
-- [ ] 🟡 **Tier-2 walk (spec §8 + the exit criteria).** Four checks, run with Claude:
+- [ ] 🟡 **Tier-2 walk (spec §8 + the exit criteria).** Four checks, run with Claude. **Before
+  sign-off:** the live `GMAIL_CONTRACT=1` re-record (the item below) must run FIRST — Tier-2 is not
+  signed off against stale fixtures, and the re-record updates `client.test.ts`'s call-site id
+  literals in the same commit.
   1. **Email → approve-from-phone → threading.** Send a real support email → categorized ticket
      with an agent-drafted reply proposal on Telegram + `/admin/proposals` → approve from your
      phone → the reply lands in the customer mailbox, `From: support@dogebuddy.com`, **threaded as
      ONE conversation in Gmail AND in Outlook** (this is why the outlook.com address above exists).
+  1a. **Marker header round-trip (send-recovery's only real-Gmail check).** Right after walk #1,
+     fetch the sent message via Gmail `format=metadata` and assert its `X-DogeBuddy-Proposal` header
+     equals the proposal id. This custom `X-` header is the ONLY thing that prevents a crash-retry
+     from double-sending (the recovery scan reads it back to recognise our own prior send) — and it
+     is FIXTURE-ONLY today (the recorder never records our sends). If Gmail drops or rewrites the
+     header, a crash between send and the `applied` transition silently sends the customer a SECOND
+     copy. This walk is its only live verification.
   2. **Bogus-gateway refund, delivered twice.** Place a test order through the test payment gateway
      → let the agent draft a refund → approve it → deliver the apply job a second time → **exactly
      one refund** in the Shopify admin (Shopify's idempotency key covers the fast duplicate; the
