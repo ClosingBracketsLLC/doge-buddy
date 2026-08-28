@@ -169,7 +169,14 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
       threadSnapshotAt: payload.threadSnapshotAt,
       newerInboundAt: newerInbound.sentAt,
       notifyTitle: NOT_SENT_TITLE,
-      notifyBody: `${row.summary}\n\nReason: ${STALE_APPLY_ERROR}`,
+      // Task 18 review ruling: wording unified with `applyRefund`'s own stale hand-back notify —
+      // both say the same thing about the same event (a customer message arriving mid-approval),
+      // so an owner who sees one after the other reads it as one continuation, not two different
+      // failures. Deliberately NOT error-flavoured: nothing is broken and nothing is lost — the
+      // agent re-reads the thread and the owner decides again on a fresh draft.
+      notifyBody:
+        `${row.summary}\n\nThe customer sent a newer message after this reply was drafted, so nothing was sent. ` +
+        'The agent is re-reading the thread — re-approve after the agent re-drafts.',
       enqueueAlertKind: 'support_reply_stale_enqueue_failed',
       notifyAlertKind: NOTIFY_FAILED_ALERT,
     })

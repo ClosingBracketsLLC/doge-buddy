@@ -20,6 +20,7 @@ import { applyTransition, IllegalTransitionError, StaleStatusError } from '../..
 import type { SendOpts } from '../../fulfillment/types.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
 import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts'
+import { onSupportProposalRejected, validateSupportProposalForApproval } from '../../proposals/support-decision.ts'
 import { applyProposalTransition, StaleProposalStatusError } from '../../proposals/transitions.ts'
 import { SETTINGS_DEFAULTS, type Settings, type SettingKey, type WorkflowMode } from '../../settings.ts'
 import {
@@ -37,7 +38,7 @@ import {
 import { loadHealthStrip, type HealthStrip } from './health.ts'
 import { html, layout, raw, type RawHtml } from './html.ts'
 import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
-import { renderProposalDetail, renderProposalRow } from './render-proposal.ts'
+import { renderProposalDetail, renderProposalRow, type ProposalDetailExtras, type ProposalRow } from './render-proposal.ts'
 import { renderRunDetail, renderRunRow } from './render-run.ts'
 import {
   renderTicketDetail,
@@ -668,6 +669,51 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         })
       })
 
+      /**
+       * DB-derived extras `renderRefundSummary` needs but a bare `proposals` row doesn't carry
+       * (Task 18): the linked order's number, a cheap sender-auth note, and — Task 16 note — the
+       * `proposal.refund_issued` audit row's `refundId` when present (it exists exactly when money
+       * moved, regardless of the proposal's current status, so this is NOT scoped to `pending`).
+       * `{}` for every other type: `renderProposalDetail` only reads these fields for `refund`.
+       */
+      async function loadProposalDetailExtras(row: ProposalRow): Promise<ProposalDetailExtras> {
+        if (row.type !== 'refund') return {}
+
+        const payload = row.payload as { orderId?: string }
+        let orderNumber: string | null = null
+        if (payload.orderId) {
+          const [order] = await deps.db
+            .select({ number: orders.shopifyOrderNumber })
+            .from(orders)
+            .where(eq(orders.id, payload.orderId))
+            .limit(1)
+          orderNumber = order?.number ?? null
+        }
+
+        let authNote: string | null = null
+        if (row.ticketId) {
+          const [latestInbound] = await deps.db
+            .select({ authResults: supportMessages.authResults })
+            .from(supportMessages)
+            .where(and(eq(supportMessages.ticketId, row.ticketId), eq(supportMessages.direction, 'inbound')))
+            .orderBy(sql`${supportMessages.sentAt} DESC NULLS LAST, ${supportMessages.createdAt} DESC, ${supportMessages.id} DESC`)
+            .limit(1)
+          const auth = latestInbound?.authResults ?? null
+          authNote = auth !== null && /dmarc=pass/i.test(auth) ? 'auth: dmarc=pass' : 'auth: NOT verified'
+        }
+
+        const [refundIssuedRow] = await deps.db
+          .select({ detail: auditLog.detail })
+          .from(auditLog)
+          .where(and(eq(auditLog.entityId, row.id), eq(auditLog.action, 'proposal.refund_issued')))
+          .limit(1)
+        const refundIssuedId = refundIssuedRow
+          ? ((refundIssuedRow.detail as Record<string, unknown> | null)?.refundId as string | undefined)
+          : undefined
+
+        return { orderNumber, ticketId: row.ticketId, authNote, refundIssuedId: refundIssuedId ?? null }
+      }
+
       authed.get('/admin/proposals/:id', async (request, reply) => {
         const { id } = request.params as { id: string }
         return safeHandle(id, reply, async () => {
@@ -678,7 +724,8 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Not found.</p>`))
           }
 
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', renderProposalDetail(row)))
+          const extras = await loadProposalDetailExtras(row)
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', renderProposalDetail(row, extras)))
         })
       })
 
@@ -723,11 +770,39 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                 .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
             }
 
-            // Edit-then-approve: an optional `payload` form field carries JSON text (from a
-            // textarea) that replaces the proposal's stored payload before applying. Only approve
-            // honors it — reject has nothing to validate a replacement payload against.
+            // Edit-then-approve: an optional form field carries a replacement for the proposal's
+            // stored payload before applying. Only approve honors it — reject has nothing to
+            // validate a replacement payload against. `support_reply` gets a dedicated `body`
+            // field (Task 18: the raw-JSON textarea is SUPPRESSED for this type — see
+            // `render-proposal.ts`'s `renderDecisionForms`) reconstructed onto the STORED payload,
+            // so an edit can only ever change the reply text, never smuggle a different
+            // `ticketId`/`threadSnapshotAt` through the edit path. `refund` has no edit form at
+            // all, so it never reaches either branch below. Every other type keeps the original
+            // raw-JSON `payload` field.
             let patchedPayload: unknown
-            if (decision === 'approve') {
+            if (decision === 'approve' && row.type === 'support_reply') {
+              const body = (request.body ?? {}) as { body?: string }
+              if (body.body !== undefined) {
+                const candidate = { ...(row.payload as Record<string, unknown>), body: body.body }
+                const result = PAYLOAD_SCHEMAS.support_reply.safeParse(candidate)
+                if (!result.success) {
+                  const issues = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+                  return reply
+                    .code(400)
+                    .type('text/html; charset=utf-8')
+                    .send(
+                      layout(
+                        'Proposal',
+                        html`<p>Invalid payload:</p>
+                          <ul>
+                            ${issues.map((issue) => html`<li>${issue}</li>`)}
+                          </ul>`,
+                      ),
+                    )
+                }
+                patchedPayload = result.data
+              }
+            } else if (decision === 'approve' && row.type !== 'refund') {
               const body = (request.body ?? {}) as { payload?: string }
               if (body.payload) {
                 let parsedJson: unknown
@@ -762,13 +837,39 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
               }
             }
 
+            // The audit's `edited` flag reflects whether the OWNER changed anything — captured
+            // before the validator (below) potentially rewrites the payload it stores (a
+            // normalized-but-unedited body must still audit as `edited: false`).
+            const edited = patchedPayload !== undefined
+            let payloadToStore = patchedPayload
+
+            // §3 validator re-run (Task 18 review ruling — security gate): EVERY approve of a
+            // `support_reply` or `refund` re-runs the same screen the agent's draft was originally
+            // checked against, edited or not — a proposal that passed at draft time can stop being
+            // safe by the time the owner taps Approve (its sibling refund got rejected out from
+            // under it, say), and the raw-JSON edit path must never be a way to bypass the screen.
+            // On success this sets `payloadToStore` to the validator's own returned payload — for
+            // `support_reply` that's the NFKC-NORMALIZED body (Task 18 ruling: "what was screened
+            // is what sends"), applied whether this was an edit or not.
+            if (decision === 'approve' && (row.type === 'support_reply' || row.type === 'refund')) {
+              const candidatePayload = patchedPayload ?? row.payload
+              const validation = await validateSupportProposalForApproval(deps.db, row, candidatePayload)
+              if (!validation.ok) {
+                return reply
+                  .code(400)
+                  .type('text/html; charset=utf-8')
+                  .send(layout('Proposal', html`<p>Validation failed: ${validation.code} — ${validation.detail}</p>`))
+              }
+              payloadToStore = validation.payload
+            }
+
             const status = decision === 'approve' ? 'approved' : 'rejected'
             try {
               await applyProposalTransition(deps.db, id, 'pending', status, {
                 decidedBy: 'owner',
                 decidedAt: new Date(),
                 actionTokenHash: null,
-                ...(patchedPayload ? { payload: patchedPayload } : {}),
+                ...(payloadToStore !== undefined ? { payload: payloadToStore } : {}),
               })
             } catch (err) {
               if (err instanceof StaleProposalStatusError) {
@@ -782,8 +883,12 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
               action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
               entityType: 'proposal',
               entityId: id,
-              detail: { via: 'admin', edited: Boolean(patchedPayload) },
+              detail: { via: 'admin', edited },
             })
+
+            if (decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')) {
+              await onSupportProposalRejected(deps.db, { id, ticketId: row.ticketId, type: row.type })
+            }
 
             if (decision === 'approve') {
               try {

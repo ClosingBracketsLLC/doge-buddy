@@ -151,7 +151,13 @@ function hasPromisedActionHit(normalizedBody: string): boolean {
   return false
 }
 
-async function hasLiveSiblingRefundProposal(db: Db, ticketId: string): Promise<boolean> {
+/**
+ * Exported (Task 18) so `proposals/support-decision.ts`'s approve-time re-validation can precompute
+ * the same "is there a live refund sibling" answer this file's own promised-action screen would
+ * otherwise compute internally — see that module's `validateSupportProposalForApproval` doc
+ * comment for why precomputing beats always passing `hasRefundInOutput: false`.
+ */
+export async function hasLiveSiblingRefundProposal(db: Db, ticketId: string): Promise<boolean> {
   const [row] = await db
     .select({ id: proposals.id })
     .from(proposals)

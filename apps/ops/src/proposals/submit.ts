@@ -1,8 +1,10 @@
-import { proposals, auditLog, type createDb } from '@doge-buddy/db'
+import { formatCents } from '@doge-buddy/core'
 import {
   NewListingPayloadSchema, SupportReplyPayloadSchema, RefundPayloadSchema,
-  DeprecateProductPayloadSchema, type ProposalType,
+  DeprecateProductPayloadSchema, type ProposalType, type SupportReplyPayload, type RefundPayload,
 } from '@doge-buddy/core'
+import { proposals, auditLog, orders, supportMessages, supportTickets, type createDb } from '@doge-buddy/db'
+import { and, eq, sql } from 'drizzle-orm'
 import type { SendOpts } from '../fulfillment/types.ts'
 import type { NotifyOwner } from '../notify/notify.ts'
 import type { Settings, SettingKey } from '../settings.ts'
@@ -49,6 +51,126 @@ export interface SubmitProposalDeps {
   enqueue: (name: string, data: object, opts?: SendOpts) => Promise<void>
   alert: Alert
   adminBaseUrl?: string
+}
+
+/**
+ * Cheap sender-authentication line for a ticket's LATEST inbound message (spec §5's "auth-note").
+ * Same NULLS-LAST/created_at/id tiebreak ordering as `support/validator.ts`'s
+ * `validateRefundIntent` — "latest inbound message" must never depend on unstable row order when
+ * two messages land the same second. A ticket with no inbound message at all (shouldn't happen for
+ * a real ticket, but this is notify-body text, not a security gate) reads as unverified.
+ */
+async function senderAuthNoteForTicket(db: Db, ticketId: string): Promise<string> {
+  const [latestInbound] = await db
+    .select({ authResults: supportMessages.authResults })
+    .from(supportMessages)
+    .where(and(eq(supportMessages.ticketId, ticketId), eq(supportMessages.direction, 'inbound')))
+    .orderBy(sql`${supportMessages.sentAt} DESC NULLS LAST, ${supportMessages.createdAt} DESC, ${supportMessages.id} DESC`)
+    .limit(1)
+  const auth = latestInbound?.authResults ?? null
+  return auth !== null && /dmarc=pass/i.test(auth) ? 'auth: dmarc=pass' : 'auth: NOT verified'
+}
+
+/**
+ * `support_reply`'s Telegram body (spec §5): subject + customer + auth-note, then the draft body
+ * itself — head 600 + tail 200 with an ellipsis between when it's over 800 chars, the WHOLE body
+ * otherwise. The `body.slice(0, 600) + (... ? tail : body.slice(600))` shape is deliberate, not
+ * just "trim if long": for a body ≤ 800 chars, `slice(0, 600) + slice(600)` reconstructs the
+ * string EXACTLY regardless of its length (including < 600), so there is no separate "short body"
+ * branch to keep in sync with the long one.
+ *
+ * When a live sibling refund proposal is still `pending` on the same ticket, appends spec §5's
+ * warning line — the owner is about to approve a reply that may promise a refund without having
+ * decided the refund itself yet.
+ */
+async function buildSupportReplyNotifyBody(db: Db, payload: SupportReplyPayload): Promise<string> {
+  const [ticket] = await db
+    .select({ subject: supportTickets.subject, customerEmail: supportTickets.customerEmail })
+    .from(supportTickets)
+    .where(eq(supportTickets.id, payload.ticketId))
+    .limit(1)
+
+  const authNote = await senderAuthNoteForTicket(db, payload.ticketId)
+
+  const body = payload.body
+  const bodyExcerpt = body.slice(0, 600) + (body.length > 800 ? `\n…\n${body.slice(-200)}` : body.slice(600))
+
+  const [siblingRefund] = await db
+    .select({ id: proposals.id })
+    .from(proposals)
+    .where(and(eq(proposals.ticketId, payload.ticketId), eq(proposals.type, 'refund'), eq(proposals.status, 'pending')))
+    .limit(1)
+
+  const lines = [
+    `Subject: ${ticket?.subject ?? '(no subject)'}`,
+    `Customer: ${ticket?.customerEmail ?? '(unknown)'}`,
+    authNote,
+    '',
+    bodyExcerpt,
+  ]
+  if (siblingRefund) {
+    lines.push(
+      '',
+      `⚠ promises a refund — paired refund proposal ${siblingRefund.id}; decide the refund first or together; rejecting it cancels this reply`,
+    )
+  }
+  return lines.join('\n')
+}
+
+/**
+ * `refund`'s Telegram body (spec §5): `$X.XX on order #N — <reason>`, then the dispute flag and
+ * the same cheap auth-note `support_reply`'s body uses. `ticketId` is the top-level
+ * `SubmitProposalInput.ticketId` (a refund payload carries no ticket id of its own) — absent it,
+ * the auth-note is simply omitted rather than guessed at.
+ */
+async function buildRefundNotifyBody(db: Db, payload: RefundPayload, ticketId: string | undefined): Promise<string> {
+  const [order] = await db
+    .select({ number: orders.shopifyOrderNumber })
+    .from(orders)
+    .where(eq(orders.id, payload.orderId))
+    .limit(1)
+
+  const lines = [
+    `${formatCents(payload.amountCents)} on order #${order?.number ?? 'unknown'} — ${payload.reason}`,
+    payload.openCjDispute ? 'CJ dispute: requested' : 'CJ dispute: no',
+  ]
+  if (ticketId) {
+    lines.push(await senderAuthNoteForTicket(db, ticketId))
+  }
+  return lines.join('\n')
+}
+
+interface NotifyBodyCtx {
+  db: Db
+  id: string
+  summary: string
+  adminBaseUrl: string
+  ticketId?: string
+}
+
+/**
+ * Per-type Telegram notify body (Task 18, spec §5). `support_reply` and `refund` get dedicated,
+ * human-readable bodies built from the DB (see the two builders above); every other type
+ * (`new_listing`, `deprecate_product`) keeps the ORIGINAL generic body verbatim — summary,
+ * IP-check checkbox, the TikTok Creative Center ritual line, and the admin link. `payload` here is
+ * the already-`PAYLOAD_SCHEMAS`-validated value `submitProposal` is about to insert, not
+ * re-validated — same "display, not re-validation" contract `render-proposal.ts`'s renderers use.
+ */
+export async function buildProposalNotifyBody(type: ProposalType, payload: unknown, ctx: NotifyBodyCtx): Promise<string> {
+  if (type === 'support_reply') {
+    return buildSupportReplyNotifyBody(ctx.db, payload as SupportReplyPayload)
+  }
+  if (type === 'refund') {
+    return buildRefundNotifyBody(ctx.db, payload as RefundPayload, ctx.ticketId)
+  }
+
+  return [
+    ctx.summary,
+    '',
+    '[ ] IP check done',
+    'Ritual: check TikTok Creative Center (Pet Supplies, US, 7d) — paste anything interesting into the dashboard',
+    `${ctx.adminBaseUrl}/admin/proposals/${ctx.id}`,
+  ].join('\n')
 }
 
 export interface SubmitProposalInput {
@@ -118,13 +240,13 @@ export async function submitProposal(
     if (deps.adminBaseUrl) {
       const approveUrl = `${deps.adminBaseUrl}/a/${id}/approve?t=${token}`
       const rejectUrl = `${deps.adminBaseUrl}/a/${id}/reject?t=${token}`
-      const body = [
-        input.summary,
-        '',
-        '[ ] IP check done',
-        'Ritual: check TikTok Creative Center (Pet Supplies, US, 7d) — paste anything interesting into the dashboard',
-        `${deps.adminBaseUrl}/admin/proposals/${id}`,
-      ].join('\n')
+      const body = await buildProposalNotifyBody(input.type, parsed, {
+        db: deps.db,
+        id,
+        summary: input.summary,
+        adminBaseUrl: deps.adminBaseUrl,
+        ticketId: input.ticketId,
+      })
 
       await deps.notify({
         title: `New ${input.type} proposal`,

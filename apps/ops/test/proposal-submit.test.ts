@@ -1,6 +1,6 @@
-import { createDb, proposals, auditLog } from '@doge-buddy/db'
-import { and, eq } from 'drizzle-orm'
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createDb, proposals, auditLog, orders, supportMessages, supportTickets } from '@doge-buddy/db'
+import { and, eq, inArray } from 'drizzle-orm'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSettings } from '../src/settings.ts'
 import { createCaptureNotifier } from '../src/notify/capture.ts'
 import { hashActionToken } from '../src/proposals/tokens.ts'
@@ -18,10 +18,10 @@ function newListingPayload() {
   }
 }
 
-function refundPayload(amountCents: number) {
+function refundPayload(amountCents: number, orderId: string = crypto.randomUUID()) {
   return {
     type: 'refund',
-    orderId: crypto.randomUUID(),
+    orderId,
     shopifyOrderGid: 'gid://shopify/Order/123',
     amountCents,
     reason: 'damaged',
@@ -38,6 +38,199 @@ describe('submitProposal', () => {
     await db.delete(proposals)
   })
   afterAll(() => pool.end())
+
+  // -- Task 18: per-type Telegram notify bodies --------------------------------------------------
+
+  let ticketIds: string[] = []
+  let orderIds: string[] = []
+
+  afterEach(async () => {
+    if (ticketIds.length > 0) {
+      await db.delete(supportMessages).where(inArray(supportMessages.ticketId, ticketIds))
+      await db.delete(supportTickets).where(inArray(supportTickets.id, ticketIds))
+      ticketIds = []
+    }
+    if (orderIds.length > 0) {
+      await db.delete(orders).where(inArray(orders.id, orderIds))
+      orderIds = []
+    }
+  })
+
+  async function seedTicket(overrides: Partial<{ subject: string; customerEmail: string }> = {}) {
+    const [ticket] = await db
+      .insert(supportTickets)
+      .values({
+        gmailThreadId: `t18-${crypto.randomUUID()}`,
+        customerEmail: overrides.customerEmail ?? 'buyer@example.com',
+        subject: overrides.subject ?? 'Where is my order',
+        status: 'awaiting_approval',
+      })
+      .returning()
+    ticketIds.push(ticket!.id)
+    return ticket!
+  }
+
+  async function seedOrder(number = '#2001') {
+    const [order] = await db
+      .insert(orders)
+      .values({
+        shopifyOrderGid: `gid://shopify/Order/${crypto.randomUUID()}`,
+        shopifyOrderNumber: number,
+        isTest: true,
+      })
+      .returning()
+    orderIds.push(order!.id)
+    return order!
+  }
+
+  it('support_reply notify body: a >800-char draft is head(600)+tail(200) excerpted with … between', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket()
+
+    const head = 'H'.repeat(600)
+    const middle = 'M'.repeat(1200)
+    const tail = 'T'.repeat(200)
+    const longBody = head + middle + tail // 2000 chars total
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: longBody, threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    const notification = sent[0]!
+    expect(notification.body).toContain(head)
+    expect(notification.body).toContain(tail)
+    expect(notification.body).toContain('…')
+    expect(notification.body).not.toContain(middle)
+    expect(notification.body.indexOf(head)).toBeLessThan(notification.body.indexOf('…'))
+    expect(notification.body.indexOf('…')).toBeLessThan(notification.body.indexOf(tail))
+  })
+
+  it('support_reply notify body: an 800-char-or-under draft is NOT excerpted — the whole body appears', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket()
+    const shortBody = 'S'.repeat(800)
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: shortBody, threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    const notification = sent[0]!
+    expect(notification.body).toContain(shortBody)
+    expect(notification.body).not.toContain('…')
+  })
+
+  it('support_reply notify body includes the ticket subject/customer and does NOT contain the ⚠ line when no sibling refund is pending', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket({ subject: 'Broken widget', customerEmail: 'alice@example.com' })
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: 'Sorry about that.', threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    const notification = sent[0]!
+    expect(notification.body).toContain('Broken widget')
+    expect(notification.body).toContain('alice@example.com')
+    expect(notification.body).not.toContain('⚠')
+  })
+
+  it('support_reply notify body: warns with the paired proposal id when a sibling refund is pending', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket()
+    const order = await seedOrder()
+
+    const refundResult = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'refund',
+        summary: 'Refund test',
+        payload: refundPayload(1000, order.id),
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+        orderId: order.id,
+      },
+    )
+    expect(refundResult.status).toBe('pending')
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: {
+          type: 'support_reply',
+          ticketId: ticket.id,
+          body: 'Your refund is on the way.',
+          threadSnapshotAt: new Date().toISOString(),
+        },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    expect(sent).toHaveLength(2)
+    const replyNotification = sent[1]!
+    expect(replyNotification.body).toContain('⚠ promises a refund')
+    expect(replyNotification.body).toContain(refundResult.id)
+    expect(replyNotification.body).toContain('decide the refund first or together')
+    expect(replyNotification.body).toContain('rejecting it cancels this reply')
+  })
+
+  it('refund notify body: amount + order number + reason, dispute flag, and no crash with no linked order/ticket', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const order = await seedOrder('#3005')
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'refund',
+        summary: 'Refund test',
+        payload: { ...refundPayload(2599, order.id), openCjDispute: true, cjDisputeReasonId: 'r1' },
+        sourceWorkflow: 'support',
+      },
+    )
+
+    const notification = sent[0]!
+    expect(notification.body).toContain('$25.99')
+    expect(notification.body).toContain('#3005')
+    expect(notification.body).toContain('damaged')
+    expect(notification.body).toContain('CJ dispute: requested')
+  })
 
   it('manual mode: lands pending, tokened, notified, audited', async () => {
     const settings = createSettings(db)

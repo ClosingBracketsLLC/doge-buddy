@@ -358,6 +358,11 @@ describe('applySupportReply', () => {
     )
     // The owner approved a send that did not happen — they must hear about it.
     expect(notify).toHaveBeenCalledTimes(1)
+    // Task 18 review ruling: wording unified with `applyRefund`'s own stale hand-back notify (see
+    // that file's own test asserting the identical phrase) — a continuation, not an error.
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining('re-approve after the agent re-drafts') }),
+    )
     expect(await auditActions(proposal.id)).toContain(PROPOSAL_APPLY_FAILED_ACTION)
     expect((await readMessages(thread.ticketId)).filter((m) => m.direction === 'outbound')).toHaveLength(0)
   })

@@ -1,4 +1,4 @@
-import { formatCents, type NewListingPayload } from '@doge-buddy/core'
+import { formatCents, type NewListingPayload, type RefundPayload, type SupportReplyPayload } from '@doge-buddy/core'
 import type { proposals } from '@doge-buddy/db'
 import { validateDescriptionHtml } from '../../sourcing/guards.ts'
 import { html, raw, type RawHtml } from './html.ts'
@@ -98,22 +98,97 @@ function renderGenericPayload(payload: unknown): RawHtml {
 }
 
 /**
+ * `support_reply`'s preview (Task 18): the draft body exactly as it will send, escaped (html``'s
+ * default) inside a `pre-wrap` block so long lines wrap instead of forcing horizontal scroll, but
+ * whitespace/newlines are preserved — a customer-controlled `<script>` in the body renders as
+ * inert `&lt;script&gt;` text, never live markup.
+ */
+function renderSupportReplyPreview(payload: unknown): RawHtml {
+  const body = (payload as Partial<SupportReplyPayload>).body ?? ''
+  return html`<section>
+    <h3>Reply body (as it will send)</h3>
+    <pre style="white-space:pre-wrap">${body}</pre>
+  </section>`
+}
+
+/** Extra, DB-derived context `renderRefundSummary` needs that isn't on the bare payload/row —
+ * loaded once by the route (`routes.ts`'s `loadProposalDetailExtras`) and threaded through rather
+ * than queried here, keeping this file's renderers themselves DB-free like every other one in it. */
+export interface ProposalDetailExtras {
+  /** The linked order's `shopify_order_number`, or null if unknown/order missing. */
+  orderNumber?: string | null
+  /** The proposal's own `ticket_id` — used to link the order summary to the ticket thread. */
+  ticketId?: string | null
+  /** Cheap sender-authentication note for the ticket's latest inbound message, or null when not
+   * cheaply available (no ticket linked). */
+  authNote?: string | null
+  /** The `refundId` off a `proposal.refund_issued` audit row, when one exists (Task 16 note) —
+   * present exactly when money actually moved, regardless of the proposal's current status. */
+  refundIssuedId?: string | null
+}
+
+/**
+ * `refund`'s human summary (Task 18): amount, an order-number link to the ticket thread, reason,
+ * dispute flag, and — when cheaply available — the sender-auth note. Deliberately NO edit form (a
+ * refund amount/order is not something to hand-edit from a textarea): approve/reject only.
+ */
+function renderRefundSummary(payload: unknown, extras: ProposalDetailExtras): RawHtml {
+  const p = payload as Partial<RefundPayload>
+  const orderLabel = `#${extras.orderNumber ?? 'unknown'}`
+  return html`<section>
+    <h3>Refund summary</h3>
+    <p>Amount: ${formatCents(p.amountCents ?? 0)}</p>
+    <p>Order: ${extras.ticketId ? html`<a href="/admin/tickets/${extras.ticketId}">${orderLabel}</a>` : orderLabel}</p>
+    <p>Reason: ${p.reason ?? ''}</p>
+    <p>CJ dispute: ${p.openCjDispute ? 'yes' : 'no'}</p>
+    ${extras.authNote ? html`<p>${extras.authNote}</p>` : html``}
+    ${extras.refundIssuedId ? html`<p>refund WAS issued: ${extras.refundIssuedId}</p>` : html``}
+  </section>`
+}
+
+/**
  * Approve / reject / edit-then-approve forms, rendered only for pending rows. All three post to
- * the Task 4 session-authed decision routes (`/admin/proposals/:id/approve|reject`); the
- * edit-then-approve textarea is prefilled with the current payload as pretty JSON — escaped by
- * html`` like any other interpolation, so a hostile payload value can't break out of the
- * <textarea> (e.g. via a literal `</textarea>` in a string field).
+ * the Task 4 session-authed decision routes (`/admin/proposals/:id/approve|reject`).
+ *
+ * Task 18 splits the edit-then-approve form by type instead of one shape for every type:
+ *  - `refund`: NO edit form at all — approve/reject buttons only (a refund amount/order is not
+ *    something to hand-edit from a textarea; see `renderRefundSummary`'s own doc comment).
+ *  - `support_reply`: the raw-JSON `payload` textarea is SUPPRESSED — a body-only `body` textarea
+ *    replaces it (form field name `body`), so an owner editing a reply can only ever touch the
+ *    text that will send, never smuggle a different `ticketId`/`threadSnapshotAt` through the edit
+ *    path. This is also what keeps `validateSupportProposalForApproval` (Task 18's §3 gate)
+ *    reachable on every edit: the route always reconstructs `{ ...storedPayload, body }` from a
+ *    known-good base rather than trusting arbitrary edited JSON.
+ *  - every other type: unchanged raw-JSON `payload` textarea, prefilled with the current payload
+ *    as pretty JSON — escaped by html`` like any other interpolation, so a hostile payload value
+ *    can't break out of the <textarea> (e.g. via a literal `</textarea>` in a string field).
  */
 function renderDecisionForms(p: ProposalRow): RawHtml {
   const approveAction = `/admin/proposals/${p.id}/approve`
   const rejectAction = `/admin/proposals/${p.id}/reject`
-  const prefill = JSON.stringify(p.payload, null, 2)
-  return html`<form method="post" action="${approveAction}">
+  const approveReject = html`<form method="post" action="${approveAction}">
       <button type="submit">Approve</button>
     </form>
     <form method="post" action="${rejectAction}">
       <button type="submit">Reject</button>
-    </form>
+    </form>`
+
+  if (p.type === 'refund') {
+    return approveReject
+  }
+
+  if (p.type === 'support_reply') {
+    const currentBody = (p.payload as Partial<SupportReplyPayload>).body ?? ''
+    return html`${approveReject}
+    <form method="post" action="${approveAction}">
+      <p>Edit body then approve:</p>
+      <textarea name="body" rows="16" cols="80">${currentBody}</textarea>
+      <button type="submit">Approve edited</button>
+    </form>`
+  }
+
+  const prefill = JSON.stringify(p.payload, null, 2)
+  return html`${approveReject}
     <form method="post" action="${approveAction}">
       <p>Edit then approve:</p>
       <textarea name="payload" rows="16" cols="80">${prefill}</textarea>
@@ -137,9 +212,15 @@ function renderResendForm(p: ProposalRow): RawHtml {
   </form>`
 }
 
-export function renderProposalDetail(p: ProposalRow): RawHtml {
+export function renderProposalDetail(p: ProposalRow, extras: ProposalDetailExtras = {}): RawHtml {
   const preview =
-    p.type === 'new_listing' ? renderNewListingPreview(p.payload as NewListingPayload) : renderGenericPayload(p.payload)
+    p.type === 'new_listing'
+      ? renderNewListingPreview(p.payload as NewListingPayload)
+      : p.type === 'support_reply'
+        ? renderSupportReplyPreview(p.payload)
+        : p.type === 'refund'
+          ? renderRefundSummary(p.payload, extras)
+          : renderGenericPayload(p.payload)
 
   const actions =
     p.status === 'pending' ? renderDecisionForms(p) : p.status === 'approved' ? renderResendForm(p) : html``
