@@ -3,7 +3,8 @@ import {
   ShopifyAdminClient, ShopifyTokenManager, ShopifyUserError,
   collectionCreate, findProductByHandle, fulfillmentCreate, fulfillmentTrackingInfoUpdate,
   inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
-  listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, ordersUpdatedSince, productDelete,
+  listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, orderRefundState,
+  ordersUpdatedSince, productDelete,
   productSet, productVariantsByProductId, publishablePublish, refundCreate, webhookSubscriptionCreate,
   webhookSubscriptionDelete,
 } from '@doge-buddy/shopify-admin'
@@ -109,6 +110,90 @@ describe('refundCreate', () => {
     const { client } = makeClient(() =>
       gql({ refundCreate: { refund: null, userErrors: [{ message: 'already refunded' }] } }))
     await expect(refundCreate(client, input, 'prop-1')).rejects.toThrow(ShopifyUserError)
+  })
+})
+
+describe('orderRefundState', () => {
+  it('sums refund cents, keeps notes, and picks the first SUCCESS SALE/CAPTURE as the parent', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({
+        order: {
+          refunds: [
+            { id: 'gid://shopify/Refund/1', note: 'db-proposal-abc', totalRefundedSet: { shopMoney: { amount: '10.00' } } },
+            { id: 'gid://shopify/Refund/2', note: null, totalRefundedSet: { shopMoney: { amount: '2.50' } } },
+          ],
+          transactions: [
+            // A failed SALE sits BEFORE the successful one: picking by kind alone would hand
+            // refundCreate a parent transaction that never took any money.
+            { id: 'gid://shopify/OrderTransaction/10', kind: 'SALE', status: 'FAILURE', gateway: 'bogus' },
+            { id: 'gid://shopify/OrderTransaction/11', kind: 'AUTHORIZATION', status: 'SUCCESS', gateway: 'bogus' },
+            { id: 'gid://shopify/OrderTransaction/12', kind: 'CAPTURE', status: 'SUCCESS', gateway: 'shopify_payments' },
+            { id: 'gid://shopify/OrderTransaction/13', kind: 'SALE', status: 'SUCCESS', gateway: 'other' },
+          ],
+        },
+      }))
+    const result = await orderRefundState(client, 'gid://shopify/Order/123')
+    expect(result).toEqual({
+      totalRefundedCents: 1250,
+      refunds: [
+        { id: 'gid://shopify/Refund/1', note: 'db-proposal-abc' },
+        { id: 'gid://shopify/Refund/2', note: null },
+      ],
+      parentTransactionId: 'gid://shopify/OrderTransaction/12',
+      gateway: 'shopify_payments',
+    })
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*refunds/)
+    expect(query).toMatch(/transactions\(first: 20\)/)
+    expect(variables).toEqual({ id: 'gid://shopify/Order/123' })
+  })
+
+  it('rounds fractional-cent amounts half-up rather than through a binary float', async () => {
+    const { client } = makeClient(() =>
+      gql({
+        order: {
+          refunds: [
+            // 10.005 * 100 is 1000.4999999999999 in binary floating point, so a plain
+            // Math.round(parseFloat(x) * 100) silently loses the half cent. usdToCents is half-up.
+            { id: 'gid://shopify/Refund/1', note: null, totalRefundedSet: { shopMoney: { amount: '10.005' } } },
+            { id: 'gid://shopify/Refund/2', note: null, totalRefundedSet: { shopMoney: { amount: '19.99' } } },
+            { id: 'gid://shopify/Refund/3', note: null, totalRefundedSet: { shopMoney: { amount: '0.29' } } },
+          ],
+          transactions: [],
+        },
+      }))
+    const result = await orderRefundState(client, 'gid://shopify/Order/123')
+    expect(result.totalRefundedCents).toBe(1001 + 1999 + 29)
+  })
+
+  it('throws on a non-numeric amount rather than accumulating NaN', async () => {
+    const { client } = makeClient(() =>
+      gql({
+        order: {
+          refunds: [{ id: 'gid://shopify/Refund/1', note: null, totalRefundedSet: { shopMoney: { amount: 'n/a' } } }],
+          transactions: [],
+        },
+      }))
+    // A NaN total would make the caller's accumulation bound (`amount > total - refunded`) compare
+    // false and let a refund through unchecked — this is money, so it must fail loudly instead.
+    await expect(orderRefundState(client, 'gid://shopify/Order/123')).rejects.toThrow(RangeError)
+  })
+
+  it('returns zeros and a null parent for an order with no refunds and no usable transaction', async () => {
+    const { client } = makeClient(() =>
+      gql({
+        order: {
+          refunds: [],
+          transactions: [{ id: 'gid://shopify/OrderTransaction/9', kind: 'AUTHORIZATION', status: 'SUCCESS', gateway: 'bogus' }],
+        },
+      }))
+    const result = await orderRefundState(client, 'gid://shopify/Order/123')
+    expect(result).toEqual({ totalRefundedCents: 0, refunds: [], parentTransactionId: null, gateway: null })
+  })
+
+  it('throws when the order does not exist', async () => {
+    const { client } = makeClient(() => gql({ order: null }))
+    await expect(orderRefundState(client, 'gid://shopify/Order/404')).rejects.toThrow(/order not found/)
   })
 })
 
