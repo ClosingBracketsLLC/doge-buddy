@@ -331,6 +331,7 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
         fromEmail: full.fromAddr,
         bodyText: full.bodyText,
         rfcMessageId: full.rfcMessageId,
+        authResults: full.authenticationResults,
         sentAt: full.internalDate,
       })
       .onConflictDoNothing({ target: supportMessages.gmailMessageId })
@@ -350,11 +351,11 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
 
     // Guarded reopen — an `escalated` ticket is the owner's and stays escalated. Runs BEFORE the
     // tripwire so a reopened ticket with escalation-class content still ends up escalated.
-    // The triage failure budget resets with the reopen (spec §3): a new conversation gets its own
-    // two attempts rather than inheriting a stale count from the last one.
+    // The triage AND agent failure budgets reset with the reopen (spec §3): a new conversation
+    // gets its own attempts rather than inheriting a stale count from the last one.
     await tx
       .update(supportTickets)
-      .set({ status: 'new', triageFailureCount: 0 })
+      .set({ status: 'new', triageFailureCount: 0, agentFailureCount: 0 })
       .where(and(eq(supportTickets.id, ticket.id), inArray(supportTickets.status, ['resolved', 'waiting_on_customer'])))
 
     // Step 6: the code tripwire.

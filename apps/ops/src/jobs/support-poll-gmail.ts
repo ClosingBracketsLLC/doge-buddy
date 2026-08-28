@@ -2,13 +2,16 @@ import { gmailSyncState, type createDb } from '@doge-buddy/db'
 import type { GmailClient } from '@doge-buddy/gmail'
 import { sql } from 'drizzle-orm'
 import type PgBoss from 'pg-boss'
+import type { SendOpts } from '../fulfillment/types.ts'
 import type { NotifyOwner } from '../notify/notify.ts'
 import type { Settings } from '../settings.ts'
+import { selectAndEnqueueAgentRuns, type AgentSelectDeps } from '../support/agent-select.ts'
 import { notifyPendingEscalations, type EscalateDeps } from '../support/escalate.ts'
 import { runIngest, type Alert, type IngestDeps, type IngestResult } from '../support/ingest.ts'
 import { runTriage, type TriageCall, type TriageDeps } from '../support/triage.ts'
 
 type Db = ReturnType<typeof createDb>['db']
+type SendFn = (name: string, data: object, opts?: SendOpts) => Promise<void>
 
 export const SUPPORT_POLL_QUEUE = 'support.poll-gmail'
 
@@ -34,15 +37,19 @@ export interface SupportPollDeps {
   adminBaseUrl: string
   /** `null` when `ANTHROPIC_API_KEY` is absent — only the triage stage no-ops, ingest/escalate still run. */
   triageCall: TriageCall | null
+  /** Threaded into the 4th (agent-select) stage's `AgentSelectDeps.enqueue` — the same producer
+   * closure every other queue in this codebase builds over `queue.boss.send` (Task 13). */
+  enqueue: SendFn
   now?: () => Date
   /**
    * Injectable stage seams — mirror `agents/sourcing-run.ts`'s `queryFn` idiom: default to the
-   * real ingest/triage/escalate pipeline stages, overridable so tests can drive each stage's
-   * success/failure independently without a real GmailClient or Anthropic call.
+   * real ingest/triage/escalate/agent-select pipeline stages, overridable so tests can drive each
+   * stage's success/failure independently without a real GmailClient or Anthropic call.
    */
   ingestFn?: (deps: IngestDeps) => Promise<IngestResult>
   triageFn?: (deps: TriageDeps) => Promise<{ triaged: number; escalatedTicketIds: string[] }>
   escalateFn?: (deps: EscalateDeps) => Promise<{ notified: number }>
+  agentSelect?: (deps: AgentSelectDeps) => Promise<{ enqueued: number; orphansEscalated: number; unbackedEscalated: number }>
 }
 
 // Once-per-boot info alerts (spec §2 header) for the two configuration-absent skip paths below.
@@ -87,15 +94,22 @@ async function recordFailure(db: Db): Promise<number> {
 }
 
 /**
- * One `support.poll-gmail` cycle (spec §2 header + §2.9): ingest → triage → escalate, in strict
- * sequence with each stage isolated in its own try/catch.
+ * One `support.poll-gmail` cycle (spec §2 header + §2.9, Task 13's 4th stage): ingest → triage →
+ * escalate → agent-select, in strict sequence with each stage isolated in its own try/catch.
  *
  * - Skip paths (Gmail absent, killswitch, `workflow.support.enabled` off) return WITHOUT touching
  *   `gmail_sync_state` at all — they are configuration/policy no-ops, not failures.
- * - An ingest failure skips the triage stage entirely (there is nothing sound to triage against a
- *   batch that may not have committed) but escalate still runs — a prior poll's already-escalated,
- *   not-yet-notified tickets must keep getting notified even while ingest is broken.
- * - A triage failure must NOT skip escalate for the same reason.
+ * - An ingest failure skips BOTH the triage stage and the agent-select stage entirely — there is
+ *   nothing sound to triage or select against a batch that may not have committed — but escalate
+ *   still runs — a prior poll's already-escalated, not-yet-notified tickets must keep getting
+ *   notified even while ingest is broken.
+ * - A triage failure must NOT skip escalate or agent-select for the same reason: agent-select's own
+ *   selection predicate only reads `support_tickets` columns triage already committed on a PRIOR
+ *   cycle (this cycle's triage failure just means nothing NEW got triaged), and its orphan backstop
+ *   is entirely independent of triage.
+ * - agent-select runs AFTER escalate (not before) so a ticket the orphan backstop escalates this
+ *   cycle is picked up by `notifyPendingEscalations` on the NEXT cycle, one minute later — never
+ *   this same one (see `agent-select.ts`'s own doc comment).
  * - The FIRST stage error is what gets recorded/alerted; later stage errors are swallowed the same
  *   way (still counted as "this poll failed"), just not the one surfaced in alert detail.
  * - Never throws: `retryLimit: 0` on this queue means pg-boss would not retry a thrown job anyway
@@ -120,6 +134,7 @@ export async function executeSupportPoll(deps: SupportPollDeps): Promise<void> {
   const ingestFn = deps.ingestFn ?? runIngest
   const triageFn = deps.triageFn ?? runTriage
   const escalateFn = deps.escalateFn ?? notifyPendingEscalations
+  const agentSelectFn = deps.agentSelect ?? selectAndEnqueueAgentRuns
 
   let firstError: unknown = null
   let ingestFailed = false
@@ -149,6 +164,18 @@ export async function executeSupportPoll(deps: SupportPollDeps): Promise<void> {
     await escalateFn({ db: deps.db, notify: deps.notify, alert: deps.alert, adminBaseUrl: deps.adminBaseUrl, now })
   } catch (err) {
     firstError = firstError ?? err
+  }
+
+  // 4th stage (Task 13): runs only when ingest didn't fail (same gate as triage, and for the same
+  // reason — nothing sound to select against a batch that may not have committed), AFTER escalate
+  // so any orphan it escalates this cycle waits for next cycle's notify (see this function's own
+  // doc comment).
+  if (!ingestFailed) {
+    try {
+      await agentSelectFn({ db: deps.db, enqueue: deps.enqueue, alert: deps.alert, now })
+    } catch (err) {
+      firstError = firstError ?? err
+    }
   }
 
   if (firstError === null) {

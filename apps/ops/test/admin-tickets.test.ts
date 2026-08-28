@@ -1,4 +1,4 @@
-import { auditLog, createDb, orders, supportMessages, supportTickets } from '@doge-buddy/db'
+import { agentRuns, auditLog, createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import { and, eq, inArray } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
@@ -24,6 +24,8 @@ describe('tickets view, thread, and guarded actions', () => {
 
   let createdTicketIds: string[] = []
   let createdOrderIds: string[] = []
+  let createdProposalIds: string[] = []
+  let createdRunIds: string[] = []
 
   afterEach(async () => {
     if (createdTicketIds.length > 0) {
@@ -35,6 +37,15 @@ describe('tickets view, thread, and guarded actions', () => {
     if (createdOrderIds.length > 0) {
       await db.delete(orders).where(inArray(orders.id, createdOrderIds))
       createdOrderIds = []
+    }
+    if (createdProposalIds.length > 0) {
+      await db.delete(auditLog).where(inArray(auditLog.entityId, createdProposalIds))
+      await db.delete(proposals).where(inArray(proposals.id, createdProposalIds))
+      createdProposalIds = []
+    }
+    if (createdRunIds.length > 0) {
+      await db.delete(agentRuns).where(inArray(agentRuns.id, createdRunIds))
+      createdRunIds = []
     }
   })
 
@@ -144,6 +155,53 @@ describe('tickets view, thread, and guarded actions', () => {
       })
       .returning()
     createdOrderIds.push(row!.id)
+    return row!
+  }
+
+  async function seedProposal(
+    ticketId: string,
+    overrides: Partial<{
+      type: 'new_listing' | 'support_reply' | 'refund' | 'deprecate_product'
+      status: 'pending' | 'approved' | 'rejected' | 'expired' | 'applying' | 'applied' | 'failed'
+      summary: string
+      createdAt: Date
+    }> = {},
+  ): Promise<typeof proposals.$inferSelect> {
+    const type = overrides.type ?? 'support_reply'
+    const [row] = await db
+      .insert(proposals)
+      .values({
+        type,
+        status: overrides.status ?? 'pending',
+        summary: overrides.summary ?? 'Test proposal summary',
+        payload: { type },
+        sourceWorkflow: 'test',
+        ticketId,
+        ...(overrides.createdAt ? { createdAt: overrides.createdAt } : {}),
+      })
+      .returning()
+    createdProposalIds.push(row!.id)
+    return row!
+  }
+
+  async function seedAgentRun(
+    overrides: Partial<{
+      workflow: string
+      triggerRef: string | null
+      status: 'running' | 'succeeded' | 'failed' | 'aborted'
+      startedAt: Date
+    }> = {},
+  ): Promise<typeof agentRuns.$inferSelect> {
+    const [row] = await db
+      .insert(agentRuns)
+      .values({
+        workflow: overrides.workflow ?? 'support',
+        triggerRef: 'triggerRef' in overrides ? overrides.triggerRef! : null,
+        status: overrides.status ?? 'succeeded',
+        ...(overrides.startedAt ? { startedAt: overrides.startedAt } : {}),
+      })
+      .returning()
+    createdRunIds.push(row!.id)
     return row!
   }
 
@@ -437,6 +495,105 @@ describe('tickets view, thread, and guarded actions', () => {
       .from(auditLog)
       .where(and(eq(auditLog.entityType, 'support_ticket'), eq(auditLog.entityId, ticket.id)))
     expect(auditRows.find((r) => r.action === 'support.ticket_resolved')).toBeUndefined()
+
+    await app.close()
+  })
+
+  it('14. thread view lists the ticket\'s support proposals newest-first, id-linked, with type/status/summary', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const older = await seedProposal(ticket.id, {
+      type: 'refund',
+      status: 'pending',
+      summary: 'Refund for damaged item',
+      createdAt: new Date(Date.now() - 60_000),
+    })
+    const newer = await seedProposal(ticket.id, {
+      type: 'support_reply',
+      status: 'approved',
+      summary: 'Reply draft to customer',
+      createdAt: new Date(),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/tickets/${ticket.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain(`/admin/proposals/${older.id}`)
+    expect(res.body).toContain(`/admin/proposals/${newer.id}`)
+    expect(res.body).toContain('refund')
+    expect(res.body).toContain('support_reply')
+    expect(res.body).toContain('Refund for damaged item')
+    expect(res.body).toContain('Reply draft to customer')
+    // newest proposal (by createdAt) renders first
+    expect(res.body.indexOf(newer.id)).toBeLessThan(res.body.indexOf(older.id))
+
+    await app.close()
+  })
+
+  it('15. XSS: a proposal summary containing <script> in the ticket thread renders escaped, never as live markup', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const hostile = await seedProposal(ticket.id, { summary: '<script>alert(1)</script>' })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/tickets/${ticket.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain(`/admin/proposals/${hostile.id}`)
+    expect(res.body).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(res.body).not.toContain('<script>alert(1)</script>')
+
+    await app.close()
+  })
+
+  it('16. thread view lists up to 5 support-workflow agent_runs for this ticket, newest first, id-linked to /admin/runs/:id — filtered by workflow and trigger_ref', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const otherTicket = await seedTicket()
+    const older = await seedAgentRun({
+      workflow: 'support',
+      triggerRef: ticket.id,
+      status: 'failed',
+      startedAt: new Date(Date.now() - 120_000),
+    })
+    const newer = await seedAgentRun({
+      workflow: 'support',
+      triggerRef: ticket.id,
+      status: 'succeeded',
+      startedAt: new Date(),
+    })
+    const wrongWorkflow = await seedAgentRun({ workflow: 'sourcing', triggerRef: ticket.id, status: 'succeeded' })
+    const wrongTicket = await seedAgentRun({ workflow: 'support', triggerRef: otherTicket.id, status: 'succeeded' })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/tickets/${ticket.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain(`/admin/runs/${newer.id}`)
+    expect(res.body).toContain(`/admin/runs/${older.id}`)
+    expect(res.body).not.toContain(wrongWorkflow.id)
+    expect(res.body).not.toContain(wrongTicket.id)
+    // newest run (by startedAt) renders first
+    expect(res.body.indexOf(newer.id)).toBeLessThan(res.body.indexOf(older.id))
+
+    await app.close()
+  })
+
+  it('17. thread view with no proposals and no agent runs shows both empty states', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/tickets/${ticket.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('No proposals.')
+    expect(res.body).toContain('No agent runs.')
 
     await app.close()
   })

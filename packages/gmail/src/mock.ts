@@ -1,6 +1,7 @@
-import type { GmailClient, HistoryRecord, NormalizedMessage } from './types.ts'
+import { PROPOSAL_MARKER_HEADER, type GmailClient, type HistoryRecord, type NormalizedMessage } from './types.ts'
 import { GmailApiError, HistoryExpiredError, MessageGoneError } from './errors.ts'
 import { parseAddrSpecs, parseFirstAddrSpec } from './address.ts'
+import { buildReplyRaw } from './rfc2822.ts'
 
 export interface MockGmailOptions {
   selfAddress?: string
@@ -15,6 +16,8 @@ export interface ReceiveInboundInput {
   bodyText: string
   threadId?: string
   labelIds?: string[]
+  /** Simulates Gmail's own SPF/DKIM/DMARC stamp. Omitted -> normalized authenticationResults is null. */
+  authenticationResults?: string
 }
 
 export interface SaveDraftInput {
@@ -36,6 +39,10 @@ export interface MockGmail extends GmailClient {
   labelsOf(id: string): string[]
   /** Steers the history-id counter so the next mutation's record id is > the given decimal string. */
   advanceHistoryTo(id: string): void
+  /** Inspection helper: every raw RFC 2822 message built by sendReply, oldest first. Decode with
+   * `Buffer.from(raw, 'base64url').toString()` to assert headers (including extraHeaders) the
+   * same way the real client's fixture tests do. */
+  sentMessages(): { id: string; threadId: string; raw: string }[]
 }
 
 const DEFAULT_SELF_ADDRESS = 'me@mock.gmail'
@@ -59,6 +66,12 @@ interface StoredMessage {
   rfcMessageId: string | null
   inReplyTo: string | null
   references: string | null
+  /** Mirrors NormalizedMessage.authenticationResults — set via receiveInbound, null otherwise. */
+  authenticationResults: string | null
+  /** Mirrors NormalizedMessage.dogeBuddyProposalId — captured from sendReply's extraHeaders, so a
+   * reply this mock "sent" reads back through getMessage exactly as the real thread would. Null on
+   * every other message (inbound mail, drafts, the owner's own hand-sent replies). */
+  dogeBuddyProposalId: string | null
   /** Superseded by draft churn or sendDraft/replaced — getMessage throws MessageGoneError, but the
    * record (and its labels) stays around for labelsOf(). */
   gone: boolean
@@ -79,6 +92,7 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
   /** Current draft message id(s) per thread, most recent first. Empty/absent once sent. */
   const draftsByThread = new Map<string, string[]>()
   const pendingMethodFailures = new Map<string, Error>()
+  const sentRawMessages: { id: string; threadId: string; raw: string }[] = []
 
   let historyCounter = 0n
   let messageCounter = 0
@@ -135,6 +149,8 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
     bodyText: string | null
     inReplyTo?: string | null
     references?: string | null
+    authenticationResults?: string | null
+    dogeBuddyProposalId?: string | null
   }): StoredMessage {
     const id = nextMessageId()
     const stored: StoredMessage = {
@@ -151,6 +167,8 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
       rfcMessageId: `<${id}@mock.gmail>`,
       inReplyTo: input.inReplyTo ?? null,
       references: input.references ?? null,
+      authenticationResults: input.authenticationResults ?? null,
+      dogeBuddyProposalId: input.dogeBuddyProposalId ?? null,
       gone: false,
     }
     messages.set(id, stored)
@@ -172,6 +190,8 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
       rfcMessageId: msg.rfcMessageId,
       inReplyTo: msg.inReplyTo,
       references: msg.references,
+      authenticationResults: msg.authenticationResults,
+      dogeBuddyProposalId: msg.dogeBuddyProposalId,
       bodyText: format === 'metadata' ? null : msg.bodyText,
     }
   }
@@ -269,6 +289,17 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
 
     async sendReply(r) {
       maybeThrowPending('sendReply')
+      // Route through the same builder the real client uses — this both validates/sanitizes
+      // extraHeaders identically and gives sentMessages() a realistic raw message to decode.
+      const raw = buildReplyRaw({
+        from: selfAddress,
+        to: r.to,
+        subject: r.subject,
+        inReplyTo: r.inReplyTo,
+        references: r.references,
+        bodyText: r.bodyText,
+        extraHeaders: r.extraHeaders,
+      })
       const msg = storeMessage({
         threadId: r.threadId,
         labelIds: ['SENT'],
@@ -278,7 +309,12 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
         subject: r.subject,
         inReplyTo: r.inReplyTo,
         references: r.references,
+        // Same round-trip the real Gmail does: a header stamped on the way out comes back on the
+        // way in. Without this the mock could never exercise `apply-support-reply.ts`'s re-entry
+        // recovery, which reads the marker back off the thread.
+        dogeBuddyProposalId: r.extraHeaders?.[PROPOSAL_MARKER_HEADER] ?? null,
       })
+      sentRawMessages.push({ id: msg.id, threadId: msg.threadId, raw })
       pushHistory([{ id: msg.id, threadId: msg.threadId }])
       return { id: msg.id, threadId: msg.threadId }
     },
@@ -294,6 +330,7 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
         deliveredTo: m.deliveredTo,
         subject: m.subject,
         bodyText: m.bodyText,
+        authenticationResults: m.authenticationResults ?? null,
       })
       pushHistory([{ id: msg.id, threadId: msg.threadId }])
       return { id: msg.id, threadId: msg.threadId }
@@ -361,6 +398,10 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
     advanceHistoryTo(id) {
       const target = BigInt(id)
       if (target > historyCounter) historyCounter = target
+    },
+
+    sentMessages() {
+      return sentRawMessages.map((m) => ({ ...m }))
     },
   }
 }

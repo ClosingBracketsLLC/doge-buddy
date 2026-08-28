@@ -1,0 +1,53 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/msg-auth-1",
+    "query": {
+      "format": "metadata",
+      "metadataHeaders": [
+        "From",
+        "To",
+        "Cc",
+        "Delivered-To",
+        "Subject",
+        "Message-ID",
+        "In-Reply-To",
+        "References",
+        "Authentication-Results",
+        "X-DogeBuddy-Proposal"
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "msg-auth-1",
+      "threadId": "thread-auth-1",
+      "labelIds": ["INBOX"],
+      "snippet": "Hi DogeBuddy team...",
+      "internalDate": "1756148400000",
+      "sizeEstimate": 9000,
+      "historyId": "3060",
+      "payload": {
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Authentication-Results",
+            "value": "mx.google.com; spf=pass (google.com: domain of jane@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=jane@example.com; dkim=pass header.i=@example.com; dmarc=pass"
+          },
+          { "name": "Delivered-To", "value": "support@dogebuddy.com" },
+          {
+            "name": "Authentication-Results",
+            "value": "mail.example.com; spf=neutral"
+          },
+          { "name": "From", "value": "\"Jane D\" <Jane@Example.com>" },
+          { "name": "To", "value": "DogeBuddy Support <support@dogebuddy.com>" },
+          { "name": "Subject", "value": "Order #4521" },
+          { "name": "Message-ID", "value": "<CAJ+auth1@mail.gmail.com>" }
+        ],
+        "body": { "size": 0 }
+      }
+    }
+  }
+}

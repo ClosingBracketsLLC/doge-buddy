@@ -10,6 +10,7 @@ import {
   type SupportPollDeps,
 } from '../src/jobs/support-poll-gmail.ts'
 import { createSettings, SETTINGS_DEFAULTS } from '../src/settings.ts'
+import type { AgentSelectDeps } from '../src/support/agent-select.ts'
 import type { TriageCall } from '../src/support/triage.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
@@ -57,9 +58,11 @@ describe('executeSupportPoll', () => {
       triageCall: vi.fn(async () => {
         throw new Error('unused: triageFn is stubbed in these tests')
       }) as unknown as TriageCall,
+      enqueue: vi.fn(async () => {}),
       ingestFn: vi.fn(async () => ({ insertedMessages: 0, newInboundTicketIds: [], tripwiredTicketIds: [] })),
       triageFn: vi.fn(async () => ({ triaged: 0, escalatedTicketIds: [] })),
       escalateFn: vi.fn(async () => ({ notified: 0 })),
+      agentSelect: vi.fn(async () => ({ enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 })),
       now: () => new Date('2026-08-25T12:00:00.000Z'),
       ...overrides,
     }
@@ -78,6 +81,7 @@ describe('executeSupportPoll', () => {
       expect(deps.ingestFn).not.toHaveBeenCalled()
       expect(deps.triageFn).not.toHaveBeenCalled()
       expect(deps.escalateFn).not.toHaveBeenCalled()
+      expect(deps.agentSelect).not.toHaveBeenCalled()
       expect(deps.notify).not.toHaveBeenCalled()
 
       const row = await readSyncState()
@@ -95,6 +99,7 @@ describe('executeSupportPoll', () => {
       expect(deps.ingestFn).not.toHaveBeenCalled()
       expect(deps.triageFn).not.toHaveBeenCalled()
       expect(deps.escalateFn).not.toHaveBeenCalled()
+      expect(deps.agentSelect).not.toHaveBeenCalled()
       expect(deps.alert).not.toHaveBeenCalled()
       expect(deps.notify).not.toHaveBeenCalled()
 
@@ -112,6 +117,7 @@ describe('executeSupportPoll', () => {
       expect(deps.ingestFn).not.toHaveBeenCalled()
       expect(deps.triageFn).not.toHaveBeenCalled()
       expect(deps.escalateFn).not.toHaveBeenCalled()
+      expect(deps.agentSelect).not.toHaveBeenCalled()
       expect(deps.alert).not.toHaveBeenCalled()
 
       const row = await readSyncState()
@@ -131,6 +137,8 @@ describe('executeSupportPoll', () => {
       expect(deps.triageFn).not.toHaveBeenCalled()
       expect(deps.ingestFn).toHaveBeenCalledTimes(2)
       expect(deps.escalateFn).toHaveBeenCalledTimes(2)
+      // agent-select is gated on ingest, not triage — it still runs both times.
+      expect(deps.agentSelect).toHaveBeenCalledTimes(2)
 
       // Both polls succeeded (ingest/escalate stubs resolve) — success is still recorded.
       const row = await readSyncState()
@@ -139,21 +147,60 @@ describe('executeSupportPoll', () => {
   })
 
   describe('success', () => {
-    it('all stages succeed: runs ingest → triage → escalate in order, resets counter, stamps last_success_at', async () => {
+    it('all stages succeed: runs ingest → triage → escalate → agent-select in order, resets counter, stamps last_success_at', async () => {
       await seedSyncState(7, null)
-      const deps = baseDeps()
+      const callOrder: string[] = []
+      const deps = baseDeps({
+        ingestFn: vi.fn(async () => {
+          callOrder.push('ingest')
+          return { insertedMessages: 0, newInboundTicketIds: [], tripwiredTicketIds: [] }
+        }),
+        triageFn: vi.fn(async () => {
+          callOrder.push('triage')
+          return { triaged: 0, escalatedTicketIds: [] }
+        }),
+        escalateFn: vi.fn(async () => {
+          callOrder.push('escalate')
+          return { notified: 0 }
+        }),
+        agentSelect: vi.fn(async () => {
+          callOrder.push('agentSelect')
+          return { enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 }
+        }),
+      })
 
       await executeSupportPoll(deps)
 
       expect(deps.ingestFn).toHaveBeenCalledTimes(1)
       expect(deps.triageFn).toHaveBeenCalledTimes(1)
       expect(deps.escalateFn).toHaveBeenCalledTimes(1)
+      expect(deps.agentSelect).toHaveBeenCalledTimes(1)
+      expect(callOrder).toEqual(['ingest', 'triage', 'escalate', 'agentSelect'])
       expect(deps.alert).not.toHaveBeenCalled()
       expect(deps.notify).not.toHaveBeenCalled()
 
       const row = await readSyncState()
       expect(row?.consecutiveFailures).toBe(0)
       expect(row?.lastSuccessAt).toEqual(new Date('2026-08-25T12:00:00.000Z'))
+    })
+
+    it('threads db/enqueue/alert/now into the agent-select stage', async () => {
+      await seedSyncState(0, null)
+      let received: AgentSelectDeps | null = null
+      const deps = baseDeps({
+        agentSelect: vi.fn(async (d: AgentSelectDeps) => {
+          received = d
+          return { enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 }
+        }),
+      })
+
+      await executeSupportPoll(deps)
+
+      expect(received).not.toBeNull()
+      expect(received!.db).toBe(db)
+      expect(received!.enqueue).toBe(deps.enqueue)
+      expect(received!.alert).toBe(deps.alert)
+      expect(received!.now!()).toEqual(new Date('2026-08-25T12:00:00.000Z'))
     })
 
     it('no pre-existing gmail_sync_state row: upsert still stamps success correctly', async () => {
@@ -179,13 +226,15 @@ describe('executeSupportPoll', () => {
 
       expect(deps.triageFn).not.toHaveBeenCalled()
       expect(deps.escalateFn).toHaveBeenCalledTimes(1)
+      // agent-select is gated on ingest the same way triage is — an ingest failure skips it too.
+      expect(deps.agentSelect).not.toHaveBeenCalled()
 
       const row = await readSyncState()
       expect(row?.consecutiveFailures).toBe(1)
       expect(row?.lastSuccessAt).toBeNull()
     })
 
-    it('triage throws: escalate still runs (not skipped), failure is accounted with the triage error', async () => {
+    it('triage throws: escalate AND agent-select still run (not skipped), failure is accounted with the triage error', async () => {
       await seedSyncState(0, null)
       const triageFn = vi.fn(async () => {
         throw new Error('triage boom')
@@ -196,12 +245,13 @@ describe('executeSupportPoll', () => {
 
       expect(deps.ingestFn).toHaveBeenCalledTimes(1)
       expect(deps.escalateFn).toHaveBeenCalledTimes(1)
+      expect(deps.agentSelect).toHaveBeenCalledTimes(1)
 
       const row = await readSyncState()
       expect(row?.consecutiveFailures).toBe(1)
     })
 
-    it('escalate throws alone (ingest+triage succeed): still accounted as a failed poll', async () => {
+    it('escalate throws alone (ingest+triage succeed): still accounted as a failed poll, agent-select still runs', async () => {
       await seedSyncState(0, null)
       const escalateFn = vi.fn(async () => {
         throw new Error('escalate boom')
@@ -212,6 +262,24 @@ describe('executeSupportPoll', () => {
 
       expect(deps.ingestFn).toHaveBeenCalledTimes(1)
       expect(deps.triageFn).toHaveBeenCalledTimes(1)
+      expect(deps.agentSelect).toHaveBeenCalledTimes(1)
+
+      const row = await readSyncState()
+      expect(row?.consecutiveFailures).toBe(1)
+    })
+
+    it('agent-select throws alone (ingest+triage+escalate succeed): escalate already ran, failure is still accounted', async () => {
+      await seedSyncState(0, null)
+      const agentSelect = vi.fn(async () => {
+        throw new Error('agent-select boom')
+      })
+      const deps = baseDeps({ agentSelect })
+
+      await executeSupportPoll(deps)
+
+      expect(deps.ingestFn).toHaveBeenCalledTimes(1)
+      expect(deps.triageFn).toHaveBeenCalledTimes(1)
+      expect(deps.escalateFn).toHaveBeenCalledTimes(1)
 
       const row = await readSyncState()
       expect(row?.consecutiveFailures).toBe(1)
@@ -348,9 +416,11 @@ describe('supportPollGmailHandler', () => {
       notify: vi.fn(async () => true),
       adminBaseUrl: 'https://admin.example.com',
       triageCall: null,
+      enqueue: vi.fn(async () => {}),
       ingestFn,
       triageFn: vi.fn(async () => ({ triaged: 0, escalatedTicketIds: [] })),
       escalateFn: vi.fn(async () => ({ notified: 0 })),
+      agentSelect: vi.fn(async () => ({ enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 })),
     }
 
     await supportPollGmailHandler(deps)([
@@ -386,7 +456,12 @@ describe('supportPollGmailHandler', () => {
       notify,
       adminBaseUrl: 'https://admin.example.com',
       triageCall,
-      // ingestFn/triageFn/escalateFn intentionally omitted: this test relies on the REAL pipeline.
+      // `enqueue` is a no-op spy purely to satisfy the type — the REAL agent-select stage (also
+      // left un-stubbed below) never finds a `triaged` ticket in this scenario (the ticket ends up
+      // `escalated` via triage's own tripwire), so it's never actually called.
+      enqueue: vi.fn(async () => {}),
+      // ingestFn/triageFn/escalateFn/agentSelect intentionally omitted: this test relies on the
+      // REAL pipeline.
     }
     const job = (id: string) => [{ id, name: SUPPORT_POLL_QUEUE, data: {}, expireInSeconds: 120 }]
 

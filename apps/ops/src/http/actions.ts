@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm'
 import type { FastifyPluginAsync } from 'fastify'
 import type { SendOpts } from '../fulfillment/types.ts'
 import { enqueueProposalApply } from '../proposals/submit.ts'
+import { onSupportProposalRejected, validateSupportProposalForApproval } from '../proposals/support-decision.ts'
 import { hashActionToken } from '../proposals/tokens.ts'
 import { applyProposalTransition, StaleProposalStatusError } from '../proposals/transitions.ts'
 
@@ -69,6 +70,19 @@ function resultPage(decision: Decision): string {
  */
 function enqueueFailedPage(): string {
   return page('<p>Approved ✓ — but queueing failed; the admin dashboard can re-send.</p>')
+}
+
+/**
+ * Rendered when Task 18's §3 validator re-run refuses a `support_reply`/`refund` approve (its
+ * sibling refund got rejected out from under it, an off-domain URL crept into the body, etc.) —
+ * distinct from `friendlyPage()` on purpose: by this point `isValidDecision` already proved the
+ * clicker holds the real token for a still-pending row, so there is no token-guessing oracle risk
+ * left to protect against, and naming the code+detail (same shape the admin surface's 400 page
+ * uses) is what tells a real owner what actually went wrong instead of a generic "expired" copy
+ * that would misdirect them into re-requesting a link that was never the problem.
+ */
+function validationFailedPage(code: string, detail: string): string {
+  return page(`<p>Could not approve: ${esc(code)} — ${esc(detail)}</p>`)
 }
 
 /**
@@ -146,27 +160,66 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
         return friendlyPage()
       }
 
+      // §3 validator re-run (Task 18 review ruling — security gate, same as the admin surface):
+      // there is no edit path on this one-click route, but the row can still have stopped being
+      // safe to approve since it was drafted (its sibling refund got rejected out from under it,
+      // say) — this must never transition on a failure. On success, `payloadToStore` becomes the
+      // validator's own returned payload (for `support_reply`, the NFKC-normalized body — "what
+      // was screened is what sends").
+      let payloadToStore: unknown
+      if (decision === 'approve' && (row.type === 'support_reply' || row.type === 'refund')) {
+        const validation = await validateSupportProposalForApproval(deps.db, row, row.payload)
+        if (!validation.ok) {
+          return validationFailedPage(validation.code, validation.detail)
+        }
+        payloadToStore = validation.payload
+      }
+
       const status = decision === 'approve' ? 'approved' : 'rejected'
+      const isSupportRejectDecision = decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')
       try {
-        await applyProposalTransition(deps.db, proposalId, 'pending', status, {
-          decidedBy: 'owner',
-          decidedAt: new Date(),
-          actionTokenHash: null,
-        })
+        if (isSupportRejectDecision) {
+          // Atomic (Task 18 review, M5): same shape as the admin surface's decision route — the
+          // reject transition, its own audit row, and everything `onSupportProposalRejected` does
+          // (sibling expiry+audit, ticket escalation) land in ONE transaction, mirroring
+          // `apply-shared.ts`'s `failStaleAndHandBack` precedent. A throw anywhere inside rolls
+          // EVERYTHING back, including the transition itself.
+          await deps.db.transaction(async (tx) => {
+            await applyProposalTransition(tx, proposalId, 'pending', status, {
+              decidedBy: 'owner',
+              decidedAt: new Date(),
+              actionTokenHash: null,
+            })
+            await tx.insert(auditLog).values({
+              actor: 'owner',
+              action: 'proposal.reject',
+              entityType: 'proposal',
+              entityId: proposalId,
+              detail: { via: 'link' },
+            })
+            await onSupportProposalRejected(tx, { id: row.id, ticketId: row.ticketId, type: row.type })
+          })
+        } else {
+          await applyProposalTransition(deps.db, proposalId, 'pending', status, {
+            decidedBy: 'owner',
+            decidedAt: new Date(),
+            actionTokenHash: null,
+            ...(payloadToStore !== undefined ? { payload: payloadToStore } : {}),
+          })
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
+            entityType: 'proposal',
+            entityId: proposalId,
+            detail: { via: 'link' },
+          })
+        }
       } catch (err) {
         // Someone else's request (or another tab, or a race) already decided this row between
         // our lookup and our guarded UPDATE — the single-use mechanism worked, just not for us.
         if (err instanceof StaleProposalStatusError) return friendlyPage()
         throw err
       }
-
-      await deps.db.insert(auditLog).values({
-        actor: 'owner',
-        action: decision === 'approve' ? 'proposal.approve' : 'proposal.reject',
-        entityType: 'proposal',
-        entityId: proposalId,
-        detail: { via: 'link' },
-      })
 
       if (decision === 'approve') {
         try {

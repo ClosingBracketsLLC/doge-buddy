@@ -2,6 +2,12 @@ import { type createDb, proposals } from '@doge-buddy/db'
 import { and, eq } from 'drizzle-orm'
 
 type Db = ReturnType<typeof createDb>['db']
+/** The type of the callback's `tx` parameter inside `db.transaction(async (tx) => {...})` — same
+ * alias `support/ingest.ts` declares, for the same reason: a caller that must make a proposal's
+ * status change atomic with other writes (e.g. `apply-support-reply.ts`'s staleness path, which
+ * fails the proposal and re-triages its ticket in one commit) passes the transaction handle here. */
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
+type DbOrTx = Db | Tx
 
 export type ProposalStatusDb = 'pending' | 'approved' | 'rejected' | 'expired' | 'applying' | 'applied' | 'failed'
 
@@ -33,14 +39,20 @@ export class StaleProposalStatusError extends Error {
 /**
  * Exhaustive legal-transition matrix for `proposals.status`. Every status change on
  * proposals across the approval pipeline must flow through `applyProposalTransition` below — no
- * job may write `status` directly — with two narrow, explicitly-guarded exceptions:
- * `jobs/proposal-expire-sweep.ts`'s cron and `http/admin/routes.ts`'s admin-load sweep
- * (`sweepExpiredOnLoad`) each run their own bulk `UPDATE proposals SET status = 'expired' WHERE
- * status = 'pending' AND expires_at < now()` — a guarded, single-status-in/single-status-out bulk
- * expiry that this per-row helper has no batch form for, and whose own `WHERE status = 'pending'`
- * clause is the guard (the same optimistic-concurrency discipline this table exists to enforce,
- * just expressed as a bulk predicate instead of a single-row `applyProposalTransition` call). So
- * this table is the single source of truth for every OTHER status change.
+ * job may write `status` directly — with four narrow, explicitly-guarded exceptions, all of them
+ * bulk `pending → expired` flips this per-row helper has no batch form for, and each guarded by its
+ * own `WHERE status = 'pending'` clause (the same optimistic-concurrency discipline this table
+ * exists to enforce, just expressed as a bulk predicate instead of a single-row call):
+ *   1. `jobs/proposal-expire-sweep.ts`'s cron (`… AND expires_at < now()`).
+ *   2. `http/admin/routes.ts`'s admin-load sweep, `sweepExpiredOnLoad` (same predicate).
+ *   3. `jobs/support-agent-run.ts`'s supersede step, which expires a ticket's still-pending
+ *      support proposals when a newer agent run replaces them (`… AND ticket_id = $1 AND type IN
+ *      (…)`), writing one `proposal.superseded` audit row per flipped row.
+ *   4. `proposals/support-decision.ts`'s `onSupportProposalRejected` (Task 18), which expires a
+ *      ticket's still-pending SIBLING support proposal when the owner rejects the other half of the
+ *      pair (`… AND ticket_id = $1 AND type = <sibling type> AND status = 'pending'`), writing one
+ *      `proposal.sibling_rejected` audit row per flipped row.
+ * So this table is the single source of truth for every OTHER status change.
  *
  * Self-transitions (from === to) are always illegal and are never listed here.
  */
@@ -77,7 +89,7 @@ export type ProposalPatch = Partial<{
  * this throws `StaleProposalStatusError` instead of silently clobbering that other writer's change.
  */
 export async function applyProposalTransition(
-  db: Db,
+  db: DbOrTx,
   proposalId: string,
   from: ProposalStatusDb,
   to: ProposalStatusDb,

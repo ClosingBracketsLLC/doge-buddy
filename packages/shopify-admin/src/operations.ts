@@ -1,3 +1,4 @@
+import { usdToCents } from '@doge-buddy/core'
 import { assertNoUserErrors, withIdempotencyKey, type ShopifyAdminClient } from './client.ts'
 import { type ShopifyUserErrorEntry } from './errors.ts'
 
@@ -146,6 +147,99 @@ export async function refundCreate(
   const data = await client.graphql<RefundCreateData>(document, { input })
   assertNoUserErrors(data, 'refundCreate')
   return { refundId: data.refundCreate.refund.id }
+}
+
+// ---------------------------------------------------------------------------
+// orderRefundState
+// ---------------------------------------------------------------------------
+
+// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:
+//  - `Order.refunds` and `Order.transactions` are plain LISTS, not connections (no `nodes { … }`
+//    wrapper). They were converted from connections to lists in the 2023-era Admin API and are
+//    still lists as of the version this client pins.
+//  - `Refund.totalRefundedSet.shopMoney.amount` is a decimal string in the SHOP's currency (the
+//    store is USD-only, so no presentment/shop split matters here).
+//  - `OrderTransaction.kind`/`.status` are the SCREAMING_CASE enums matched below.
+const ORDER_REFUND_STATE_QUERY = `#graphql
+  query OrderRefundState($id: ID!) {
+    order(id: $id) {
+      refunds {
+        id
+        note
+        totalRefundedSet { shopMoney { amount } }
+      }
+      transactions(first: 20) {
+        id
+        kind
+        status
+        gateway
+      }
+    }
+  }
+`
+
+interface OrderRefundStateData {
+  order: {
+    refunds: { id: string; note?: string | null; totalRefundedSet: { shopMoney: { amount: string } } }[]
+    transactions: { id: string; kind: string; status: string; gateway?: string | null }[]
+  } | null
+}
+
+/**
+ * Everything `apps/ops`'s `refund` apply executor needs about an order's money, in ONE query.
+ *
+ * Two callers consume it and both are load-bearing for correctness:
+ *  1. The **idempotency pre-check** — Shopify's `@idempotent` keys live only ~24h, so a re-entered
+ *     apply proves whether its own refund already landed by looking for its `db-proposal-<id>` note
+ *     in `refunds[]`. That is why `note` is selected at all.
+ *  2. The **accumulation bound** — `amountCents <= total_cents - totalRefundedCents`, re-verified at
+ *     apply time because sibling proposals (or a human in the Shopify admin) may have moved money
+ *     since the agent's validator ran.
+ */
+export interface OrderRefundState {
+  totalRefundedCents: number
+  refunds: { id: string; note: string | null }[]
+  /** First transaction with kind SALE|CAPTURE and status SUCCESS — `RefundInput.transactions[].parentId`. */
+  parentTransactionId: string | null
+  /** The parent transaction's gateway (null when there is no parent), for the same refund entry. */
+  gateway: string | null
+}
+
+/** The only transaction kinds money can be refunded AGAINST (an AUTHORIZATION holds no funds). */
+const REFUNDABLE_PARENT_KINDS = new Set(['SALE', 'CAPTURE'])
+
+export async function orderRefundState(client: ShopifyAdminClient, orderGid: string): Promise<OrderRefundState> {
+  const data = await client.graphql<OrderRefundStateData>(ORDER_REFUND_STATE_QUERY, { id: orderGid })
+  const order = data.order
+  if (!order) {
+    // Loud and specific rather than a `TypeError: cannot read 'refunds' of null` — the caller
+    // treats a throw as retryable, and a genuinely missing order will dead-letter with this message
+    // instead of a stack trace nobody can read.
+    throw new Error(`order not found: ${orderGid}`)
+  }
+
+  // `usdToCents` (the house money parser, and `centsToUsd`'s documented inverse) rather than the
+  // obvious `Math.round(parseFloat(amount) * 100)`: it is half-up on the decimal STRING instead of
+  // rounding a binary float ('10.005' * 100 is 1000.4999999999999, which rounds DOWN), and it
+  // THROWS on a non-numeric/negative amount instead of yielding NaN. NaN matters here — the caller's
+  // bound is `amountCents > totalCents - totalRefundedCents`, and every comparison against NaN is
+  // false, so a single unparseable amount would wave an unbounded refund straight through.
+  let totalRefundedCents = 0
+  for (const refund of order.refunds) {
+    totalRefundedCents += usdToCents(refund.totalRefundedSet.shopMoney.amount)
+  }
+
+  const parent = order.transactions.find((t) => REFUNDABLE_PARENT_KINDS.has(t.kind) && t.status === 'SUCCESS')
+
+  return {
+    totalRefundedCents,
+    refunds: order.refunds.map((r) => ({ id: r.id, note: r.note ?? null })),
+    parentTransactionId: parent?.id ?? null,
+    // Read off the PARENT specifically: the gateway travels with the transaction being refunded, so
+    // taking it from any other transaction (or the order) could name a gateway that never held
+    // these funds.
+    gateway: parent?.gateway ?? null,
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -6,15 +6,18 @@ import {
   fulfillmentTrackingInfoUpdate,
   listPublications,
   orderFulfillmentOrders,
+  orderRefundState,
   ordersUpdatedSince,
   productSet,
   productVariantsByProductId,
   publishablePublish,
+  refundCreate,
   ShopifyAdminClient,
   ShopifyTokenManager,
 } from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdapter } from '@doge-buddy/supplier'
 import { sweepOrphanRuns } from './agents/lifecycle.ts'
+import { createPgSessionStore } from './agents/session-store.ts'
 import { createAlerter, type AlertSeverity } from './alerts.ts'
 import { loadConfig } from './config.ts'
 import type { ReconcileDeps } from './fulfillment/run-reconcile.ts'
@@ -22,17 +25,19 @@ import type { ShopifyFulfillmentOps } from './fulfillment/run-sync-tracking.ts'
 import type { ActionRouteDeps } from './http/actions.ts'
 import type { AdminDeps } from './http/admin/routes.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
+import { cjDisputePollHandler, type DisputePollDeps } from './jobs/cj-dispute-poll.ts'
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { sourcingWeeklyHandler } from './jobs/sourcing-weekly.ts'
+import { supportAgentRunHandler, SUPPORT_AGENT_QUEUE, type SupportAgentJobDeps } from './jobs/support-agent-run.ts'
 import { supportPollGmailHandler, SUPPORT_POLL_QUEUE, type SupportPollDeps } from './jobs/support-poll-gmail.ts'
 import { loadDotEnv } from './load-env.ts'
 import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
 import { createTelegramNotifier } from './notify/telegram.ts'
-import type { ProposalShopifyOps } from './proposals/run-apply.ts'
-import { registerCron, startQueue, type Queue } from './queue.ts'
+import type { ProposalShopifyOps, RefundOps } from './proposals/run-apply.ts'
+import { createQueueRetrying, registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
 import type { SourcingPipelineDeps } from './sourcing/pipeline.ts'
@@ -214,8 +219,40 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       productVariantsByProductId: shopifyNotConfigured,
     }
 
+// Same shape again, for `proposal.apply`'s `refund` executor (Task 16). `null` — not a
+// throwing stub — when Shopify is unconfigured: `applyRefund` checks for exactly that and fails the
+// proposal loudly (owner `notify()`) rather than throwing, retrying and dead-lettering its way to
+// the same place. This one MOVES MONEY, so it stays a hand-picked two-method surface.
+const refundOps: RefundOps | null = shopifyClient
+  ? {
+      orderRefundState: (orderGid) => orderRefundState(shopifyClient, orderGid),
+      refundCreate: (input, idempotencyKey) => refundCreate(shopifyClient, input, idempotencyKey),
+    }
+  : null
+
+// Built here — before `startQueue` — because `proposal.apply`'s `support_reply` executor
+// (Task 15) needs a `gmail` dep at registration time via `ApplyProposalDeps`, same reasoning as
+// `shopifyClient` above. `null` whenever `config.gmail` is unset (dev without Gmail creds) —
+// `startQueue` defaults `ApplyProposalDeps.gmail` to `null` in that case, and `applySupportReply`
+// fails loudly (alert) on a `null` gmail rather than throwing a `TypeError`. This is the SAME
+// client instance `supportPollDeps`/`supportAgentDeps` further below also use — constructing it
+// once here rather than twice.
+const gmailClient = config.gmail
+  ? createGmailClient({
+      auth: createGmailAuth({
+        saEmail: config.gmail.saEmail,
+        saKey: config.gmail.saKey,
+        impersonate: config.gmail.impersonate,
+      }),
+      fromAddress: config.gmail.supportAddress,
+    })
+  : null
+
 queue = await startQueue(config.databaseUrl, {
   adapter: supplierAdapter, settings, alert, shopify: shopifyOps, proposalShopify,
+  gmail: gmailClient, supportAddress: config.gmail?.supportAddress ?? '', notify,
+  adminBaseUrl: config.adminBaseUrl ?? '',
+  refundOps,
 })
 
 // Task 11's day-claim breaker self-heal: flip any `agent_runs` row left stuck in 'running' past
@@ -243,6 +280,14 @@ await registerCron(queue.boss, 'fulfillment.reconcile', '0 * * * *', fulfillment
 // deps `queue` already provides by this point.
 const walletMonitorDeps: WalletMonitorDeps = { db, adapter: supplierAdapter, settings, alert, enqueue }
 await registerCron(queue.boss, 'cj.wallet-monitor', '0 */4 * * *', cjWalletMonitorHandler(walletMonitorDeps))
+
+// `cj.dispute-poll` (Task 17): 6-hourly poll of every open CJ dispute recorded on an applied
+// `refund` proposal (`apply-refund.ts`'s best-effort `openCjDispute` step) — once CJ reports a
+// terminal outcome, writes a terminal marker into the proposal's payload so it drops out of
+// selection for good. Registered unconditionally, same as `cj.wallet-monitor` just above — it
+// needs only the supplier adapter/alert deps `queue` already provides by this point.
+const disputePollDeps: DisputePollDeps = { db, adapter: supplierAdapter, alert }
+await registerCron(queue.boss, 'cj.dispute-poll', '0 */6 * * *', cjDisputePollHandler(disputePollDeps))
 
 // `proposal.expire-sweep` (Task 7): daily proposal expiry sweep — transitions any pending
 // proposals that have expired to 'expired' status and audits each transition.
@@ -306,17 +351,54 @@ if (config.anthropic) {
 // staying well under pg-boss's 15-minute default. `retryLimit: 0` (the cadence itself IS the
 // retry — see the handler's own doc comment) bounds how long a Railway hard-kill mid-poll can
 // black out ingest to this same window.
-const gmailClient = config.gmail
-  ? createGmailClient({
-      auth: createGmailAuth({
-        saEmail: config.gmail.saEmail,
-        saKey: config.gmail.saKey,
-        impersonate: config.gmail.impersonate,
-      }),
-      fromAddress: config.gmail.supportAddress,
-    })
-  : null
+//
+// `gmailClient` itself is built earlier now (above `startQueue`) — `proposal.apply`'s
+// `support_reply` executor (Task 15) needs it too, via `ApplyProposalDeps`; this poll and
+// `supportAgentDeps` below just reuse that same instance.
 const triageCall = config.anthropic ? createAnthropicTriageCall({ apiKey: config.anthropic.apiKey }) : null
+
+// `support.agent-run` (Phase 6B, Tasks 11-13): the per-ticket agent job the poll's 4th stage
+// (`support/agent-select.ts`) enqueues. `anthropicConfigured` mirrors the poll's own triage gate
+// just above (`Boolean(config.anthropic)`) — same env, same "armed or not" question, asked again
+// here because the job checks it independently at claim time (spec §1 step 1).
+const supportAgentDeps: SupportAgentJobDeps = {
+  db,
+  settings,
+  alert,
+  notify,
+  adminBaseUrl: config.adminBaseUrl!,
+  adapter: supplierAdapter,
+  enqueue,
+  sessionStore: createPgSessionStore(db),
+  anthropicConfigured: Boolean(config.anthropic),
+}
+// `policy: 'stately'` is load-bearing here (fix round 1, CRITICAL-1a — was `'singleton'`, ruled
+// wrong): this queue's sole producer (`enqueueSupportAgentRun`) sets `singletonKey: ticketId` on
+// every send, expecting pg-boss to keep at most one job per ticket *outstanding* at a time —
+// created-or-active, not just active. pg-boss's `'singleton'` policy only indexes/dedupes the
+// ACTIVE state (empirically confirmed: a second `send()` with the same key while the first is
+// merely queued — not yet active — still enqueues a duplicate), so a burst of selection cycles
+// (`agent-select.ts`, once a minute) or a retried claim could stack up more than one pending job
+// for the same ticket. `'stately'` dedupes across BOTH `created` and `active` states for a given
+// key, which is what "at most one outstanding run per ticket" actually requires; `claimTicket`'s
+// row lock inside the job remains the airtight per-ticket mutex regardless.
+//
+// `createQueueRetrying` (not a bare `boss.createQueue`) guards the same first-boot concurrent-DDL
+// race as every other queue below. `createQueue` is idempotent and a no-op on a queue that already
+// exists (e.g. from before this fix, when it was created with `'singleton'`), so the explicit
+// `updateQueue` follow-up is required to make `'stately'` actually stick on redeploy — the same
+// two-call pattern `registerCron` documents and uses for the exact same reason (see this file's own
+// doc comment on `CronJobOptions`/`registerCron` in queue.ts).
+await createQueueRetrying(queue.boss, SUPPORT_AGENT_QUEUE, { name: SUPPORT_AGENT_QUEUE, policy: 'stately' })
+await queue.boss.updateQueue(SUPPORT_AGENT_QUEUE, { name: SUPPORT_AGENT_QUEUE, policy: 'stately' })
+// `batchSize: 1` is pinned explicitly (not just relying on pg-boss's own default of 1): the job's
+// `removeLocalSessionMirror()` does a best-effort `rm -rf` of the WHOLE shared SDK session-mirror
+// directory after every run, not just the run's own subdirectory — see that function's doc comment
+// in `jobs/support-agent-run.ts`. A batch >1 (or a second concurrent worker on this queue) would
+// let one run's cleanup delete another's live mirror out from under it.
+await queue.boss.work(SUPPORT_AGENT_QUEUE, { batchSize: 1 }, supportAgentRunHandler(supportAgentDeps))
+app.log.info(`${SUPPORT_AGENT_QUEUE} worker ARMED — stately, batch size 1`)
+
 const supportPollDeps: SupportPollDeps = {
   db,
   gmail: gmailClient,
@@ -326,6 +408,7 @@ const supportPollDeps: SupportPollDeps = {
   notify,
   adminBaseUrl: config.adminBaseUrl!,
   triageCall,
+  enqueue,
 }
 await registerCron(queue.boss, SUPPORT_POLL_QUEUE, '* * * * *', supportPollGmailHandler(supportPollDeps), {
   policy: 'singleton',

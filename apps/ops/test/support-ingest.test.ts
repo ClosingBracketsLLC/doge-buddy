@@ -721,6 +721,61 @@ describe('runIngest', () => {
     expect(alert.mock.calls[0]![2]).toMatchObject({ threadIds: [first.threadId] })
   })
 
+  // Task 4 — auth_results capture (spec: Task 1's authenticationResults on the normalized full
+  // message flows through to the stored message row).
+  it('captures Authentication-Results from the inbound message onto support_messages.auth_results', async () => {
+    await seedSyncState()
+    const authHeader = 'mx.google.com; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com'
+    const sent = gmail.receiveInbound({
+      from: 'jane@example.com',
+      to: [SUPPORT],
+      subject: 'Where is my order?',
+      bodyText: 'Ordered a week ago and heard nothing.',
+      authenticationResults: authHeader,
+    })
+
+    await runIngest(deps)
+
+    const ticket = (await ticketByThread(sent.threadId))!
+    const messages = await messagesOfTicket(ticket.id)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.authResults).toBe(authHeader)
+  })
+
+  it('leaves auth_results null when the inbound message carries no Authentication-Results header', async () => {
+    await seedSyncState()
+    const sent = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+
+    await runIngest(deps)
+
+    const ticket = (await ticketByThread(sent.threadId))!
+    const messages = await messagesOfTicket(ticket.id)
+    expect(messages[0]!.authResults).toBeNull()
+  })
+
+  // Task 4 — reopen resets the agent failure budget alongside the triage failure budget (spec: a
+  // new conversation gets its own agent attempts too, not a stale count from the last one).
+  it('a follow-up on a waiting_on_customer ticket reopens to new and resets BOTH agent_failure_count and triage_failure_count', async () => {
+    await seedSyncState()
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+    const ticket = (await ticketByThread(first.threadId))!
+    await db
+      .update(supportTickets)
+      .set({ status: 'waiting_on_customer', agentFailureCount: 2, triageFailureCount: 1 })
+      .where(eq(supportTickets.id, ticket.id))
+
+    gmail.receiveInbound({
+      from: 'jane@example.com', to: [SUPPORT], subject: 'Re: Hi', bodyText: 'still broken', threadId: first.threadId,
+    })
+    await runIngest(deps)
+
+    const reopened = (await ticketByThread(first.threadId))!
+    expect(reopened.status).toBe('new')
+    expect(reopened.agentFailureCount).toBe(0)
+    expect(reopened.triageFailureCount).toBe(0)
+  })
+
   // CRITICAL 1 regression: escalate -> notify stamps `escalation_notified_at` -> owner resolves
   // (the admin Resolve/Escalate handlers never touch that column) -> customer replies with a new
   // chargeback -> the tripwire re-escalates. Without clearing the stamp on every transition INTO

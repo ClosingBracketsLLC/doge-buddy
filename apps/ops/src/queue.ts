@@ -1,4 +1,5 @@
 import { createDb } from '@doge-buddy/db'
+import type { GmailClient } from '@doge-buddy/gmail'
 import type { SupplierAdapter } from '@doge-buddy/supplier'
 import PgBoss from 'pg-boss'
 import type { createAlerter } from './alerts.ts'
@@ -11,7 +12,8 @@ import { fulfillmentPlaceOrderHandler } from './jobs/fulfillment-place-order.ts'
 import { fulfillmentSyncTrackingHandler } from './jobs/fulfillment-sync-tracking.ts'
 import { proposalApplyHandler } from './jobs/proposal-apply.ts'
 import { webhookProcessHandler } from './jobs/webhook-process.ts'
-import type { ApplyProposalDeps, ProposalShopifyOps } from './proposals/run-apply.ts'
+import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
+import type { ApplyProposalDeps, ProposalShopifyOps, RefundOps } from './proposals/run-apply.ts'
 import type { createSettings } from './settings.ts'
 
 export interface FulfillmentQueueDeps {
@@ -34,6 +36,28 @@ export interface FulfillmentQueueDeps {
    * `'shopify not configured'` on any call, same as `index.ts`'s own `config.shopify`-gated stub.
    */
   proposalShopify?: ProposalShopifyOps
+  /**
+   * Gmail client backing `proposal.apply`'s `support_reply` executor (Task 15). Optional so tests
+   * that never touch that path don't need one; `startQueue` below defaults to `null` when omitted
+   * — `applySupportReply` fails loudly (alert) on a `null` gmail rather than throwing a `TypeError`.
+   */
+  gmail?: GmailClient | null
+  /**
+   * Refund/dispute ops backing `proposal.apply`'s `refund` executor (Task 16). Same optional/`null`
+   * default shape as `gmail` above.
+   */
+  refundOps?: RefundOps | null
+  /** Config `SUPPORT_ADDRESS`, threaded to `ApplyProposalDeps`. Defaults to `''` when omitted. */
+  supportAddress?: string
+  /**
+   * Owner-notification seam, threaded to `ApplyProposalDeps` (dead-letter growth, Task 14) and any
+   * executor that needs it. Defaults to `createNoopNotifier(deps.alert)` when omitted — same
+   * alert-and-false degrade `index.ts`'s own `notify` binding falls back to when Telegram isn't
+   * configured.
+   */
+  notify?: NotifyOwner
+  /** The admin app's own base URL, threaded to `ApplyProposalDeps` (dead-letter proposal links). Defaults to `''` when omitted. */
+  adminBaseUrl?: string
 }
 
 export interface Queue {
@@ -57,8 +81,17 @@ const PROPOSAL_APPLY_QUEUE = 'proposal.apply'
  * raise a deadlock (40P01) or serialization failure (40001) on that DDL. Once the queue exists,
  * every future call is a fast no-op, so this only ever matters on first boot; retrying a few
  * times with a short backoff is safe and sufficient.
+ *
+ * Exported (Task 13) for `index.ts`'s own non-standard-policy queue creations — house rule: every
+ * queue whose producer sets a `singletonKey` (e.g. `support.agent-run`, `policy: 'stately'` — see
+ * that queue's own comment in index.ts for why `'stately'` and not `'singleton'`) must be created
+ * through this retrying wrapper rather than a bare `boss.createQueue`, for the same first-boot
+ * DDL-race reason `startQueue`'s own non-standard-policy queues below use it. And because
+ * `createQueue` is a silent no-op on a queue that already exists, index.ts follows this call with
+ * its own explicit `updateQueue` to force the policy even on a queue that predates the intended
+ * policy — the same two-call shape `registerCron` below documents and uses for the identical reason.
  */
-async function createQueueRetrying(boss: PgBoss, name: string, options?: PgBoss.Queue): Promise<void> {
+export async function createQueueRetrying(boss: PgBoss, name: string, options?: PgBoss.Queue): Promise<void> {
   const RETRYABLE_CODES = new Set(['40P01', '40001'])
   const MAX_ATTEMPTS = 5
   for (let attempt = 1; ; attempt++) {
@@ -130,11 +163,19 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
       publishablePublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
     },
-    // Task 16: the apply-time CJ product-webhook subscribe needs only `subscribeProductWebhook`
-    // off the same supplier adapter every other queue here already threads through — no
-    // no-config fallback needed (unlike `shopify`/`proposalShopify` above), since `deps.adapter`
-    // is required on `FulfillmentQueueDeps` and already used unconditionally by `placeOrderDeps`.
+    // The full supplier adapter every other queue here already threads through covers this Pick
+    // unconditionally (subscribeProductWebhook for new_listing, getDisputeOptions/openDispute for
+    // Task 16's refund executor) — no no-config fallback needed (unlike `shopify`/`proposalShopify`
+    // above), since `deps.adapter` is required on `FulfillmentQueueDeps`.
     adapter: deps.adapter,
+    // Tasks 15/16 fallback stubs: `null` degrades those executors to a loud alert-and-fail rather
+    // than a `TypeError`, same spirit as `shopifyNotConfigured` above.
+    gmail: deps.gmail ?? null,
+    refundOps: deps.refundOps ?? null,
+    supportAddress: deps.supportAddress ?? '',
+    notify: deps.notify ?? createNoopNotifier(deps.alert),
+    enqueue,
+    adminBaseUrl: deps.adminBaseUrl ?? '',
   }
 
   await createQueueRetrying(boss, 'demo.ping')

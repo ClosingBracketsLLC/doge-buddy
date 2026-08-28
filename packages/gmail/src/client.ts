@@ -1,5 +1,5 @@
 import type { GmailAuth } from './auth.ts'
-import type { GmailClient, HistoryRecord, NormalizedMessage } from './types.ts'
+import { PROPOSAL_MARKER_HEADER, type GmailClient, type HistoryRecord, type NormalizedMessage } from './types.ts'
 import { GmailApiError, GmailRateLimitError, HistoryExpiredError, MessageGoneError } from './errors.ts'
 import { parseAddrSpecs, parseFirstAddrSpec } from './address.ts'
 import { extractBodyText } from './body.ts'
@@ -11,7 +11,22 @@ const BASE_URL = 'https://gmail.googleapis.com/gmail/v1/users/me'
 const RATE_LIMIT_REASONS = new Set(['userRateLimitExceeded', 'rateLimitExceeded', 'dailyLimitExceeded'])
 
 /** Order is significant — mirrors the brief's required metadataHeaders order exactly. */
-const METADATA_HEADERS = ['From', 'To', 'Cc', 'Delivered-To', 'Subject', 'Message-ID', 'In-Reply-To', 'References']
+const METADATA_HEADERS = [
+  'From',
+  'To',
+  'Cc',
+  'Delivered-To',
+  'Subject',
+  'Message-ID',
+  'In-Reply-To',
+  'References',
+  'Authentication-Results',
+  // A metadata fetch returns ONLY the headers named here, so the send-recovery marker has to be on
+  // this list or `dogeBuddyProposalId` would always come back null on the exact fetch that exists
+  // to read it (`apply-support-reply.ts`'s re-entry scan) — and a re-entered apply would send the
+  // customer a second copy of the same reply.
+  PROPOSAL_MARKER_HEADER,
+]
 
 export interface CreateGmailClientOptions {
   auth: GmailAuth
@@ -54,7 +69,16 @@ interface RawGmailMessage {
   payload?: GmailMessagePayload
 }
 
-type Endpoint = 'listHistory' | 'getMessage' | 'other'
+/**
+ * `send` is its own endpoint kind purely so the retry logic can EXCLUDE it (Task 15 review, M4):
+ * `messages.send` is the one non-idempotent call in this client, and a transport-level failure
+ * (timeout, 5xx) does not mean Gmail failed to queue the message — it means we stopped waiting for
+ * the answer. An HTTP-layer retry there can put two copies in the customer's inbox from inside a
+ * single `sendReply` call, which the caller's `X-DogeBuddy-Proposal` marker cannot detect or undo
+ * (both copies carry it). The executor's own crash-recovery re-entry IS the send's retry layer —
+ * it re-reads the thread first, so it can tell "already sent" from "never sent"; this layer cannot.
+ */
+type Endpoint = 'listHistory' | 'getMessage' | 'send' | 'other'
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -70,8 +94,11 @@ function jitterDelayMs(): number {
  * keep a poll (and the singleton queue lock protecting it) alive indefinitely. */
 const REQUEST_TIMEOUT_MS = 20_000
 
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'AbortError'
+/** AbortSignal.timeout() rejects with a DOMException named 'TimeoutError' (NOT 'AbortError') —
+ * this is the only abort reason the client itself can produce, since it never accepts a caller
+ * signal. Any other error name is unknown and must propagate untouched. */
+function isTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'TimeoutError'
 }
 
 async function safeJson(res: Response): Promise<unknown> {
@@ -119,6 +146,13 @@ function normalizeMessage(raw: RawGmailMessage, format: 'metadata' | 'full'): No
     rfcMessageId: firstHeader(headers, 'Message-ID'),
     inReplyTo: firstHeader(headers, 'In-Reply-To'),
     references: firstHeader(headers, 'References'),
+    // The topmost Authentication-Results header is Gmail's own stamp (each hop that adds one
+    // prepends it) — firstHeader already returns the first/topmost occurrence. Exposed for both
+    // 'metadata' and 'full' formats since support ingest fetches format:'full'.
+    authenticationResults: firstHeader(headers, 'Authentication-Results'),
+    // Send-recovery marker (see the field's own doc comment on NormalizedMessage). Exposed for
+    // both formats for the same reason authenticationResults is — the reader picks the format.
+    dogeBuddyProposalId: firstHeader(headers, PROPOSAL_MARKER_HEADER),
     // format:'metadata' never carries body content — null it explicitly rather
     // than trusting the fixture/response to omit body.data.
     bodyText: format === 'metadata' ? null : extractBodyText(raw.payload),
@@ -170,14 +204,18 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
         // one jittered retry (sharing the same retry budget as the 5xx path — no more attempts
         // than a garden-variety server error gets), then throw as a GmailApiError so callers don't
         // need to special-case a raw DOMException on top of the existing error taxonomy.
-        if (isAbortError(err) && !attemptedServerRetry) {
+        // `endpoint !== 'send'`: a timed-out send may well have been queued by Gmail already —
+        // retrying it here would double-send inside one call. See the `Endpoint` type's note.
+        if (isTimeoutError(err) && !attemptedServerRetry && endpoint !== 'send') {
           attemptedServerRetry = true
           await sleep(jitterDelayMs())
           continue
         }
-        if (isAbortError(err)) {
+        if (isTimeoutError(err)) {
           throw new GmailApiError('Gmail API request timed out', 0, 'timeout')
         }
+        // Unknown error (not our own timeout) — the client accepts no caller signal, so there's
+        // nothing else this could legitimately be. Don't retry, don't wrap: propagate as-is.
         throw err
       }
 
@@ -208,7 +246,9 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
       }
 
       if (status >= 500 && status < 600) {
-        if (!attemptedServerRetry) {
+        // Same exclusion as the timeout path above: a 5xx on `messages.send` is not proof the
+        // message was not queued, so this layer never retries it.
+        if (!attemptedServerRetry && endpoint !== 'send') {
           attemptedServerRetry = true
           await sleep(jitterDelayMs())
           continue
@@ -315,9 +355,10 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
         inReplyTo: r.inReplyTo,
         references: r.references,
         bodyText: r.bodyText,
+        extraHeaders: r.extraHeaders,
       })
 
-      const result = (await request('POST', '/messages/send', [], 'other', { raw, threadId: r.threadId })) as {
+      const result = (await request('POST', '/messages/send', [], 'send', { raw, threadId: r.threadId })) as {
         id: string
         threadId: string
       }

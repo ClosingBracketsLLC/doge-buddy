@@ -1,10 +1,19 @@
 import { formatCents } from '@doge-buddy/core'
 import { ticketStatus } from '@doge-buddy/db'
-import type { supportMessages, supportTickets } from '@doge-buddy/db'
+import type { agentRuns, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import { html, raw, type RawHtml } from './html.ts'
 
 export type TicketRow = typeof supportTickets.$inferSelect
 export type MessageRow = typeof supportMessages.$inferSelect
+
+/** One row of this ticket's own proposal history (Task 19) — the columns the thread view's
+ * proposals section needs, loaded by the route's own query (`routes.ts`'s
+ * `proposals WHERE ticket_id = $id ORDER BY created_at DESC`). */
+export type TicketProposalRow = Pick<typeof proposals.$inferSelect, 'id' | 'type' | 'status' | 'summary' | 'createdAt'>
+
+/** One row of this ticket's own support-agent run history (Task 19) — `routes.ts`'s own query
+ * already filters to `workflow = 'support' AND trigger_ref = $ticketId`, newest first, capped at 5. */
+export type TicketAgentRunRow = Pick<typeof agentRuns.$inferSelect, 'id' | 'status' | 'startedAt'>
 
 /** Every legal `support_tickets.status` value, source-of-truth from the DB enum (mirrors
  * routes.ts's own `PROPOSAL_STATUSES = proposalStatus.enumValues` idiom). */
@@ -182,10 +191,70 @@ function renderActionForms(t: TicketRow): RawHtml {
   return html`${escalate}${resolve}`
 }
 
+/**
+ * Task 19: this ticket's own support-proposal history — id (linked to the proposal detail page),
+ * type, status, and summary, newest first (caller-supplied order — same seam as every other
+ * section here). `summary` is customer/agent-drafted text (a refund reason, a reply gist) and goes
+ * through html``'s default escaping like every other interpolation in this file — never `raw()`.
+ */
+function renderTicketProposalsSection(rows: TicketProposalRow[]): RawHtml {
+  if (rows.length === 0) {
+    return html`<section id="ticket-proposals">
+      <h3>Proposals</h3>
+      <p>No proposals.</p>
+    </section>`
+  }
+  return html`<section id="ticket-proposals">
+    <h3>Proposals</h3>
+    <table>
+      <tbody>
+        ${rows.map(
+          (p) => html`<tr>
+            <td><a href="/admin/proposals/${p.id}">${p.id}</a></td>
+            <td>${p.type}</td>
+            <td>${p.status}</td>
+            <td>${p.summary}</td>
+            <td>${p.createdAt.toISOString()}</td>
+          </tr>`,
+        )}
+      </tbody>
+    </table>
+  </section>`
+}
+
+/**
+ * Task 19: this ticket's last handful of support-agent runs (`routes.ts`'s query already scopes
+ * to `workflow = 'support' AND trigger_ref = ticketId`, newest first, `LIMIT 5`) — each id links to
+ * the run detail page (`/admin/runs/:id`, the Phase 5 route), alongside its status and start time.
+ */
+function renderTicketAgentRunsSection(rows: TicketAgentRunRow[]): RawHtml {
+  if (rows.length === 0) {
+    return html`<section id="ticket-agent-runs">
+      <h3>Agent runs</h3>
+      <p>No agent runs.</p>
+    </section>`
+  }
+  return html`<section id="ticket-agent-runs">
+    <h3>Agent runs</h3>
+    <ul>
+      ${rows.map(
+        (r) => html`<li><a href="/admin/runs/${r.id}">${r.id}</a> — ${r.status} — ${r.startedAt.toISOString()}</li>`,
+      )}
+    </ul>
+  </section>`
+}
+
 /** The /admin/tickets/:id thread view: header, triage verdict, linked-order summary, the two
- * guarded action forms, then the message thread in chronological order (caller-supplied order —
- * this function only renders it, same seam as render-run.ts's `renderRunDetail`). */
-export function renderTicketDetail(t: TicketRow, messages: MessageRow[], linkedOrder: LinkedOrderSummary | null): RawHtml {
+ * guarded action forms, this ticket's proposal + agent-run history (Task 19), then the message
+ * thread in chronological order (caller-supplied order — this function only renders it, same seam
+ * as render-run.ts's `renderRunDetail`). */
+export function renderTicketDetail(
+  t: TicketRow,
+  messages: MessageRow[],
+  linkedOrder: LinkedOrderSummary | null,
+  ticketProposals: TicketProposalRow[],
+  agentRunRows: TicketAgentRunRow[],
+): RawHtml {
   return html`<h1>Ticket ${t.id}</h1>
     <p>Status: ${t.status}</p>
     <p>Subject: ${t.subject ?? '(no subject)'}</p>
@@ -193,6 +262,8 @@ export function renderTicketDetail(t: TicketRow, messages: MessageRow[], linkedO
     ${renderVerdictBlock(t)}
     ${renderLinkedOrderSection(linkedOrder, t.claimedOrderNumber)}
     ${renderActionForms(t)}
+    ${renderTicketProposalsSection(ticketProposals)}
+    ${renderTicketAgentRunsSection(agentRunRows)}
     <section id="thread">
       <h3>Messages</h3>
       ${messages.length === 0 ? html`<p>No messages.</p>` : messages.map(renderMessage)}

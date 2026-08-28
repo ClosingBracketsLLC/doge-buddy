@@ -1,6 +1,6 @@
-import { createDb, proposals, auditLog } from '@doge-buddy/db'
-import { and, eq } from 'drizzle-orm'
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createDb, proposals, auditLog, orders, supportMessages, supportTickets } from '@doge-buddy/db'
+import { and, eq, inArray } from 'drizzle-orm'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSettings } from '../src/settings.ts'
 import { createCaptureNotifier } from '../src/notify/capture.ts'
 import { hashActionToken } from '../src/proposals/tokens.ts'
@@ -18,14 +18,15 @@ function newListingPayload() {
   }
 }
 
-function refundPayload(amountCents: number) {
+function refundPayload(amountCents: number, orderId: string = crypto.randomUUID()) {
   return {
     type: 'refund',
-    orderId: crypto.randomUUID(),
+    orderId,
     shopifyOrderGid: 'gid://shopify/Order/123',
     amountCents,
     reason: 'damaged',
     openCjDispute: false,
+    threadSnapshotAt: '2026-08-27T12:00:00.000Z',
   }
 }
 
@@ -37,6 +38,201 @@ describe('submitProposal', () => {
     await db.delete(proposals)
   })
   afterAll(() => pool.end())
+
+  // -- Task 18: per-type Telegram notify bodies --------------------------------------------------
+
+  let ticketIds: string[] = []
+  let orderIds: string[] = []
+
+  afterEach(async () => {
+    if (ticketIds.length > 0) {
+      await db.delete(supportMessages).where(inArray(supportMessages.ticketId, ticketIds))
+      await db.delete(supportTickets).where(inArray(supportTickets.id, ticketIds))
+      ticketIds = []
+    }
+    if (orderIds.length > 0) {
+      await db.delete(orders).where(inArray(orders.id, orderIds))
+      orderIds = []
+    }
+  })
+
+  async function seedTicket(overrides: Partial<{ subject: string; customerEmail: string }> = {}) {
+    const [ticket] = await db
+      .insert(supportTickets)
+      .values({
+        gmailThreadId: `t18-${crypto.randomUUID()}`,
+        customerEmail: overrides.customerEmail ?? 'buyer@example.com',
+        subject: overrides.subject ?? 'Where is my order',
+        status: 'awaiting_approval',
+      })
+      .returning()
+    ticketIds.push(ticket!.id)
+    return ticket!
+  }
+
+  async function seedOrder(number = '#2001') {
+    const [order] = await db
+      .insert(orders)
+      .values({
+        shopifyOrderGid: `gid://shopify/Order/${crypto.randomUUID()}`,
+        shopifyOrderNumber: number,
+        isTest: true,
+      })
+      .returning()
+    orderIds.push(order!.id)
+    return order!
+  }
+
+  it('support_reply notify body: a >800-char draft is head(600)+tail(200) excerpted with … between', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket()
+
+    const head = 'H'.repeat(600)
+    const middle = 'M'.repeat(1200)
+    const tail = 'T'.repeat(200)
+    const longBody = head + middle + tail // 2000 chars total
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: longBody, threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    const notification = sent[0]!
+    expect(notification.body).toContain(head)
+    expect(notification.body).toContain(tail)
+    expect(notification.body).toContain('…')
+    expect(notification.body).not.toContain(middle)
+    expect(notification.body.indexOf(head)).toBeLessThan(notification.body.indexOf('…'))
+    expect(notification.body.indexOf('…')).toBeLessThan(notification.body.indexOf(tail))
+  })
+
+  it('support_reply notify body: an 800-char-or-under draft is NOT excerpted — the whole body appears', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket()
+    const shortBody = 'S'.repeat(800)
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: shortBody, threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    const notification = sent[0]!
+    expect(notification.body).toContain(shortBody)
+    expect(notification.body).not.toContain('…')
+  })
+
+  it('support_reply notify body includes the ticket subject/customer and does NOT contain the ⚠ line when no sibling refund is pending', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket({ subject: 'Broken widget', customerEmail: 'alice@example.com' })
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: 'Sorry about that.', threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    const notification = sent[0]!
+    expect(notification.body).toContain('Broken widget')
+    expect(notification.body).toContain('alice@example.com')
+    expect(notification.body).not.toContain('⚠')
+  })
+
+  it('support_reply notify body: warns with the paired proposal id when a sibling refund is pending', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket()
+    const order = await seedOrder()
+
+    const refundResult = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'refund',
+        summary: 'Refund test',
+        payload: refundPayload(1000, order.id),
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+        orderId: order.id,
+      },
+    )
+    expect(refundResult.status).toBe('pending')
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: {
+          type: 'support_reply',
+          ticketId: ticket.id,
+          body: 'Your refund is on the way.',
+          threadSnapshotAt: new Date().toISOString(),
+        },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    expect(sent).toHaveLength(2)
+    const replyNotification = sent[1]!
+    expect(replyNotification.body).toContain('⚠ promises a refund')
+    expect(replyNotification.body).toContain(refundResult.id)
+    // FR2c: the wording now reflects that after the reply ships, a rejected/expired refund
+    // re-escalates the ticket (the old "rejecting it cancels this reply" was false post-ship).
+    expect(replyNotification.body).toContain('decide/approve the paired refund proposal')
+    expect(replyNotification.body).toContain('the ticket re-escalates')
+  })
+
+  it('refund notify body: amount + order number + reason, dispute flag, and no crash with no linked order/ticket', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const order = await seedOrder('#3005')
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'refund',
+        summary: 'Refund test',
+        payload: { ...refundPayload(2599, order.id), openCjDispute: true, cjDisputeReasonId: 'r1' },
+        sourceWorkflow: 'support',
+      },
+    )
+
+    const notification = sent[0]!
+    expect(notification.body).toContain('$25.99')
+    expect(notification.body).toContain('#3005')
+    expect(notification.body).toContain('damaged')
+    expect(notification.body).toContain('CJ dispute: requested')
+  })
 
   it('manual mode: lands pending, tokened, notified, audited', async () => {
     const settings = createSettings(db)
@@ -159,7 +355,7 @@ describe('submitProposal', () => {
       expect(enqueue).toHaveBeenCalledWith(
         'proposal.apply',
         { proposalId: result.id },
-        { retryLimit: 5, retryBackoff: true, retryDelay: 30, singletonKey: result.id },
+        { retryLimit: 5, retryBackoff: true, retryDelay: 30, expireInSeconds: 600, singletonKey: result.id },
       )
 
       const auditRows = await db
@@ -315,5 +511,109 @@ describe('submitProposal', () => {
     const [row] = await db.select().from(proposals).where(eq(proposals.id, result.id))
     expect(row).toBeDefined()
     expect(row!.actionTokenHash).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  // Fix round 1 (Task 18 review), M8: the WHOLE assembled Telegram body must be capped, not any
+  // one field — a hostile/very-long ticket subject must not blow the send past Telegram's message
+  // limit and silently suppress the owner's page.
+  it('support_reply notify body: a 4000-char subject is capped — the assembled body never exceeds 3500 chars', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket({ subject: 'S'.repeat(4000) })
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: 'A short reply.', threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.body.length).toBeLessThanOrEqual(3500)
+  })
+
+  // Fix round 2 (Task 18 review), N1: round 1's M8 head-sliced the WHOLE assembled body, which
+  // silently truncated the ⚠ paired-refund warning off the end whenever a long subject pushed it
+  // past 3500 chars — the reviewer's exact repro. Round 2 bounds the subject BEFORE assembly and
+  // appends the ⚠ line as mandatory tail (guaranteed to survive the final cap), so this must now
+  // hold even at the reviewer's reported length.
+  it('N1 fix: a 3400-char subject with a live sibling refund still shows the ⚠ warning AND the full head/tail draft excerpt (body stays ≤3500)', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket({ subject: 'S'.repeat(3400) })
+    const order = await seedOrder()
+
+    const refundResult = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'refund',
+        summary: 'Refund test',
+        payload: refundPayload(1000, order.id),
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+        orderId: order.id,
+      },
+    )
+    expect(refundResult.status).toBe('pending')
+
+    const head = 'H'.repeat(600)
+    const middle = 'M'.repeat(1200)
+    const tail = 'T'.repeat(200)
+    const longBody = head + middle + tail // 2000 chars, > 800 -> triggers the head/tail excerpt
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: longBody, threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    expect(sent).toHaveLength(2)
+    const replyBody = sent[1]!.body
+    expect(replyBody.length).toBeLessThanOrEqual(3500)
+    expect(replyBody).toContain('⚠ promises a refund')
+    expect(replyBody).toContain(refundResult.id)
+    expect(replyBody).toContain('decide/approve the paired refund proposal') // FR2c wording
+    // The head-600/tail-200 draft excerpt rule still holds despite the huge subject.
+    expect(replyBody).toContain(head)
+    expect(replyBody).toContain(tail)
+    expect(replyBody).toContain('…')
+    expect(replyBody).not.toContain(middle)
+  })
+
+  // N1 also covers the generic body's mandatory tail: the admin deep link must survive an
+  // unusually long `summary` the same way the ⚠ line survives a long subject.
+  it('N1 fix: a new_listing notify body with an extremely long summary still keeps the admin deep link', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+
+    const result = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'new_listing',
+        summary: 'X'.repeat(4000),
+        payload: newListingPayload(),
+        sourceWorkflow: 'sourcing-agent',
+      },
+    )
+
+    expect(sent).toHaveLength(1)
+    const body = sent[0]!.body
+    expect(body.length).toBeLessThanOrEqual(3500)
+    expect(body).toContain(`https://ops.test/admin/proposals/${result.id}`)
   })
 })

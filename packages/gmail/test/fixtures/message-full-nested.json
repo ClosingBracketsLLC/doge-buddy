@@ -18,9 +18,14 @@
         "mimeType": "multipart/mixed",
         "filename": "",
         "headers": [
+          {
+            "name": "Authentication-Results",
+            "value": "mx.google.com; spf=pass (google.com: domain of jane@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=jane@example.com; dkim=pass header.i=@example.com; dmarc=pass"
+          },
           { "name": "Delivered-To", "value": "jane@example.com" },
           { "name": "Delivered-To", "value": "support@dogebuddy.com" },
           { "name": "Received", "value": "by 2002:a17:90a:1234::1 with SMTP id abc" },
+          { "name": "Authentication-Results", "value": "mail.example.com; spf=neutral" },
           { "name": "From", "value": "\"Jane D\" <Jane@Example.com>" },
           { "name": "To", "value": "DogeBuddy Support <support@dogebuddy.com>" },
           { "name": "Cc", "value": "manager@example.com, \"Ops Team\" <ops@example.com>" },

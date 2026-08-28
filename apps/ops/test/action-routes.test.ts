@@ -1,6 +1,6 @@
-import { createDb, proposals, auditLog } from '@doge-buddy/db'
-import { and, eq } from 'drizzle-orm'
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createDb, proposals, auditLog, orders, supportMessages, supportTickets } from '@doge-buddy/db'
+import { and, eq, inArray } from 'drizzle-orm'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildServer } from '../src/server.ts'
 import type { ActionRouteDeps } from '../src/http/actions.ts'
 import { generateActionToken } from '../src/proposals/tokens.ts'
@@ -27,6 +27,25 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
     alert = vi.fn(async () => {})
   })
 
+  // Task 18: support_reply/refund fixtures create real supportTickets/orders rows — clean those
+  // up (unlike bare `proposals` rows, which this file has never bothered to clean up: they never
+  // collide, being randomUUID-keyed and never queried except by their own id).
+  let createdTicketIds: string[] = []
+  let createdOrderIds: string[] = []
+
+  afterEach(async () => {
+    if (createdTicketIds.length > 0) {
+      // supportMessages.ticketId has no ON DELETE CASCADE — messages must go first.
+      await db.delete(supportMessages).where(inArray(supportMessages.ticketId, createdTicketIds))
+      await db.delete(supportTickets).where(inArray(supportTickets.id, createdTicketIds))
+      createdTicketIds = []
+    }
+    if (createdOrderIds.length > 0) {
+      await db.delete(orders).where(inArray(orders.id, createdOrderIds))
+      createdOrderIds = []
+    }
+  })
+
   async function seedPending(overrides: Partial<{ expiresAt: Date; summary: string }> = {}) {
     const { token, hash } = generateActionToken()
     const [row] = await db
@@ -49,6 +68,91 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
       .select()
       .from(auditLog)
       .where(and(eq(auditLog.entityId, proposalId), eq(auditLog.action, action)))
+  }
+
+  // -- Task 18: support_reply/refund fixtures ----------------------------------------------------
+
+  async function seedTicket(overrides: Partial<{ subject: string; customerEmail: string; agentSessionId: string }> = {}) {
+    const [ticket] = await db
+      .insert(supportTickets)
+      .values({
+        gmailThreadId: `t18-${crypto.randomUUID()}`,
+        customerEmail: overrides.customerEmail ?? 'buyer@example.com',
+        subject: overrides.subject ?? 'Where is my order',
+        status: 'awaiting_approval',
+        agentSessionId: overrides.agentSessionId ?? 'sess-abc',
+      })
+      .returning()
+    createdTicketIds.push(ticket!.id)
+    return ticket!
+  }
+
+  async function seedOrder(number = '#5001', totalCents?: number) {
+    const [order] = await db
+      .insert(orders)
+      .values({
+        shopifyOrderGid: `gid://shopify/Order/${crypto.randomUUID()}`,
+        shopifyOrderNumber: number,
+        isTest: true,
+        ...(totalCents !== undefined ? { totalCents } : {}),
+      })
+      .returning()
+    createdOrderIds.push(order!.id)
+    return order!
+  }
+
+  /** A dmarc=pass-authenticated inbound message on the ticket — `validateRefundIntent`'s
+   * sender-authentication check needs one before it will ever reach the accumulation bound. */
+  async function seedAuthenticatedInbound(ticketId: string): Promise<void> {
+    await db.insert(supportMessages).values({
+      ticketId,
+      gmailMessageId: `t18-msg-${crypto.randomUUID()}`,
+      direction: 'inbound',
+      fromEmail: 'buyer@example.com',
+      bodyText: 'please refund me',
+      authResults: 'dkim=pass; dmarc=pass; spf=pass',
+      sentAt: new Date(),
+    })
+  }
+
+  async function seedSupportProposal(overrides: {
+    type: 'support_reply' | 'refund'
+    ticketId: string
+    orderId?: string
+    payload: unknown
+    status?: 'pending' | 'rejected' | 'expired'
+  }) {
+    const { token, hash } = generateActionToken()
+    const [row] = await db
+      .insert(proposals)
+      .values({
+        type: overrides.type,
+        status: overrides.status ?? 'pending',
+        summary: `Test ${overrides.type} ${crypto.randomUUID()}`,
+        payload: overrides.payload,
+        sourceWorkflow: 'test',
+        ticketId: overrides.ticketId,
+        orderId: overrides.orderId,
+        actionTokenHash: hash,
+      })
+      .returning()
+    return { row: row!, token }
+  }
+
+  function supportReplyPayload(ticketId: string, body: string) {
+    return { type: 'support_reply' as const, ticketId, body, threadSnapshotAt: new Date().toISOString() }
+  }
+
+  function refundPayload(orderId: string, overrides: Partial<{ amountCents: number; reason: string; openCjDispute: boolean }> = {}) {
+    return {
+      type: 'refund' as const,
+      orderId,
+      shopifyOrderGid: 'gid://shopify/Order/999',
+      amountCents: overrides.amountCents ?? 1500,
+      reason: overrides.reason ?? 'damaged in transit',
+      openCjDispute: overrides.openCjDispute ?? false,
+      threadSnapshotAt: new Date().toISOString(),
+    }
   }
 
   it('1. GET approve with valid token -> 200, HTML has summary + <form method="post" -- and no DB write', async () => {
@@ -127,7 +231,7 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
     expect(deps.enqueue).toHaveBeenCalledWith(
       'proposal.apply',
       { proposalId: row.id },
-      { retryLimit: 5, retryBackoff: true, retryDelay: 30, singletonKey: row.id },
+      { retryLimit: 5, retryBackoff: true, retryDelay: 30, expireInSeconds: 600, singletonKey: row.id },
     )
 
     const auditRows = await auditRowsFor(row.id, 'proposal.approve')
@@ -344,6 +448,145 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
       'action_route_error',
       expect.objectContaining({ proposalId: 'not-a-uuid' }),
     )
+
+    await app.close()
+  })
+
+  // -- Task 18: §3 validator on one-click approve, silent reject-escalation ----------------------
+
+  it('12. one-click reject of a refund: sibling pending reply expires, ticket escalates SILENTLY (stamp set, session cleared) — a later one-click approve of that now-expired reply is "Already handled"', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket({ agentSessionId: 'sess-live' })
+    const order = await seedOrder()
+    const { row: refundRow, token: refundToken } = await seedSupportProposal({
+      type: 'refund',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id),
+    })
+    const { row: replyRow, token: replyToken } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+
+    const rejectRes = await app.inject({ method: 'POST', url: `/a/${refundRow.id}/reject?t=${refundToken}` })
+    expect(rejectRes.statusCode).toBe(200)
+    expect(rejectRes.body).toContain('Rejected')
+
+    const [refundAfter] = await db.select().from(proposals).where(eq(proposals.id, refundRow.id))
+    expect(refundAfter!.status).toBe('rejected')
+
+    const [replyAfter] = await db.select().from(proposals).where(eq(proposals.id, replyRow.id))
+    expect(replyAfter!.status).toBe('expired')
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('owner_rejected_draft')
+    // PRE-STAMPED (silent): the owner's own reject tap caused this escalation, so it must not
+    // read as an un-notified escalation waiting for the poller to page them about their own click.
+    expect(ticketAfter!.escalationNotifiedAt).not.toBeNull()
+    expect(ticketAfter!.agentSessionId).toBeNull()
+
+    // No owner notification for THIS decision route (it has none to send — Telegram paging is a
+    // notify()-owning concern elsewhere); what matters here is that no throw/500 occurred and the
+    // DB ended up in the state above.
+    expect(deps.alert).not.toHaveBeenCalledWith('critical', expect.anything(), expect.anything())
+
+    const laterApproveRes = await app.inject({ method: 'POST', url: `/a/${replyRow.id}/approve?t=${replyToken}` })
+    expect(laterApproveRes.statusCode).toBe(200)
+    expect(laterApproveRes.body).toContain(FRIENDLY_COPY)
+
+    const [replyStill] = await db.select().from(proposals).where(eq(proposals.id, replyRow.id))
+    expect(replyStill!.status).toBe('expired')
+
+    await app.close()
+  })
+
+  it('13. one-click reject of a support_reply: sibling pending refund expires too (symmetric direction)', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    const order = await seedOrder()
+    const { row: replyRow, token: replyToken } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const { row: refundRow } = await seedSupportProposal({
+      type: 'refund',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id),
+    })
+
+    const res = await app.inject({ method: 'POST', url: `/a/${replyRow.id}/reject?t=${replyToken}` })
+    expect(res.statusCode).toBe(200)
+
+    const [refundAfter] = await db.select().from(proposals).where(eq(proposals.id, refundRow.id))
+    expect(refundAfter!.status).toBe('expired')
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+
+    await app.close()
+  })
+
+  it('14. one-click approve of a refund whose accumulation bound is now exceeded -> validation error page naming refund_exceeds_total, no transition', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    const order = await seedOrder()
+    // Order total defaults to NULL on this fixture — validateRefundIntent refuses any refund
+    // against an order whose total isn't known, which is the cheapest reliable way to force a §3
+    // refusal on this route without faking a second live proposal to overflow the accumulation
+    // bound.
+    const { row, token } = await seedSupportProposal({
+      type: 'refund',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id),
+    })
+
+    const res = await app.inject({ method: 'POST', url: `/a/${row.id}/approve?t=${token}` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('refund_unverified_order')
+    expect(deps.enqueue).not.toHaveBeenCalled()
+
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('pending')
+
+    await app.close()
+  })
+
+  // -- Fix round 1 (Task 18 review) ---------------------------------------------------------------
+
+  // CRITICAL 1, one-click surface: the accumulation bound must exclude the row being approved from
+  // its own total (before the fix, `pending` — its own status while approving — was itself one of
+  // the LIVE statuses summed, so any refund over half the order, including a 100%-of-total refund,
+  // was permanently un-approvable).
+  it('15. one-click approve of a 100%-of-total refund succeeds: approved + enqueued', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    await seedAuthenticatedInbound(ticket.id)
+    const order = await seedOrder('#5200', 5000)
+    const { row, token } = await seedSupportProposal({
+      type: 'refund',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id, { amountCents: 5000 }),
+    })
+
+    const res = await app.inject({ method: 'POST', url: `/a/${row.id}/approve?t=${token}` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Approved')
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('approved')
+    expect(deps.enqueue).toHaveBeenCalledTimes(1)
 
     await app.close()
   })

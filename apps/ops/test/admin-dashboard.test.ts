@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify'
 import { buildServer } from '../src/server.ts'
 import type { AdminDeps } from '../src/http/admin/routes.ts'
 import { createCaptureNotifier } from '../src/notify/capture.ts'
+import { AGENT_RUN_AUDIT_ACTION, SUPPORT_AGENT_MAX_RUNS_PER_DAY } from '../src/jobs/support-agent-run.ts'
 import type { OwnerNotification } from '../src/notify/notify.ts'
 import { createSettings } from '../src/settings.ts'
 
@@ -43,6 +44,7 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
 
   let createdProposalIds: string[] = []
   let createdRunIds: string[] = []
+  let createdAuditLogIds: bigint[] = []
 
   afterEach(async () => {
     if (createdProposalIds.length > 0) {
@@ -53,6 +55,10 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     if (createdRunIds.length > 0) {
       await db.delete(agentRuns).where(inArray(agentRuns.id, createdRunIds))
       createdRunIds = []
+    }
+    if (createdAuditLogIds.length > 0) {
+      await db.delete(auditLog).where(inArray(auditLog.id, createdAuditLogIds))
+      createdAuditLogIds = []
     }
     // Restore the killswitch setting to its code default so later tests (in this file or any
     // other) never observe a row this file left behind.
@@ -121,9 +127,28 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     return row!.value
   }
 
-  async function seedAgentRun(workflow: string) {
-    const [row] = await db.insert(agentRuns).values({ workflow, status: 'running' }).returning()
+  async function seedAgentRun(workflow: string, status: 'running' | 'succeeded' | 'failed' | 'aborted' = 'running') {
+    const [row] = await db.insert(agentRuns).values({ workflow, status }).returning()
     createdRunIds.push(row!.id)
+    return row!
+  }
+
+  // Seeds a `support.agent_run` audit row (the spend row Task 11's global cap counts), optionally
+  // backdated — used to prove the health row counts only rows since UTC midnight, mirroring
+  // jobs/support-agent-run.ts's own `AGENT_RUN_AUDIT_ACTION` spend-row shape.
+  async function seedAgentRunAuditRow(overrides: Partial<{ createdAt: Date }> = {}) {
+    const [row] = await db
+      .insert(auditLog)
+      .values({
+        actor: 'system',
+        action: AGENT_RUN_AUDIT_ACTION,
+        entityType: 'ticket',
+        entityId: crypto.randomUUID(),
+        detail: { model: 'test' },
+        ...(overrides.createdAt ? { createdAt: overrides.createdAt } : {}),
+      })
+      .returning({ id: auditLog.id })
+    createdAuditLogIds.push(row!.id)
     return row!
   }
 
@@ -324,6 +349,44 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     expect(res.body).toContain(row.id)
     expect(res.body).toContain('&lt;sourcing&gt; &quot;run&quot;')
     expect(res.body).not.toContain('<sourcing>')
+
+    await app.close()
+  })
+
+  it('11. support agent health row shows 0 runs today / cap and "none" last run when nothing seeded', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain(`support agent: 0 runs today / ${SUPPORT_AGENT_MAX_RUNS_PER_DAY}`)
+    expect(res.body).toContain('support agent last run: none')
+
+    await app.close()
+  })
+
+  it("12. support agent health row counts only today's support.agent_run audit rows and shows the newest support-workflow agent_runs row's status", async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    await seedAgentRunAuditRow()
+    await seedAgentRunAuditRow()
+    await seedAgentRunAuditRow()
+    // Exactly 24h ago is always strictly before today's UTC midnight — must not count toward "today".
+    await seedAgentRunAuditRow({ createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) })
+    // A non-support-workflow run must not be picked as the "last run" — proves the workflow filter.
+    await seedAgentRun('sourcing', 'failed')
+    const run = await seedAgentRun('support', 'succeeded')
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain(`support agent: 3 runs today / ${SUPPORT_AGENT_MAX_RUNS_PER_DAY}`)
+    expect(res.body).toContain('support agent last run: succeeded')
+    void run
 
     await app.close()
   })
