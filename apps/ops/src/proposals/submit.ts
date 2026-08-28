@@ -77,16 +77,34 @@ async function senderAuthNoteForTicket(db: Db, ticketId: string): Promise<string
 }
 
 /**
+ * Field-level bounds (Task 18 review, N1) applied BEFORE assembly to the untrusted/unbounded
+ * fields that feed a notify body — a ticket subject (attacker-controlled: it's a customer email
+ * subject line) or a refund reason. Bounding these up front, rather than only capping the final
+ * assembled string, is what keeps a long subject from being able to push mandatory content (the
+ * ⚠ paired-refund warning, the admin deep link) past the final cap — see `capNotifyBody`'s own doc
+ * comment for the rest of that story.
+ */
+const SUBJECT_MAX_CHARS = 200
+const REASON_MAX_CHARS = 300
+
+function truncateField(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}…` : value
+}
+
+/**
  * `support_reply`'s Telegram body (spec §5): subject + customer + auth-note, then the draft body
  * itself — head 600 + tail 200 with an ellipsis between when it's over 800 chars, the WHOLE body
  * otherwise. The `body.slice(0, 600) + (... ? tail : body.slice(600))` shape is deliberate, not
  * just "trim if long": for a body ≤ 800 chars, `slice(0, 600) + slice(600)` reconstructs the
  * string EXACTLY regardless of its length (including < 600), so there is no separate "short body"
- * branch to keep in sync with the long one.
+ * branch to keep in sync with the long one. The subject is bounded to `SUBJECT_MAX_CHARS` before
+ * it goes into that assembly (Task 18 review, N1) — see `capNotifyBody`'s doc comment for why.
  *
  * When a live sibling refund proposal is still `pending` on the same ticket, appends spec §5's
  * warning line — the owner is about to approve a reply that may promise a refund without having
- * decided the refund itself yet.
+ * decided the refund itself yet. This line is passed to `capNotifyBody` as MANDATORY TAIL (Task 18
+ * review, N1): a long subject/body must never be able to push it off the end of a capped body,
+ * because a silently-missing warning is exactly the failure this line exists to prevent.
  */
 async function buildSupportReplyNotifyBody(db: Db, payload: SupportReplyPayload): Promise<string> {
   const [ticket] = await db
@@ -106,27 +124,27 @@ async function buildSupportReplyNotifyBody(db: Db, payload: SupportReplyPayload)
     .where(and(eq(proposals.ticketId, payload.ticketId), eq(proposals.type, 'refund'), eq(proposals.status, 'pending')))
     .limit(1)
 
-  const lines = [
-    `Subject: ${ticket?.subject ?? '(no subject)'}`,
+  const subject = truncateField(ticket?.subject ?? '(no subject)', SUBJECT_MAX_CHARS)
+  const head = [
+    `Subject: ${subject}`,
     `Customer: ${ticket?.customerEmail ?? '(unknown)'}`,
     authNote,
     '',
     bodyExcerpt,
-  ]
-  if (siblingRefund) {
-    lines.push(
-      '',
-      `⚠ promises a refund — paired refund proposal ${siblingRefund.id}; decide the refund first or together; rejecting it cancels this reply`,
-    )
-  }
-  return lines.join('\n')
+  ].join('\n')
+  const tail = siblingRefund
+    ? `\n\n⚠ promises a refund — paired refund proposal ${siblingRefund.id}; decide the refund first or together; rejecting it cancels this reply`
+    : ''
+  return capNotifyBody(head, tail)
 }
 
 /**
  * `refund`'s Telegram body (spec §5): `$X.XX on order #N — <reason>`, then the dispute flag and
  * the same cheap auth-note `support_reply`'s body uses. `ticketId` is the top-level
  * `SubmitProposalInput.ticketId` (a refund payload carries no ticket id of its own) — absent it,
- * the auth-note is simply omitted rather than guessed at.
+ * the auth-note is simply omitted rather than guessed at. `reason` is bounded to
+ * `REASON_MAX_CHARS` before assembly (Task 18 review, N1) — nothing here is mandatory tail (no
+ * ⚠ line, no deep link), so a plain final-cap via `capNotifyBody`'s default empty tail is enough.
  */
 async function buildRefundNotifyBody(db: Db, payload: RefundPayload, ticketId: string | undefined): Promise<string> {
   const [order] = await db
@@ -135,14 +153,15 @@ async function buildRefundNotifyBody(db: Db, payload: RefundPayload, ticketId: s
     .where(eq(orders.id, payload.orderId))
     .limit(1)
 
+  const reason = truncateField(payload.reason, REASON_MAX_CHARS)
   const lines = [
-    `${formatCents(payload.amountCents)} on order #${order?.number ?? 'unknown'} — ${payload.reason}`,
+    `${formatCents(payload.amountCents)} on order #${order?.number ?? 'unknown'} — ${reason}`,
     payload.openCjDispute ? 'CJ dispute: requested' : 'CJ dispute: no',
   ]
   if (ticketId) {
     lines.push(await senderAuthNoteForTicket(db, ticketId))
   }
-  return lines.join('\n')
+  return capNotifyBody(lines.join('\n'))
 }
 
 interface NotifyBodyCtx {
@@ -154,45 +173,56 @@ interface NotifyBodyCtx {
 }
 
 /**
- * Hard backstop under Telegram's ~4096-char message limit (Task 18 review, M8 — mirrors
+ * Hard backstop under Telegram's ~4096-char message limit (Task 18 review, M8/N1 — mirrors
  * `support/escalate.ts`'s own `BODY_MAX_CHARS` + comment). Every field folded into a notify body
- * here is untrusted, effectively-unbounded text — a ticket subject or a refund reason a customer
- * (or a hostile one) controls the length of — that no per-field truncation above accounts for. A
- * body over Telegram's limit fails the send outright, which would silently suppress the owner's
- * page entirely; capping the WHOLE assembled string here is what keeps that from ever happening,
- * at the cost of truncating what the owner sees rather than what they're warned about.
+ * is untrusted, effectively-unbounded text — a ticket subject or a refund reason a customer (or a
+ * hostile one) controls the length of.
+ *
+ * `head` and `tail` are capped DIFFERENTLY on purpose (N1 fix — M8's original version head-sliced
+ * the WHOLE assembled string, which silently truncated the ⚠ paired-refund warning off the end of
+ * the body whenever a long subject pushed it past 3500 chars: reproduced with a 3400-char subject,
+ * the owner could approve a promise-of-refund reply with no warning of its paired refund at all).
+ * `tail` carries content that MUST survive — the ⚠ warning line, the generic body's admin deep
+ * link — and is NEVER truncated (short of some future tail alone exceeding the whole budget, which
+ * none of this file's fixed-shape tails can). Only `head` — the variable, unbounded-length content
+ * — is cut down to fit whatever budget `tail` leaves. Per-field bounds (`SUBJECT_MAX_CHARS`,
+ * `REASON_MAX_CHARS`) applied before assembly are the FIRST line of defense so `head` rarely needs
+ * trimming at all in practice; this is the backstop for when it still does.
  */
 const NOTIFY_BODY_MAX_CHARS = 3500
 
-function capNotifyBody(body: string): string {
-  return body.length > NOTIFY_BODY_MAX_CHARS ? body.slice(0, NOTIFY_BODY_MAX_CHARS) : body
+function capNotifyBody(head: string, tail: string = ''): string {
+  const budget = NOTIFY_BODY_MAX_CHARS - tail.length
+  const cappedHead = budget <= 0 ? '' : head.length > budget ? head.slice(0, budget) : head
+  return cappedHead + tail
 }
 
 /**
  * Per-type Telegram notify body (Task 18, spec §5). `support_reply` and `refund` get dedicated,
- * human-readable bodies built from the DB (see the two builders above); every other type
- * (`new_listing`, `deprecate_product`) keeps the ORIGINAL generic body verbatim — summary,
- * IP-check checkbox, the TikTok Creative Center ritual line, and the admin link. `payload` here is
- * the already-`PAYLOAD_SCHEMAS`-validated value `submitProposal` is about to insert, not
+ * human-readable bodies built from the DB (see the two builders above, which cap themselves);
+ * every other type (`new_listing`, `deprecate_product`) keeps the ORIGINAL generic body verbatim —
+ * summary, IP-check checkbox, the TikTok Creative Center ritual line — with the admin deep link
+ * passed to `capNotifyBody` as mandatory tail (Task 18 review, N1): an operator must always be
+ * able to reach the proposal from the notification even when `summary` is unusually long. `payload`
+ * here is the already-`PAYLOAD_SCHEMAS`-validated value `submitProposal` is about to insert, not
  * re-validated — same "display, not re-validation" contract `render-proposal.ts`'s renderers use.
  */
 export async function buildProposalNotifyBody(type: ProposalType, payload: unknown, ctx: NotifyBodyCtx): Promise<string> {
   if (type === 'support_reply') {
-    return capNotifyBody(await buildSupportReplyNotifyBody(ctx.db, payload as SupportReplyPayload))
+    return buildSupportReplyNotifyBody(ctx.db, payload as SupportReplyPayload)
   }
   if (type === 'refund') {
-    return capNotifyBody(await buildRefundNotifyBody(ctx.db, payload as RefundPayload, ctx.ticketId))
+    return buildRefundNotifyBody(ctx.db, payload as RefundPayload, ctx.ticketId)
   }
 
-  return capNotifyBody(
-    [
-      ctx.summary,
-      '',
-      '[ ] IP check done',
-      'Ritual: check TikTok Creative Center (Pet Supplies, US, 7d) — paste anything interesting into the dashboard',
-      `${ctx.adminBaseUrl}/admin/proposals/${ctx.id}`,
-    ].join('\n'),
-  )
+  const head = [
+    ctx.summary,
+    '',
+    '[ ] IP check done',
+    'Ritual: check TikTok Creative Center (Pet Supplies, US, 7d) — paste anything interesting into the dashboard',
+  ].join('\n')
+  const tail = `\n${ctx.adminBaseUrl}/admin/proposals/${ctx.id}`
+  return capNotifyBody(head, tail)
 }
 
 export interface SubmitProposalInput {

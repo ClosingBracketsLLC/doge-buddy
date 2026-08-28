@@ -535,4 +535,83 @@ describe('submitProposal', () => {
     expect(sent).toHaveLength(1)
     expect(sent[0]!.body.length).toBeLessThanOrEqual(3500)
   })
+
+  // Fix round 2 (Task 18 review), N1: round 1's M8 head-sliced the WHOLE assembled body, which
+  // silently truncated the ⚠ paired-refund warning off the end whenever a long subject pushed it
+  // past 3500 chars — the reviewer's exact repro. Round 2 bounds the subject BEFORE assembly and
+  // appends the ⚠ line as mandatory tail (guaranteed to survive the final cap), so this must now
+  // hold even at the reviewer's reported length.
+  it('N1 fix: a 3400-char subject with a live sibling refund still shows the ⚠ warning AND the full head/tail draft excerpt (body stays ≤3500)', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const ticket = await seedTicket({ subject: 'S'.repeat(3400) })
+    const order = await seedOrder()
+
+    const refundResult = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'refund',
+        summary: 'Refund test',
+        payload: refundPayload(1000, order.id),
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+        orderId: order.id,
+      },
+    )
+    expect(refundResult.status).toBe('pending')
+
+    const head = 'H'.repeat(600)
+    const middle = 'M'.repeat(1200)
+    const tail = 'T'.repeat(200)
+    const longBody = head + middle + tail // 2000 chars, > 800 -> triggers the head/tail excerpt
+
+    await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'support_reply',
+        summary: 'Reply: test',
+        payload: { type: 'support_reply', ticketId: ticket.id, body: longBody, threadSnapshotAt: new Date().toISOString() },
+        sourceWorkflow: 'support',
+        ticketId: ticket.id,
+      },
+    )
+
+    expect(sent).toHaveLength(2)
+    const replyBody = sent[1]!.body
+    expect(replyBody.length).toBeLessThanOrEqual(3500)
+    expect(replyBody).toContain('⚠ promises a refund')
+    expect(replyBody).toContain(refundResult.id)
+    expect(replyBody).toContain('decide the refund first or together')
+    // The head-600/tail-200 draft excerpt rule still holds despite the huge subject.
+    expect(replyBody).toContain(head)
+    expect(replyBody).toContain(tail)
+    expect(replyBody).toContain('…')
+    expect(replyBody).not.toContain(middle)
+  })
+
+  // N1 also covers the generic body's mandatory tail: the admin deep link must survive an
+  // unusually long `summary` the same way the ⚠ line survives a long subject.
+  it('N1 fix: a new_listing notify body with an extremely long summary still keeps the admin deep link', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+
+    const result = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'new_listing',
+        summary: 'X'.repeat(4000),
+        payload: newListingPayload(),
+        sourceWorkflow: 'sourcing-agent',
+      },
+    )
+
+    expect(sent).toHaveLength(1)
+    const body = sent[0]!.body
+    expect(body.length).toBeLessThanOrEqual(3500)
+    expect(body).toContain(`https://ops.test/admin/proposals/${result.id}`)
+  })
 })
