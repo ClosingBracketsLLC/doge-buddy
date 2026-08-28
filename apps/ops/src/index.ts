@@ -25,6 +25,7 @@ import type { ShopifyFulfillmentOps } from './fulfillment/run-sync-tracking.ts'
 import type { ActionRouteDeps } from './http/actions.ts'
 import type { AdminDeps } from './http/admin/routes.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
+import { cjDisputePollHandler, type DisputePollDeps } from './jobs/cj-dispute-poll.ts'
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
@@ -279,6 +280,14 @@ await registerCron(queue.boss, 'fulfillment.reconcile', '0 * * * *', fulfillment
 // deps `queue` already provides by this point.
 const walletMonitorDeps: WalletMonitorDeps = { db, adapter: supplierAdapter, settings, alert, enqueue }
 await registerCron(queue.boss, 'cj.wallet-monitor', '0 */4 * * *', cjWalletMonitorHandler(walletMonitorDeps))
+
+// `cj.dispute-poll` (Task 17): 6-hourly poll of every open CJ dispute recorded on an applied
+// `refund` proposal (`apply-refund.ts`'s best-effort `openCjDispute` step) — once CJ reports a
+// terminal outcome, writes a terminal marker into the proposal's payload so it drops out of
+// selection for good. Registered unconditionally, same as `cj.wallet-monitor` just above — it
+// needs only the supplier adapter/alert deps `queue` already provides by this point.
+const disputePollDeps: DisputePollDeps = { db, adapter: supplierAdapter, alert }
+await registerCron(queue.boss, 'cj.dispute-poll', '0 */6 * * *', cjDisputePollHandler(disputePollDeps))
 
 // `proposal.expire-sweep` (Task 7): daily proposal expiry sweep — transitions any pending
 // proposals that have expired to 'expired' status and audits each transition.
