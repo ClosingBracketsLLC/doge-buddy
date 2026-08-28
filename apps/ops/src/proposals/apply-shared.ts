@@ -129,6 +129,20 @@ export const PROPOSAL_APPLIED_ACTION = 'proposal.applied'
 export const STALE_APPLY_ERROR = 'stale: newer customer message'
 
 /**
+ * Defensive backstop (FR6) under Telegram's ~4096-char message limit, mirroring `submit.ts`'s own
+ * `capNotifyBody`. The primary fix bounds the ticket subject where `proposals.summary` is built, so
+ * the bodies below are already short in practice — but a notify body that ever exceeds the limit
+ * makes `notify()` return false, which downgrades the "your approved reply/refund did NOT send" page
+ * to an `alert()` that never reaches the owner's phone (spec §4 calls that page non-optional). 3500
+ * leaves headroom for the fixed-shape prefixes/suffixes these bodies wrap around `row.summary`.
+ */
+const NOTIFY_BODY_MAX_CHARS = 3500
+
+export function capNotifyBody(body: string): string {
+  return body.length > NOTIFY_BODY_MAX_CHARS ? body.slice(0, NOTIFY_BODY_MAX_CHARS) : body
+}
+
+/**
  * Tells the owner an action they approved from their phone did NOT happen.
  *
  * `NotifyOwner` never rejects by its own contract, but this guards anyway — a notify failure must
@@ -143,7 +157,7 @@ export async function notifyOwnerBestEffort(
   await deps
     .notify({
       title: args.title,
-      body: args.body,
+      body: capNotifyBody(args.body),
       actions: [{ label: 'View', url: `${deps.adminBaseUrl}/admin/proposals/${row.id}` }],
     })
     .catch((err) =>

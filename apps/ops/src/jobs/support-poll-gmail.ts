@@ -49,7 +49,7 @@ export interface SupportPollDeps {
   ingestFn?: (deps: IngestDeps) => Promise<IngestResult>
   triageFn?: (deps: TriageDeps) => Promise<{ triaged: number; escalatedTicketIds: string[] }>
   escalateFn?: (deps: EscalateDeps) => Promise<{ notified: number }>
-  agentSelect?: (deps: AgentSelectDeps) => Promise<{ enqueued: number; orphansEscalated: number }>
+  agentSelect?: (deps: AgentSelectDeps) => Promise<{ enqueued: number; orphansEscalated: number; unbackedEscalated: number }>
 }
 
 // Once-per-boot info alerts (spec §2 header) for the two configuration-absent skip paths below.

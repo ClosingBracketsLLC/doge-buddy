@@ -163,14 +163,16 @@ listed; **no 6B code calls the notifier directly** — notification remains excl
 |---|---|---|
 | agent outcome `propose` | `triaged → awaiting_approval` — committed BY THE RUNNER **before** `submitProposal` (auto mode enqueues apply instantly; transition-after-submit would let the apply's guarded flip race a still-`triaged` ticket into a stranded state) | — |
 | agent outcome `escalate` | `triaged → escalated` | NULL (notify) |
-| agent outcome `no_action` | stays `triaged`; rationale in audit row; watermark guard prevents re-run until new inbound | — |
+| agent outcome `no_action` | stays `triaged`; rationale in audit row; watermark guard prevents re-run until new inbound. **FR3:** additionally, when an inbound arrived that this run never saw (`last_inbound_at > threadSnapshotAt`, re-read live), CLEAR `last_agent_run_at` (guarded on `triaged`) so the next select re-claims it as new work — otherwise a message that reached Gmail between the claim's snapshot and now leaves the ticket finished-but-unaddressed, never re-selected (a null snapshot fails closed to the epoch) | — |
 | agent failure (throw / watchdog / budget-abort / invalid output / validator reject / resume-retry exhausted) | `agent_failure_count += 1`; if now ≥ 2 → `triaged → escalated` (reason `agent_failed`) + clear `agent_session_id` (a transcript that failed twice is presumed poisoned/broken; the fresh-session prompt is standalone-sufficient by §3); else **clear `last_agent_run_at`** (making the ticket immediately re-claimable — without this, the retry's CAS finds no new inbound and no-ops, stranding the ticket at count 1 for 20 min). Either way the handler then **THROWS** for job-state accounting; the pg-boss retry or the next selection cycle — whichever claims first, the CAS serializes them — is the second attempt. (Pinned: a handled-without-throw failure that kept its stamp would strand the ticket at count 1 with no retry and no escalation.) | NULL (notify) |
 | per-ticket daily cap | `triaged → escalated` (reason `agent_run_cap`) | NULL (notify) |
 | owner approves reply, apply succeeds | `awaiting_approval → waiting_on_customer` (conditional — §4) | — |
-| owner rejects ANY support proposal | ticket → `escalated`; **expire the pending sibling proposal** (audit `sibling_rejected`) — approving a reply whose refund was rejected (or vice-versa) must be impossible; clear `agent_session_id` | **now()** (pre-stamped = silent; the owner did this themselves. Sanctioned exception #2 to the clear-on-escalate rule, alongside the admin Escalate button — which suppresses paging by not touching the stamp, a mechanism that only works for already-notified tickets; reject must pre-stamp explicitly) |
+| owner rejects ANY support proposal, ticket still `awaiting_approval` | ticket → `escalated` (reason `owner_rejected_draft`); **expire the pending sibling proposal** (audit `sibling_rejected`) — approving a reply whose refund was rejected (or vice-versa) must be impossible; clear `agent_session_id` | **now()** (pre-stamped = silent; the owner did this themselves. Sanctioned exception #2 to the clear-on-escalate rule, alongside the admin Escalate button — which suppresses paging by not touching the stamp, a mechanism that only works for already-notified tickets; reject must pre-stamp explicitly) |
+| owner rejects the refund AFTER the paired reply already shipped (ticket `waiting_on_customer`) — **FR2a** | ticket `waiting_on_customer → escalated` (reason `refund_promise_unbacked`); clear `agent_session_id` | **NULL (notify)** — the shipped reply's refund promise just lost its backing; the owner needs a PAGE, not silence (this is why the reject escalation is guarded on BOTH statuses, not `awaiting_approval` alone) |
 | reply apply fails STALE (§4) | proposal → `failed`; ticket `awaiting_approval → triaged` (same transaction) → selection/enqueue re-runs the agent | — |
 | apply dead-letters (either executor) | ticket `awaiting_approval → escalated` (reason `apply_failed`; 0 rows = fine, ticket moved on) | NULL (notify) |
 | orphan backstop (above) | `awaiting_approval → escalated` (reason `orphaned_awaiting_approval`) | NULL (notify) |
+| unbacked-refund-promise backstop (**FR2b**, selection stage) | `waiting_on_customer → escalated` (reason `refund_promise_unbacked`) when the ticket has an APPLIED `support_reply`, a `refund` in a terminal-non-applied state (expired/rejected/failed), and NO live refund — catches the pure-INACTION expire path the reject escalation never sees (a `pending` refund the sweep flips to `expired` fires no reject event). Shares the orphan backstop's 10/cycle budget. | NULL (notify) |
 | follow-up inbound later | 6A reopen (`waiting_on_customer`/`resolved → new`) → re-triage → selection re-enqueues; agent resumes session. **6A ingest change (explicit):** the reopen UPDATE (`ingest.ts:355`) also resets `agent_failure_count = 0` | — |
 
 Inbound while `awaiting_approval`: 6A ingest does NOT reopen that status; the pending proposal
@@ -479,7 +481,16 @@ itself impossible run ahead of the pre-check.)*
 3. **Pre-check** (parent rule — idempotency keys live only 24h): a refund whose note is
    `db-proposal-<proposalId>` already on the order → treat as applied (recover, transition,
    done). Then, and only then, the refusable checks: ticket row present (no ticket, no staleness
-   gate); **staleness guard** (same watermark, same consequence as reply step 2 — ticket
+   gate); **ticket-status gate (FR4):** the ticket's status must be `awaiting_approval` OR
+   `waiting_on_customer` — anything else (escalated, resolved, …) → terminal fail
+   (`applying → failed` + audit + owner `notify()`, `applyError: 'ticket no longer accepting
+   refund'`). This mirrors `support_reply`'s own status pre-check: the Telegram approve token stays
+   live 7 days, so an owner can Approve a refund whose ticket was escalated out from under it — and
+   without this gate money moved off-flow. `waiting_on_customer` is ALLOWED because the happy path
+   is the paired reply shipping first (which flips the ticket to `waiting_on_customer`) and the
+   refund then applying to honor it. It runs AFTER the idempotency pre-check so an already-issued
+   refund still recovers to `applied` on any status (never strand real money). **staleness guard**
+   (same watermark, same consequence as reply step 2 — ticket
    transition attempted `awaiting_approval → triaged` + stamp clear, 0 rows fine, and the owner
    notification says *re-approve after the agent re-drafts* rather than reading as an error): a
    customer's "package arrived, cancel my refund request" must gate money exactly as it gates
@@ -507,8 +518,11 @@ itself impossible run ahead of the pre-check.)*
   customer, sender-authentication note, and the draft body as **head ~600 chars + `…` + last
   200 chars** (a truncated-tail-only preview would let a steered postscript ship sight-unseen;
   the §3 contact/URL screens are the other half of that defense); when a sibling refund
-  proposal exists, the reply's message flags "promises a refund — paired refund proposal
-  <id>" (decide the refund first or together; rejecting it invalidates this reply per §1).
+  proposal exists, the reply's message flags "promises a refund — decide/approve the paired
+  refund proposal <id>; if the refund is rejected or expires after this reply sends, the ticket
+  re-escalates" (FR2c — the earlier "rejecting it cancels this reply" wording was false once the
+  reply had already shipped; a rejected/expired refund behind a shipped reply now re-escalates the
+  ticket with a page, per §1's FR2a/FR2b rows).
   `refund` → amount, order number, reason, dispute flag, sender-authentication note. The
   sourcing body (incl. the TikTok ritual line) is unchanged. Two proposals = two Telegram
   messages with separate approve/reject pairs — accepted v1 clunk; §1's sibling-invalidation

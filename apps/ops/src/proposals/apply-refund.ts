@@ -131,6 +131,23 @@ export async function applyRefund(deps: ApplyProposalDeps, row: ProposalRow): Pr
     return
   }
 
+  // --- Ticket-status gate (spec §4 refund; FR4), AFTER the idempotency pre-check ---
+  //
+  // The Telegram approve token stays live for 7 days, so an owner can tap Approve on a refund whose
+  // ticket has since been escalated (reply dead-lettered, admin Escalate/Resolve, a late tripwire) —
+  // and unlike `applySupportReply`, this executor had NO ticket-status check, so that late tap paid
+  // out anyway (money moves off-flow after the owner took the ticket over). Refuse on any status
+  // OTHER than the two the refund legitimately runs under: `awaiting_approval` (the ordinary case),
+  // and `waiting_on_customer` — the HAPPY path is the paired reply ships first (flipping the ticket
+  // to `waiting_on_customer`) and the refund then applies to HONOR that shipped promise. Placed
+  // AFTER the note pre-check on purpose: an already-issued refund must recover to `applied`
+  // regardless of status (never strand real money), so this only ever refuses a refund that has NOT
+  // moved money yet.
+  if (ticket.status !== 'awaiting_approval' && ticket.status !== 'waiting_on_customer') {
+    await failTerminal(deps, row, ticket.id, 'ticket no longer accepting refund')
+    return
+  }
+
   // --- Staleness guard (spec §4 refund step 1) ---
 
   const messages = await db

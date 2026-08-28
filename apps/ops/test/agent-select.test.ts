@@ -7,6 +7,7 @@ import {
   type AgentSelectDeps,
 } from '../src/support/agent-select.ts'
 import { SUPPORT_AGENT_QUEUE } from '../src/jobs/support-agent-run.ts'
+import { proposalExpireSweepHandler } from '../src/jobs/proposal-expire-sweep.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -58,6 +59,7 @@ describe('selectAndEnqueueAgentRuns', () => {
     type?: 'support_reply' | 'refund'
     status: 'pending' | 'approved' | 'rejected' | 'expired' | 'applying' | 'applied' | 'failed'
     createdAt?: Date
+    expiresAt?: Date
   }): Promise<void> {
     await db.insert(proposals).values({
       type: opts.type ?? 'support_reply',
@@ -67,6 +69,7 @@ describe('selectAndEnqueueAgentRuns', () => {
       sourceWorkflow: 'support',
       ticketId: opts.ticketId,
       ...(opts.createdAt ? { createdAt: opts.createdAt } : {}),
+      ...(opts.expiresAt ? { expiresAt: opts.expiresAt } : {}),
     })
   }
 
@@ -352,6 +355,92 @@ describe('selectAndEnqueueAgentRuns', () => {
       const statuses = await Promise.all(ids.map((id) => ticketById(id)))
       const actuallyEscalated = ids.filter((_, i) => statuses[i]!.status === 'escalated')
       expect(actuallyEscalated).toEqual(ids.slice(0, 10))
+    })
+  })
+
+  // FR2b: the unbacked-refund-promise backstop. A `waiting_on_customer` ticket whose reply SHIPPED
+  // (applied support_reply) but whose paired refund died (expired/rejected/failed) with no live
+  // refund left is a written refund promise with nothing behind it — escalate + PAGE.
+  describe('unbacked-refund-promise backstop (FR2b)', () => {
+    async function seedUnbacked(refundStatus: 'expired' | 'rejected' | 'failed'): Promise<string> {
+      const ticketId = await seedTicket({ status: 'waiting_on_customer' })
+      await seedProposal({ ticketId, type: 'support_reply', status: 'applied' })
+      await seedProposal({ ticketId, type: 'refund', status: refundStatus })
+      return ticketId
+    }
+
+    it.each(['expired', 'rejected', 'failed'] as const)(
+      'escalates a shipped-reply ticket whose paired refund is %s, with a page (notify stamp NULL)',
+      async (refundStatus) => {
+        const ticketId = await seedUnbacked(refundStatus)
+        const deps = makeDeps()
+
+        const result = await selectAndEnqueueAgentRuns(deps)
+
+        expect(result.unbackedEscalated).toBe(1)
+        const ticket = await ticketById(ticketId)
+        expect(ticket.status).toBe('escalated')
+        expect(ticket.escalationReason).toBe('refund_promise_unbacked')
+        expect(ticket.escalationNotifiedAt).toBeNull()
+      },
+    )
+
+    it.each(['pending', 'approved', 'applying', 'applied'] as const)(
+      'leaves the ticket untouched when a %s refund still backs the promise',
+      async (refundStatus) => {
+        const ticketId = await seedTicket({ status: 'waiting_on_customer' })
+        await seedProposal({ ticketId, type: 'support_reply', status: 'applied' })
+        // A dead refund AND a still-live one — a later run re-proposed a fresh refund.
+        await seedProposal({ ticketId, type: 'refund', status: 'expired' })
+        await seedProposal({ ticketId, type: 'refund', status: refundStatus })
+        const deps = makeDeps()
+
+        const result = await selectAndEnqueueAgentRuns(deps)
+
+        expect(result.unbackedEscalated).toBe(0)
+        expect((await ticketById(ticketId)).status).toBe('waiting_on_customer')
+      },
+    )
+
+    it('does not escalate a shipped reply with NO refund proposal at all (reply-only ticket)', async () => {
+      const ticketId = await seedTicket({ status: 'waiting_on_customer' })
+      await seedProposal({ ticketId, type: 'support_reply', status: 'applied' })
+      const deps = makeDeps()
+
+      const result = await selectAndEnqueueAgentRuns(deps)
+
+      expect(result.unbackedEscalated).toBe(0)
+      expect((await ticketById(ticketId)).status).toBe('waiting_on_customer')
+    })
+
+    it('happy path unchanged: reply NOT yet shipped (still awaiting_approval) with a pending refund is untouched', async () => {
+      const ticketId = await seedTicket({ status: 'awaiting_approval', updatedAt: minutesAgo(1) })
+      await seedProposal({ ticketId, type: 'support_reply', status: 'pending' })
+      await seedProposal({ ticketId, type: 'refund', status: 'pending' })
+      const deps = makeDeps()
+
+      const result = await selectAndEnqueueAgentRuns(deps)
+
+      expect(result.unbackedEscalated).toBe(0)
+      expect(result.orphansEscalated).toBe(0)
+      expect((await ticketById(ticketId)).status).toBe('awaiting_approval')
+    })
+
+    it('the real expire path: a pending refund past its expiresAt is swept, THEN the next select cycle escalates', async () => {
+      const ticketId = await seedTicket({ status: 'waiting_on_customer' })
+      await seedProposal({ ticketId, type: 'support_reply', status: 'applied' })
+      await seedProposal({ ticketId, type: 'refund', status: 'pending', expiresAt: minutesAgo(60) })
+
+      // Run the actual sweep — it flips the pending refund to expired.
+      await proposalExpireSweepHandler(db)([] as never)
+
+      const result = await selectAndEnqueueAgentRuns(makeDeps())
+
+      expect(result.unbackedEscalated).toBe(1)
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('escalated')
+      expect(ticket.escalationReason).toBe('refund_promise_unbacked')
+      expect(ticket.escalationNotifiedAt).toBeNull()
     })
   })
 })

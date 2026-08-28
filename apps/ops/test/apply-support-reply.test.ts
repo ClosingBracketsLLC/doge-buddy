@@ -367,6 +367,48 @@ describe('applySupportReply', () => {
     expect((await readMessages(thread.ticketId)).filter((m) => m.direction === 'outbound')).toHaveLength(0)
   })
 
+  it('FR6: a pathologically long ticket subject is capped so the outbound Subject line stays under RFC 5322 998 octets', async () => {
+    const longSubject = 'A'.repeat(4200)
+    const thread = await seedThread({ count: 1, subject: longSubject })
+    const proposal = await seedProposal(thread.ticketId, thread.inbound[0]!.sentAt)
+
+    await applySupportReply(makeDeps(), proposal)
+
+    const sent = gmail.sentMessages()
+    expect(sent).toHaveLength(1)
+    const subjectLine = headerLines(sent[0]!.raw).find((l) => l.startsWith('Subject:'))!
+    // The whole header line (pure ASCII, so no RFC 2047 folding) must fit the 998-octet limit.
+    expect(Buffer.byteLength(subjectLine, 'utf8')).toBeLessThanOrEqual(998)
+  })
+
+  it('FR6: a stale hand-back with an over-long proposal summary caps the notify body under Telegram 4096 and STILL notifies', async () => {
+    const thread = await seedThread({ count: 1 })
+    const snapshotAt = thread.inbound[0]!.sentAt
+    const proposal = await seedProposal(thread.ticketId, snapshotAt)
+    // Simulate a summary that escaped source-bounding (defense-in-depth check on the notify cap).
+    proposal.summary = 'R'.repeat(4200)
+
+    const newerSentAt = new Date(snapshotAt.getTime() + 1000)
+    const newer = gmail.receiveInbound({ from: CUSTOMER, to: [SUPPORT_ADDRESS], subject: SUBJECT, bodyText: 'cancel that', threadId: thread.threadId })
+    await db.insert(supportMessages).values({
+      ticketId: thread.ticketId,
+      gmailMessageId: newer.id,
+      direction: 'inbound',
+      fromEmail: CUSTOMER,
+      bodyText: 'cancel that',
+      rfcMessageId: `<${newer.id}@mock.gmail>`,
+      sentAt: newerSentAt,
+    })
+    await db.update(supportTickets).set({ lastInboundAt: newerSentAt }).where(eq(supportTickets.id, thread.ticketId))
+
+    await applySupportReply(makeDeps(), proposal)
+
+    // The page must actually fire (not be dropped to alert-only by an over-4096 body).
+    expect(notify).toHaveBeenCalledTimes(1)
+    const body = (notify.mock.calls[0]![0] as { body: string }).body
+    expect(body.length).toBeLessThanOrEqual(4096)
+  })
+
   it('stale: a best-effort enqueue failure alerts but still leaves the proposal failed and the ticket triaged', async () => {
     const thread = await seedThread()
     const snapshotAt = thread.inbound[0]!.sentAt

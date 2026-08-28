@@ -99,6 +99,23 @@ describe('support-decision.ts', () => {
       expect(siblingAudit).toHaveLength(1)
     })
 
+    it('FR2a: rejecting the refund AFTER the reply shipped (ticket waiting_on_customer) escalates with a PAGE (notify stamp NULL), reason refund_promise_unbacked', async () => {
+      const ticket = await seedTicket()
+      // The reply already applied and flipped the ticket to waiting_on_customer.
+      await db.update(supportTickets).set({ status: 'waiting_on_customer' }).where(eq(supportTickets.id, ticket.id))
+      await seedProposal({ type: 'support_reply', ticketId: ticket.id, status: 'approved' }) // stands in for the shipped reply
+      const refund = await seedProposal({ type: 'refund', ticketId: ticket.id })
+
+      await onSupportProposalRejected(db, { id: refund.id, ticketId: ticket.id, type: 'refund' })
+
+      const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+      expect(ticketAfter!.status).toBe('escalated')
+      expect(ticketAfter!.escalationReason).toBe('refund_promise_unbacked')
+      // NULL stamp = a real page: the shipped promise just lost its backing.
+      expect(ticketAfter!.escalationNotifiedAt).toBeNull()
+      expect(ticketAfter!.agentSessionId).toBeNull()
+    })
+
     it('is callable with a plain Db handle (not only a transaction) — confirms the DbOrTx type widening did not break the ordinary call shape', async () => {
       const ticket = await seedTicket()
       const reply = await seedProposal({ type: 'support_reply', ticketId: ticket.id })

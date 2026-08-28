@@ -2,7 +2,7 @@ import { auditLog, proposals, supportTickets } from '@doge-buddy/db'
 import { and, eq } from 'drizzle-orm'
 import { applyNewListing } from './apply-new-listing.ts'
 import { applyRefund } from './apply-refund.ts'
-import type { ApplyProposalDeps, ProposalRow } from './apply-shared.ts'
+import { capNotifyBody, type ApplyProposalDeps, type ProposalRow } from './apply-shared.ts'
 import { applySupportReply } from './apply-support-reply.ts'
 import { applyProposalTransition, StaleProposalStatusError } from './transitions.ts'
 
@@ -136,7 +136,9 @@ export async function deadLetterApplyProposal(deps: ApplyProposalDeps, proposalI
     await deps
       .notify({
         title: `Approved ${row.type} FAILED to apply`,
-        body: row.summary,
+        // FR6: defensively bounded — `row.summary` is already capped at the source, but a dropped
+        // dead-letter page (notify false → alert-only) is exactly the failure §4 forbids here.
+        body: capNotifyBody(row.summary),
         actions: [{ label: 'View', url: `${deps.adminBaseUrl}/admin/proposals/${row.id}` }],
       })
       .catch((notifyErr) =>

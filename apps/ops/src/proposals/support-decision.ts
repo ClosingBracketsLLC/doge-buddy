@@ -50,11 +50,24 @@ function isSupportProposalType(type: string): type is SupportProposalType {
  * `apply-shared.ts`'s `failStaleAndHandBack` precedent, and for the same reason: a reject must never
  * partially land (proposal rejected but the ticket not escalated, or vice versa).
  *
- * The ticket UPDATE is guarded on `status = 'awaiting_approval'` (the status a ticket is in for as
- * long as a proposal on it is undecided — see `jobs/support-agent-run.ts`'s own flip to
- * `awaiting_approval` on submit): 0 rows is a normal, silent outcome — another writer (a second
- * reject on the sibling, a concurrent tab) already moved the ticket, same optimistic-concurrency
- * discipline as every other guarded UPDATE in this codebase.
+ * The ticket escalation is guarded on status, and handles TWO statuses (FR2a):
+ *
+ *  - `awaiting_approval` (the undecided-pair case — see `jobs/support-agent-run.ts`'s flip on
+ *    submit): reason `owner_rejected_draft`, `escalationNotifiedAt` PRE-STAMPED so it is SILENT
+ *    (the owner is actively deciding this ticket; paging them about their own tap a minute later
+ *    would be noise — sanctioned exception #2, per the doc note above).
+ *  - `waiting_on_customer` (the reply ALREADY SHIPPED, then the paired refund was rejected):
+ *    reason `refund_promise_unbacked`, `escalationNotifiedAt` NULL so it PAGES. This is the exact
+ *    case the old single-status guard missed — `completeSend` flips the ticket to
+ *    `waiting_on_customer` the moment the reply sends, so a reject of its paired refund matched 0
+ *    rows and produced NO escalation and NO owner signal, leaving the customer holding a written
+ *    "we've refunded you $X" promise with nothing behind it. A shipped promise that just lost its
+ *    backing needs a real page, not silence.
+ *
+ * At most one of the two guarded UPDATEs matches (a ticket is in exactly one status); 0 rows on
+ * both is a normal, silent outcome — another writer (a second reject on the sibling, a concurrent
+ * tab) already moved the ticket, same optimistic-concurrency discipline as every other guarded
+ * UPDATE in this codebase.
  */
 export async function onSupportProposalRejected(
   db: DbOrTx,
@@ -83,6 +96,7 @@ export async function onSupportProposalRejected(
     )
   }
 
+  // Undecided pair: owner is deciding this ticket right now → SILENT (pre-stamped).
   await db
     .update(supportTickets)
     .set({
@@ -92,6 +106,18 @@ export async function onSupportProposalRejected(
       agentSessionId: null,
     })
     .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'awaiting_approval')))
+
+  // FR2a: the reply already shipped (this ticket is parked on the customer) and its paired refund
+  // was just rejected → the shipped promise lost its backing → PAGE (escalationNotifiedAt NULL).
+  await db
+    .update(supportTickets)
+    .set({
+      status: 'escalated',
+      escalationReason: 'refund_promise_unbacked',
+      escalationNotifiedAt: null,
+      agentSessionId: null,
+    })
+    .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'waiting_on_customer')))
 }
 
 /** `validateSupportProposalForApproval`'s success shape — DELIBERATELY not `ValidationResult`

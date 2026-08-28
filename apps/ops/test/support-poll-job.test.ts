@@ -62,7 +62,7 @@ describe('executeSupportPoll', () => {
       ingestFn: vi.fn(async () => ({ insertedMessages: 0, newInboundTicketIds: [], tripwiredTicketIds: [] })),
       triageFn: vi.fn(async () => ({ triaged: 0, escalatedTicketIds: [] })),
       escalateFn: vi.fn(async () => ({ notified: 0 })),
-      agentSelect: vi.fn(async () => ({ enqueued: 0, orphansEscalated: 0 })),
+      agentSelect: vi.fn(async () => ({ enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 })),
       now: () => new Date('2026-08-25T12:00:00.000Z'),
       ...overrides,
     }
@@ -165,7 +165,7 @@ describe('executeSupportPoll', () => {
         }),
         agentSelect: vi.fn(async () => {
           callOrder.push('agentSelect')
-          return { enqueued: 0, orphansEscalated: 0 }
+          return { enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 }
         }),
       })
 
@@ -190,7 +190,7 @@ describe('executeSupportPoll', () => {
       const deps = baseDeps({
         agentSelect: vi.fn(async (d: AgentSelectDeps) => {
           received = d
-          return { enqueued: 0, orphansEscalated: 0 }
+          return { enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 }
         }),
       })
 
@@ -420,7 +420,7 @@ describe('supportPollGmailHandler', () => {
       ingestFn,
       triageFn: vi.fn(async () => ({ triaged: 0, escalatedTicketIds: [] })),
       escalateFn: vi.fn(async () => ({ notified: 0 })),
-      agentSelect: vi.fn(async () => ({ enqueued: 0, orphansEscalated: 0 })),
+      agentSelect: vi.fn(async () => ({ enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 })),
     }
 
     await supportPollGmailHandler(deps)([

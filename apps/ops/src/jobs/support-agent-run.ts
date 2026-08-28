@@ -15,7 +15,7 @@ import {
 } from '../agents/support-run.ts'
 import type { SendOpts } from '../fulfillment/types.ts'
 import type { NotifyOwner } from '../notify/notify.ts'
-import { submitProposal, type SubmitProposalDeps } from '../proposals/submit.ts'
+import { SUBJECT_MAX_CHARS, submitProposal, type SubmitProposalDeps } from '../proposals/submit.ts'
 import type { Settings } from '../settings.ts'
 import { validateSupportOutput } from '../support/validator.ts'
 
@@ -499,6 +499,28 @@ async function runAndHandleOutcome(
       entityId: ticketId,
       detail: { runId, rationale: output.rationale },
     })
+
+    // FR3: an inbound that reached Gmail BETWEEN this run's thread snapshot and now was never seen
+    // by this no_action decision. `no_action` is the ONE authoritative outcome with no other net —
+    // propose→staleness guard + conditional flip, escalate→page, failure→recordFailure all clear
+    // the claim stamp or move the ticket, but no_action stamps `last_agent_finished_at` (> claim)
+    // and stays `triaged`, so neither the new-inbound branch (last_inbound_at < claim, since the
+    // message's internalDate can predate the wall-clock claim) nor the stuck branch (it FINISHED)
+    // ever re-selects it — the customer is ghosted. Clear the claim stamp so the next select
+    // re-claims it as new work, but ONLY when a newer inbound actually exists (guarded on
+    // last_inbound_at > snapshot, re-read live at UPDATE time — an ordinary idle no_action must NOT
+    // re-run forever). A null snapshot fails CLOSED to the epoch so any inbound counts as newer,
+    // matching `submitProposeOutcome`'s own epoch fallback.
+    await deps.db
+      .update(supportTickets)
+      .set({ lastAgentRunAt: null })
+      .where(
+        and(
+          eq(supportTickets.id, ticketId),
+          eq(supportTickets.status, 'triaged'),
+          gt(supportTickets.lastInboundAt, args.threadSnapshotAt ?? new Date(0)),
+        ),
+      )
   } else if (output.outcome === 'escalate') {
     // Guarded, 6A convention: 0 rows = the owner moved the ticket, skip silently.
     // CRITICAL-1: `escalation_notified_at` cleared, and NOTHING here notifies.
@@ -733,7 +755,10 @@ async function submitProposeOutcome(
 
   await submitProposal(submitDeps, {
     type: 'support_reply',
-    summary: `Reply: ${ticket.subject ?? '(no subject)'}`,
+    // FR6: bound the (attacker-controlled) subject HERE so `proposals.summary` is bounded at the
+    // source — this summary rides into four best-effort apply notify bodies that don't run through
+    // `capNotifyBody`, and an unbounded one could push a Telegram page past 4096 chars and drop it.
+    summary: `Reply: ${(ticket.subject ?? '(no subject)').slice(0, SUBJECT_MAX_CHARS)}`,
     payload: { type: 'support_reply', ticketId, body: args.body, threadSnapshotAt },
     sourceWorkflow: 'support',
     agentRunId: runId,

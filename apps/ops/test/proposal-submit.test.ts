@@ -204,8 +204,10 @@ describe('submitProposal', () => {
     const replyNotification = sent[1]!
     expect(replyNotification.body).toContain('⚠ promises a refund')
     expect(replyNotification.body).toContain(refundResult.id)
-    expect(replyNotification.body).toContain('decide the refund first or together')
-    expect(replyNotification.body).toContain('rejecting it cancels this reply')
+    // FR2c: the wording now reflects that after the reply ships, a rejected/expired refund
+    // re-escalates the ticket (the old "rejecting it cancels this reply" was false post-ship).
+    expect(replyNotification.body).toContain('decide/approve the paired refund proposal')
+    expect(replyNotification.body).toContain('the ticket re-escalates')
   })
 
   it('refund notify body: amount + order number + reason, dispute flag, and no crash with no linked order/ticket', async () => {
@@ -583,7 +585,7 @@ describe('submitProposal', () => {
     expect(replyBody.length).toBeLessThanOrEqual(3500)
     expect(replyBody).toContain('⚠ promises a refund')
     expect(replyBody).toContain(refundResult.id)
-    expect(replyBody).toContain('decide the refund first or together')
+    expect(replyBody).toContain('decide/approve the paired refund proposal') // FR2c wording
     // The head-600/tail-200 draft excerpt rule still holds despite the huge subject.
     expect(replyBody).toContain(head)
     expect(replyBody).toContain(tail)

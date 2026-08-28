@@ -85,7 +85,12 @@ async function senderAuthNoteForTicket(db: Db, ticketId: string): Promise<string
  * ⚠ paired-refund warning, the admin deep link) past the final cap — see `capNotifyBody`'s own doc
  * comment for the rest of that story.
  */
-const SUBJECT_MAX_CHARS = 200
+/** Exported (FR6) so the proposal-summary builder in `jobs/support-agent-run.ts` bounds a ticket
+ * subject at the SOURCE — `proposals.summary` = `Reply: <subject>` flows into four best-effort apply
+ * notify bodies that bypass `capNotifyBody`, and an unbounded subject there could push a Telegram
+ * message past 4096 chars → notify returns false → the "your approved reply/refund did NOT send"
+ * page is dropped on the money/mail path. */
+export const SUBJECT_MAX_CHARS = 200
 const REASON_MAX_CHARS = 300
 
 function truncateField(value: string, maxChars: number): string {
@@ -134,7 +139,7 @@ async function buildSupportReplyNotifyBody(db: Db, payload: SupportReplyPayload)
     bodyExcerpt,
   ].join('\n')
   const tail = siblingRefund
-    ? `\n\n⚠ promises a refund — paired refund proposal ${siblingRefund.id}; decide the refund first or together; rejecting it cancels this reply`
+    ? `\n\n⚠ promises a refund — decide/approve the paired refund proposal ${siblingRefund.id}; if the refund is rejected or expires after this reply sends, the ticket re-escalates`
     : ''
   return capNotifyBody(head, tail)
 }

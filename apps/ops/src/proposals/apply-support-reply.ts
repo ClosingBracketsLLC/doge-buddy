@@ -42,6 +42,16 @@ const REFERENCES_CAP = 20
  */
 const RECOVERY_SCAN_LIMIT = 50
 
+/**
+ * Outbound `Subject:` cap (FR6). The RFC 2822 builder passes a pure-ASCII subject through
+ * unencoded and unfolded (`encodeSubjectIfNeeded` only folds non-ASCII into RFC 2047 encoded-words),
+ * so a pathologically long ASCII subject — a ticket subject is customer-controlled — would emit a
+ * single `Subject:` line past RFC 5322's 998-octet limit. The `Re:` threading is what matters, not a
+ * 5,000-char subject; 900 chars keeps `Subject: Re: <subject>` comfortably under 998 octets on the
+ * ASCII path while never touching a normal subject.
+ */
+const OUTBOUND_SUBJECT_MAX_CHARS = 900
+
 /** Thrown (never returned) when the thread carries more unverifiable messages than the scan will
  * examine — the job retries rather than sending blind. */
 export const THREAD_TOO_BUSY_ERROR = 'thread too busy to verify prior send — retrying'
@@ -188,7 +198,7 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
   const sent = await gmail.sendReply({
     threadId: ticket.gmailThreadId,
     to: customerEmail,
-    subject: ticket.subject ?? '(no subject)',
+    subject: (ticket.subject ?? '(no subject)').slice(0, OUTBOUND_SUBJECT_MAX_CHARS),
     inReplyTo,
     references: buildReferences(messages, inReplyTo).join(' '),
     bodyText: payload.body,

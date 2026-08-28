@@ -1,5 +1,5 @@
 import { proposals, supportTickets, type createDb } from '@doge-buddy/db'
-import { and, eq, inArray, isNull, lt, notExists, or, sql } from 'drizzle-orm'
+import { and, eq, exists, inArray, isNull, lt, notExists, or, sql } from 'drizzle-orm'
 import type { SendOpts } from '../fulfillment/types.ts'
 import { enqueueSupportAgentRun, SUPPORT_AGENT_STUCK_AFTER_MINUTES } from '../jobs/support-agent-run.ts'
 
@@ -37,6 +37,13 @@ const ORPHAN_AFTER_MINUTES = 15
  * lets the backstop actually escalate those tickets instead of leaving them stranded forever behind
  * a proposal that can never change status again on its own. */
 const LIVE_PROPOSAL_STATUSES = ['pending', 'approved', 'applying'] as const
+
+/** FR2b unbacked-refund-promise backstop: a refund proposal in one of these terminal, non-applied
+ * states is money that will never move — the promise a shipped reply made is now unbacked. */
+const DEAD_REFUND_STATUSES = ['expired', 'rejected', 'failed'] as const
+/** FR2b: refund statuses that still count as backing a promise (money moved, or one tap/enqueue from
+ * moving) — same set as `validator.ts`'s `LIVE_REFUND_PROPOSAL_STATUSES`, incl. `applied`. */
+const LIVE_REFUND_STATUSES = ['pending', 'approved', 'applying', 'applied'] as const
 
 export interface AgentSelectDeps {
   db: Db
@@ -78,7 +85,7 @@ export interface AgentSelectDeps {
  */
 export async function selectAndEnqueueAgentRuns(
   deps: AgentSelectDeps,
-): Promise<{ enqueued: number; orphansEscalated: number }> {
+): Promise<{ enqueued: number; orphansEscalated: number; unbackedEscalated: number }> {
   const now = deps.now ?? (() => new Date())
   const nowVal = now()
   const stuckBefore = new Date(nowVal.getTime() - SUPPORT_AGENT_STUCK_AFTER_MINUTES * 60_000)
@@ -141,7 +148,14 @@ export async function selectAndEnqueueAgentRuns(
 
   const orphansEscalated = await escalateOrphans(deps.db, orphanBefore(nowVal))
 
-  return { enqueued, orphansEscalated }
+  // FR2b: the unbacked-refund-promise backstop, sharing the SAME per-cycle escalation budget as the
+  // orphan backstop (10/cycle total) — whatever the orphan pass already spent is subtracted here.
+  const unbackedEscalated = await escalateUnbackedRefundPromises(
+    deps.db,
+    AGENT_SELECT_CAP_PER_CYCLE - orphansEscalated,
+  )
+
+  return { enqueued, orphansEscalated, unbackedEscalated }
 }
 
 function orphanBefore(nowVal: Date): string {
@@ -218,6 +232,78 @@ async function escalateOrphans(db: Db, before: string): Promise<number> {
       escalationNotifiedAt: null,
     })
     .where(and(inArray(supportTickets.id, orphanCandidateIds), eq(supportTickets.status, 'awaiting_approval')))
+    .returning({ id: supportTickets.id })
+
+  return escalated.length
+}
+
+/**
+ * FR2b — the unbacked-refund-promise backstop. Catches the PURE-INACTION expire path the reject
+ * escalation (`support-decision.ts`) can never see: a reply promising a refund SHIPS (flipping the
+ * ticket to `waiting_on_customer`), its paired refund proposal just sits `pending`, and 7 days
+ * later `proposal-expire-sweep.ts` flips it `expired` — no reject event ever fires, so nothing
+ * escalates and the customer holds a written refund promise with nothing behind it, zero owner
+ * signal.
+ *
+ * A `waiting_on_customer` ticket is escalated (`refund_promise_unbacked`, notify — stamp NULL) iff:
+ *   - it has an APPLIED `support_reply` proposal (a reply actually went out), AND
+ *   - it has a `refund` proposal in a terminal-non-applied state (expired/rejected/failed — the
+ *     promise's backing died), AND
+ *   - it has NO live (`pending`/`approved`/`applying`/`applied`) `refund` proposal (a later run may
+ *     have re-proposed a fresh refund that still backs the promise — don't page in that case).
+ *
+ * `limitLeft` is what the orphan backstop left of the per-cycle escalation budget; ≤ 0 → skip
+ * entirely (no query). Nothing here notifies — the escalate stage already ran earlier this poll
+ * cycle, so `notifyPendingEscalations` pages on the NEXT cycle, exactly like the orphan backstop.
+ */
+async function escalateUnbackedRefundPromises(db: Db, limitLeft: number): Promise<number> {
+  if (limitLeft <= 0) return 0
+
+  const appliedReplyExists = db
+    .select({ one: sql`1` })
+    .from(proposals)
+    .where(and(eq(proposals.ticketId, supportTickets.id), eq(proposals.type, 'support_reply'), eq(proposals.status, 'applied')))
+
+  const deadRefundExists = db
+    .select({ one: sql`1` })
+    .from(proposals)
+    .where(
+      and(eq(proposals.ticketId, supportTickets.id), eq(proposals.type, 'refund'), inArray(proposals.status, [...DEAD_REFUND_STATUSES])),
+    )
+
+  const liveRefundExists = db
+    .select({ one: sql`1` })
+    .from(proposals)
+    .where(
+      and(eq(proposals.ticketId, supportTickets.id), eq(proposals.type, 'refund'), inArray(proposals.status, [...LIVE_REFUND_STATUSES])),
+    )
+
+  // Same self-`FROM support_tickets` + `LIMIT` shape as `escalateOrphans` (Postgres UPDATE has no
+  // LIMIT of its own); the correlated EXISTS subqueries resolve against THIS enclosing FROM.
+  const candidateIds = db
+    .select({ id: supportTickets.id })
+    .from(supportTickets)
+    .where(
+      and(
+        eq(supportTickets.status, 'waiting_on_customer'),
+        exists(appliedReplyExists),
+        exists(deadRefundExists),
+        notExists(liveRefundExists),
+      ),
+    )
+    .orderBy(sql`${supportTickets.updatedAt} ASC`)
+    .limit(limitLeft)
+
+  const escalated = await db
+    .update(supportTickets)
+    .set({
+      status: 'escalated',
+      escalationReason: 'refund_promise_unbacked',
+      // Cleared so `notifyPendingEscalations` (the only notifier) pages — a shipped promise that
+      // lost its backing must reach the owner's phone, unlike the owner's own reject tap.
+      escalationNotifiedAt: null,
+    })
+    .where(and(inArray(supportTickets.id, candidateIds), eq(supportTickets.status, 'waiting_on_customer')))
     .returning({ id: supportTickets.id })
 
   return escalated.length

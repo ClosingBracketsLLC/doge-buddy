@@ -580,6 +580,52 @@ describe('applyRefund', () => {
   })
 
   // -------------------------------------------------------------------------
+  // FR4: ticket-status gate — money must not move once the ticket left the refund flow
+  // -------------------------------------------------------------------------
+
+  it('FR4: a refund approved on a since-ESCALATED ticket terminal-fails, refunds NOTHING, notifies', async () => {
+    const s = await seed({ ticketStatus: 'escalated' })
+    const proposal = await seedProposal(s)
+    const refundOps = fakeRefundOps()
+
+    await applyRefund(makeDeps({ refundOps }), proposal)
+
+    expect(refundOps.refundCalls).toHaveLength(0)
+    const failed = await readProposal(proposal.id)
+    expect(failed.status).toBe('failed')
+    expect(failed.applyError).toBe('ticket no longer accepting refund')
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(await auditActions(proposal.id)).toContain(PROPOSAL_APPLY_FAILED_ACTION)
+  })
+
+  it('FR4: a refund on a waiting_on_customer ticket STILL applies (the reply shipped first, this honors it)', async () => {
+    const s = await seed({ ticketStatus: 'waiting_on_customer' })
+    const proposal = await seedProposal(s)
+    const refundOps = fakeRefundOps()
+
+    await applyRefund(makeDeps({ refundOps }), proposal)
+
+    expect(refundOps.refundCalls).toHaveLength(1)
+    expect((await readProposal(proposal.id)).status).toBe('applied')
+  })
+
+  it('FR4: an already-issued refund (note present) on an escalated ticket recovers to applied (never strand real money)', async () => {
+    const s = await seed({ ticketStatus: 'escalated' })
+    const proposal = await seedProposal(s)
+    // The refund already moved on a prior attempt — its marker note is on the order.
+    const refundOps = fakeRefundOps({
+      refunds: [{ id: 'gid://shopify/Refund/prior', note: `db-proposal-${proposal.id}` }],
+      totalRefundedCents: REFUND_CENTS,
+    })
+
+    await applyRefund(makeDeps({ refundOps }), proposal)
+
+    // Recovery runs BEFORE the status gate: no new refund, but the proposal completes to applied.
+    expect(refundOps.refundCalls).toHaveLength(0)
+    expect((await readProposal(proposal.id)).status).toBe('applied')
+  })
+
+  // -------------------------------------------------------------------------
   // Retryable failure
   // -------------------------------------------------------------------------
 

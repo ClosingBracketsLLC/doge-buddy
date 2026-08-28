@@ -27,6 +27,7 @@ import {
   type SupportAgentJobDeps,
 } from '../src/jobs/support-agent-run.ts'
 import { SETTINGS_DEFAULTS, createSettings } from '../src/settings.ts'
+import { selectAndEnqueueAgentRuns } from '../src/support/agent-select.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -983,6 +984,18 @@ describe('executeSupportAgentRun', () => {
       })
     })
 
+    it('FR6: an over-long (attacker-controlled) ticket subject is bounded in the proposal summary at the source', async () => {
+      const ticketId = await seedTicket({ /* subject set below */ })
+      await db.update(supportTickets).set({ subject: 'S'.repeat(4200) }).where(eq(supportTickets.id, ticketId))
+
+      await executeSupportAgentRun(withRun(succeededResult(proposeOutput())), ticketId)
+
+      const rows = await proposalRows(ticketId)
+      expect(rows).toHaveLength(1)
+      // `Reply: ` (7) + subject capped at SUBJECT_MAX_CHARS (200) = 207 ≤ 220.
+      expect(rows[0]!.summary.length).toBeLessThanOrEqual(220)
+    })
+
     it('advances the prompt watermark, stamps the finish watermark, and stores the session id', async () => {
       const ticketId = await seedTicket()
 
@@ -1235,6 +1248,43 @@ describe('executeSupportAgentRun', () => {
       expect(runFn).toHaveBeenCalledTimes(1)
       expect(await auditRows(AGENT_RUN_SKIPPED_ACTION, ticketId)).toHaveLength(1)
       expect((await ticketById(ticketId)).agentFailureCount).toBe(0)
+    })
+
+    it('FR3: an inbound arriving DURING the run (last_inbound_at > snapshot) clears the claim stamp so the REAL selection re-claims it', async () => {
+      const ticketId = await seedTicket({ lastInboundAt: minutesAgo(30) })
+      // The run's thread snapshot is the claim-time last_inbound_at (minutesAgo(30)). Simulate an
+      // inbound reaching Gmail + being ingested mid-run: the runFn bumps last_inbound_at to a value
+      // NEWER than the snapshot before returning no_action.
+      const midRunInboundAt = minutesAgo(1)
+      const runFnLocal = vi.fn(async (_deps: unknown, _input: SupportRunInput) => {
+        await db.update(supportTickets).set({ lastInboundAt: midRunInboundAt }).where(eq(supportTickets.id, ticketId))
+        return succeededResult({ outcome: 'no_action', rationale: 'nothing yet' })
+      })
+      const deps = makeDeps({ runFn: runFnLocal as unknown as SupportAgentJobDeps['runFn'] })
+
+      await executeSupportAgentRun(deps, ticketId)
+
+      const ticket = await ticketById(ticketId)
+      expect(ticket.status).toBe('triaged')
+      expect(ticket.lastAgentFinishedAt).toEqual(NOW)
+      // FR3: cleared, because an inbound newer than this run's snapshot exists.
+      expect(ticket.lastAgentRunAt).toBeNull()
+
+      // The REAL selection now re-claims it as new work (never-run branch).
+      const enqueue = vi.fn(async (_name: string, _data: object, _opts?: unknown) => {})
+      await selectAndEnqueueAgentRuns({ db, enqueue, alert: vi.fn(async () => {}), now: () => NOW })
+      const enqueuedTicketIds = enqueue.mock.calls.map((c) => (c[1] as { ticketId: string }).ticketId)
+      expect(enqueuedTicketIds).toContain(ticketId)
+    })
+
+    it('FR3 negative: an ordinary idle no_action (no new inbound) does NOT clear the claim stamp', async () => {
+      const ticketId = await seedTicket({ lastInboundAt: minutesAgo(30) })
+      const deps = withRun(succeededResult({ outcome: 'no_action', rationale: 'idle' }))
+
+      await executeSupportAgentRun(deps, ticketId)
+
+      // No newer inbound than the snapshot → stamp stays, so the ticket is NOT re-run forever.
+      expect((await ticketById(ticketId)).lastAgentRunAt).toEqual(NOW)
     })
   })
 
