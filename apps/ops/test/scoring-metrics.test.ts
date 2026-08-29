@@ -39,6 +39,11 @@ describe('computeProductScores', () => {
   let pDead = ''
   let pSales = ''
   let pNull = ''
+  // FW-A / FW-B fixtures.
+  let pCoA = '' // co-sold "other" product (refunded); shares 2 orders with pCoB
+  let pCoB = '' // multi-product-refund victim: 4 orders, 2 shared-with-A (refunded), 2 B-only (clean)
+  let pUnmapped = '' // one refunded order = this product + an UNMAPPED line item (still single-product)
+  let pBadQty = '' // one matched order whose quantity is non-integer → contributes 0, no batch abort
 
   async function seedProduct(createdAt: Date): Promise<string> {
     const [row] = await db
@@ -79,6 +84,14 @@ describe('computeProductScores', () => {
     admin_graphql_api_id: `gid://shopify/Order/${tail}`,
     test: false, total_price: '10.00',
     line_items: [{ variant_id: Number(tail), quantity }],
+  })
+
+  /** A payload with MULTIPLE line items (each `{ tail, qty }`) — used by the single-product-order
+   *  refund-scoping tests. A `tail` with no seeded variant is an UNMAPPED line (maps to no product). */
+  const payloadMulti = (items: { tail: string; qty: number }[]) => ({
+    admin_graphql_api_id: `gid://shopify/Order/${crypto.randomUUID()}`,
+    test: false, total_price: '10.00',
+    line_items: items.map((it) => ({ variant_id: Number(it.tail), quantity: it.qty })),
   })
 
   async function seedAppliedRefund(orderId: string): Promise<void> {
@@ -142,6 +155,45 @@ describe('computeProductScores', () => {
     pNull = await seedProduct(created30)
     await seedVariant(pNull, nextTail(), 1000)
     await seedVariant(pNull, null, 1000)
+
+    // 4) FW-A co-sold products. B is sold in 4 in-window orders (all 30d live). Two of those ALSO
+    //    contain A and are refunded; B is never refunded on a B-only order. Under any-order refund
+    //    attribution B reads 2 refunds / 4 orders = 50% → deprecate. Single-product-order scoping
+    //    drops the 2 shared orders → B is 0 refunds / 2 orders → keep.
+    pCoA = await seedProduct(created30)
+    const tailA = nextTail()
+    await seedVariant(pCoA, tailA, 1000)
+    pCoB = await seedProduct(created30)
+    const tailB = nextTail()
+    await seedVariant(pCoB, tailB, 1000)
+
+    await seedOrder({ isTest: false, paidAt: daysAgo(2), rawPayload: payloadMulti([{ tail: tailB, qty: 1 }]) }) // B-only
+    await seedOrder({ isTest: false, paidAt: daysAgo(2), rawPayload: payloadMulti([{ tail: tailB, qty: 1 }]) }) // B-only
+    const shared1 = await seedOrder({ isTest: false, paidAt: daysAgo(2), rawPayload: payloadMulti([{ tail: tailA, qty: 1 }, { tail: tailB, qty: 1 }]) })
+    const shared2 = await seedOrder({ isTest: false, paidAt: daysAgo(2), rawPayload: payloadMulti([{ tail: tailA, qty: 1 }, { tail: tailB, qty: 1 }]) })
+    await seedAppliedRefund(shared1)
+    await seedAppliedRefund(shared2)
+
+    // 5) FW-A unmapped-line product: one refunded order = this product + a line item whose variant_id
+    //    maps to NO product. The unmapped line must NOT disqualify the order as single-product.
+    pUnmapped = await seedProduct(created30)
+    const tailU = nextTail()
+    await seedVariant(pUnmapped, tailU, 1000)
+    const unmappedTail = nextTail() // never seeded as a variant → maps to nothing
+    const uOrder = await seedOrder({ isTest: false, paidAt: daysAgo(2), rawPayload: payloadMulti([{ tail: tailU, qty: 1 }, { tail: unmappedTail, qty: 1 }]) })
+    await seedAppliedRefund(uOrder)
+
+    // 6) FW-B non-integer quantity on a MATCHED line: must contribute 0 units and NOT abort the batch.
+    pBadQty = await seedProduct(created30)
+    const tailBad = nextTail()
+    await seedVariant(pBadQty, tailBad, 1000)
+    await seedOrder({
+      isTest: false, paidAt: daysAgo(2),
+      rawPayload: {
+        admin_graphql_api_id: `gid://shopify/Order/${crypto.randomUUID()}`, test: false, total_price: '10.00',
+        line_items: [{ variant_id: Number(tailBad), quantity: 'abc' }],
+      },
+    })
   })
 
   afterAll(async () => {
@@ -238,6 +290,36 @@ describe('computeProductScores', () => {
     expect(await persisted(pSales)).toHaveLength(1)
     expect(await persisted(pDead)).toHaveLength(1)
     expect(await persisted(pNull)).toHaveLength(1)
+  })
+
+  it('FW-A: a multi-product refund does NOT attribute to a co-sold, never-refunded product', async () => {
+    const { rows } = await run()
+    const r = rowFor(rows, pCoB)
+    expect(r).toMatchObject({
+      unitsSold28d: 4, // all 4 orders contain B — per-line sums are NOT single-product-scoped
+      ordersWithProduct28d: 2, // only the 2 B-only orders; the 2 shared-with-A orders are excluded
+      refundCount28d: 0, // the refunds sit on the shared orders, which B's single-product scope drops
+      verdict: 'keep', // under any-order attribution this would read 2/4 = 50% → deprecate
+    })
+  })
+
+  it('FW-A: a refund on a product\'s OWN single-product order still counts (regression)', async () => {
+    const { rows } = await run()
+    // pSales orderA is a single-product order AND refunded → still counted under single-product scoping.
+    expect(rowFor(rows, pSales)).toMatchObject({ ordersWithProduct28d: 3, refundCount28d: 1 })
+  })
+
+  it('FW-A: an unmapped co-line does not disqualify an order as single-product', async () => {
+    const { rows } = await run()
+    // The order carries this product + a line mapping to no product; unmapped ≠ another product.
+    expect(rowFor(rows, pUnmapped)).toMatchObject({ unitsSold28d: 1, ordersWithProduct28d: 1, refundCount28d: 1 })
+  })
+
+  it('FW-B: a non-integer quantity on a matched line contributes 0 and does not abort the batch', async () => {
+    const { rows } = await run()
+    // Reaching here at all proves the safe quantity cast did not throw and abort the nightly run.
+    expect(rowFor(rows, pBadQty)!.unitsSold28d).toBe(0)
+    expect(rowFor(rows, pSales)!.unitsSold28d).toBe(5) // other products still score
   })
 
   it('score_date is UTC-pinned: a non-UTC DB session timezone does not shift the day', async () => {

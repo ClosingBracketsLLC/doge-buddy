@@ -46,8 +46,9 @@ interface MetricSqlRow {
  *
  * The metric SQL is a single bounded pass keyed on each active product's variants:
  *
- *  - **Units / revenue / orders (`line_matches`):** paid, non-test orders whose `raw_payload.line_items`
- *    reference this product's variants, within the 28d window. The order→variant join is a
+ *  - **Units / revenue (`line_matches`):** paid, non-test orders whose `raw_payload.line_items`
+ *    reference this product's variants, within the 28d window (per-line sums, so a multi-product order
+ *    contributes each product's own lines). The order→variant join is a
  *    FIXTURE-ASSUMPTION (no real orders exist yet): the webhook line item carries Shopify's *numeric*
  *    `variant_id` (`order-upsert.ts`) while `product_variants.shopify_variant_gid` is the *gid*, so we
  *    match `(li->>'variant_id')` against the numeric tail of the gid. There is deliberately **no
@@ -59,10 +60,13 @@ interface MetricSqlRow {
  *    `LEFT JOIN LATERAL jsonb_array_elements(x) ON jsonb_typeof(x)='array'` does NOT work: Postgres
  *    evaluates the set-returning function *before* applying the ON filter, so it still throws
  *    `cannot extract elements from an object` — verified against PG 17.)
- *  - **`refund_count_28d`:** DISTINCT in-window orders containing this product that have an `applied`
- *    `refund` proposal. Because `line_matches` is already 28d-windowed, the numerator shares the same
- *    clock as the `orders_with_product_28d` denominator — both are ORDER counts (never units/proposals),
- *    which is what the §2 refund-rate rule expects.
+ *  - **`refund_count_28d` / `orders_with_product_28d` (refund-rate numerator & denominator):** both are
+ *    **single-product-order-scoped** — counted only over in-window orders that contain THIS product and
+ *    NO variant of any OTHER product (an unmapped line does not disqualify). A refund proposal carries
+ *    only `order_id` (no product), so co-purchase attribution is impossible: without single-product
+ *    scoping, a refund on a multi-product order would attribute to every co-sold product and wrongly
+ *    deprecate a healthy, never-refunded one. Both remain ORDER counts (never units/proposals) sharing
+ *    the 28d window, which is what the §2 refund-rate rule expects.
  *  - **`ticket_count_28d`:** `support_tickets` (created_at in the 28d window) whose `order_id` is one of
  *    this product's in-window orders.
  *  - **`days_live`:** `floor((now − products.created_at) / 1 day)`, UTC.
@@ -105,7 +109,13 @@ export async function computeProductScores(
     ),
     line_matches AS (
       SELECT pv.product_id, o.id AS order_id, o.paid_at,
-             (li->>'quantity')::int AS qty, pv.price_cents
+             -- FW-B: a malformed/missing quantity on a MATCHED line must contribute 0, never abort the
+             -- whole nightly batch. A raw ::int cast throws on '2.5'/'abc'/'' and would take the entire
+             -- run down -- the same "one bad order kills the night" class the jsonb array guard above
+             -- already defends against; a partial nightly abort also silently defeats the digest's
+             -- freshness guard. A non-integer quantity is treated as 0 units instead.
+             CASE WHEN li->>'quantity' ~ '^[0-9]+$' THEN (li->>'quantity')::int ELSE 0 END AS qty,
+             pv.price_cents
       FROM orders o
       LEFT JOIN LATERAL jsonb_array_elements(
         CASE WHEN jsonb_typeof(o.raw_payload->'line_items') = 'array'
@@ -122,23 +132,63 @@ export async function computeProductScores(
         AND o.paid_at >= params.win28
         AND o.paid_at <= params.now_ts
     ),
+    -- FW-A: every in-window (order → product) mapping across ALL products (NOT just active ones), used
+    -- solely to decide whether an order is single-product for THIS product. An order maps to a product
+    -- here iff some line_item's numeric variant_id matches that product's variant gid-tail; an unmapped
+    -- line_item (matches no variant) produces no row and so never counts as "another product".
+    order_products AS (
+      SELECT DISTINCT o.id AS order_id, pv.product_id
+      FROM orders o
+      LEFT JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(o.raw_payload->'line_items') = 'array'
+             THEN o.raw_payload->'line_items'
+             ELSE '[]'::jsonb END
+      ) li ON true
+      JOIN product_variants pv
+        ON pv.shopify_variant_gid IS NOT NULL
+       AND (li->>'variant_id') = regexp_replace(pv.shopify_variant_gid, '^.*/', '')
+      CROSS JOIN params
+      WHERE o.is_test = false
+        AND o.paid_at IS NOT NULL
+        AND o.paid_at >= params.win28
+        AND o.paid_at <= params.now_ts
+    ),
+    -- FW-A: the refund-rate NUMERATOR and DENOMINATOR are SINGLE-PRODUCT-ORDER-scoped. A refund
+    -- proposal carries only order_id (no product), so co-purchase attribution is impossible -- a
+    -- refund on a multi-product order would otherwise deprecate every co-sold, never-refunded product.
+    -- An in-window order counts for THIS product only when it contains this product AND has no line
+    -- mapping to a DIFFERENT product (an unmapped line does not disqualify it).
+    single_product_orders AS (
+      SELECT DISTINCT lm.product_id, lm.order_id
+      FROM line_matches lm
+      WHERE NOT EXISTS (
+        SELECT 1 FROM order_products op
+        WHERE op.order_id = lm.order_id AND op.product_id <> lm.product_id
+      )
+    ),
     units AS (
       SELECT lm.product_id,
         COALESCE(SUM(lm.qty) FILTER (WHERE lm.paid_at >= params.win7), 0)::int AS units_sold_7d,
         COALESCE(SUM(lm.qty), 0)::int AS units_sold_28d,
-        COALESCE(SUM(lm.qty * lm.price_cents), 0)::int AS revenue_28d_cents,
-        COUNT(DISTINCT lm.order_id)::int AS orders_with_product_28d
+        COALESCE(SUM(lm.qty * lm.price_cents), 0)::int AS revenue_28d_cents
       FROM line_matches lm CROSS JOIN params
       GROUP BY lm.product_id
     ),
+    -- FW-A: orders_with_product_28d (the refund-rate DENOMINATOR) is single-product-order-scoped too,
+    -- so numerator and denominator share the same single-product-order universe.
+    orders_denom AS (
+      SELECT spo.product_id, COUNT(DISTINCT spo.order_id)::int AS orders_with_product_28d
+      FROM single_product_orders spo
+      GROUP BY spo.product_id
+    ),
     refunds AS (
-      SELECT lm.product_id, COUNT(DISTINCT lm.order_id)::int AS refund_count_28d
-      FROM line_matches lm
+      SELECT spo.product_id, COUNT(DISTINCT spo.order_id)::int AS refund_count_28d
+      FROM single_product_orders spo
       WHERE EXISTS (
         SELECT 1 FROM proposals pr
-        WHERE pr.type = 'refund' AND pr.status = 'applied' AND pr.order_id = lm.order_id
+        WHERE pr.type = 'refund' AND pr.status = 'applied' AND pr.order_id = spo.order_id
       )
-      GROUP BY lm.product_id
+      GROUP BY spo.product_id
     ),
     tickets AS (
       SELECT po.product_id, COUNT(DISTINCT st.id)::int AS ticket_count_28d
@@ -152,7 +202,7 @@ export async function computeProductScores(
       COALESCE(u.units_sold_7d, 0) AS units_sold_7d,
       COALESCE(u.units_sold_28d, 0) AS units_sold_28d,
       COALESCE(u.revenue_28d_cents, 0) AS revenue_28d_cents,
-      COALESCE(u.orders_with_product_28d, 0) AS orders_with_product_28d,
+      COALESCE(od.orders_with_product_28d, 0) AS orders_with_product_28d,
       COALESCE(r.refund_count_28d, 0) AS refund_count_28d,
       COALESCE(t.ticket_count_28d, 0) AS ticket_count_28d,
       GREATEST(0, floor(EXTRACT(EPOCH FROM (params.now_ts - a.created_at)) / 86400))::int AS days_live,
@@ -162,9 +212,10 @@ export async function computeProductScores(
       ) AS has_null_gid_variant
     FROM active a
     CROSS JOIN params
-    LEFT JOIN units u   ON u.product_id = a.product_id
-    LEFT JOIN refunds r ON r.product_id = a.product_id
-    LEFT JOIN tickets t ON t.product_id = a.product_id
+    LEFT JOIN units u        ON u.product_id = a.product_id
+    LEFT JOIN orders_denom od ON od.product_id = a.product_id
+    LEFT JOIN refunds r      ON r.product_id = a.product_id
+    LEFT JOIN tickets t      ON t.product_id = a.product_id
   `)
 
   const rows: ProductScoreRow[] = result.rows.map((m) => {
