@@ -218,6 +218,15 @@ async function executeDigest(
   // Step 7 — re-runnable notify (recovery-safe), ALWAYS run.
   const notified = await notifyPending(db, tx, adminBaseUrl, deps.notify, honoredSpares)
 
+  // FW-E-lite: spec §4-step-5's auto-mode FYI ("N auto-deprecated / K spared") is NOT built. In auto
+  // mode submitProposal creates 'approved' (not 'pending') proposals + enqueues apply, and notifyPending
+  // only selects 'pending' — so the owner gets ZERO messages while products auto-deprecate. Building the
+  // full FYI is a DEFERRED pre-auto-launch follow-up (auto is opt-in; default is manual). Until then,
+  // emit a warning so the gap isn't silently claimed-as-working.
+  if ((await settings.get('workflow.deprecation.mode')) === 'auto') {
+    await alert('warning', 'scoring_auto_mode_fyi_unimplemented', { created, spared: honoredSpares.length })
+  }
+
   return { created, notified, spared: honoredSpares.length }
 }
 
@@ -422,25 +431,40 @@ async function notifyPending(
     )
     .orderBy(asc(proposals.createdAt))
 
-  if (pending.length === 0) return 0
+  // Footer first (the never-truncated tail) so its length is known before packing lines below, and
+  // hard-cap it — each spared title bounded, then the whole assembled footer bounded.
+  const footerRaw = honoredSpares.length > 0
+    ? `\n\njudge spared ${honoredSpares.length}: ${honoredSpares.map((s) => oneLineField(s.title ?? 'product', TITLE_MAX_CHARS)).join(', ')}`
+    : ''
+  const footer = footerRaw.length > FOOTER_MAX_CHARS ? `${footerRaw.slice(0, FOOTER_MAX_CHARS)}…` : footerRaw
+
+  if (pending.length === 0) {
+    // FW-D: nothing pending to LIST. A full-spare week (the judge spared every candidate, so no
+    // proposal was created) still owes the owner the spared footer (spec §4) — send a spared-only
+    // digest rather than falling silent. With no honored spares AND nothing pending there is genuinely
+    // nothing to report. Nothing to stamp either way (no pending proposals exist), so return 0.
+    if (honoredSpares.length === 0) return 0
+    await notify({
+      title: 'Weekly deprecation digest — 0 flagged',
+      body: capNotifyBody('', footer),
+      actions: [{ label: 'View proposals', url: `${adminBaseUrl}/admin/proposals` }],
+    })
+    return 0
+  }
 
   const buildLine = (r: (typeof pending)[number]): string => {
     const ev = ((r.payload as { evidence?: Record<string, unknown> } | null)?.evidence ?? {}) as Record<string, unknown>
     const units = Number(ev.unitsSold28d ?? 0)
     const refunds = Number(ev.refundCount28d ?? 0)
     const days = Number(ev.daysLive ?? 0)
-    const rate = units > 0 ? Math.round((refunds / units) * 100) : 0
+    // FW-C: show the raw refund COUNT, not a fabricated refunds/units rate. The verdict flags on
+    // refunds/ORDERS, and render-proposal.ts deliberately refuses to show any refund rate because the
+    // payload lacks the order count a rate needs — so the digest shows the same raw count the admin
+    // detail does, rather than a misleading refunds/units percentage.
     const reason = oneLineField(String(ev.reasoning ?? ''), REASON_MAX_CHARS)
     const title = oneLineField(r.title ?? 'product', TITLE_MAX_CHARS)
-    return `${title} · ${days}d live · ${units}u 28d · ${rate}% refunds · ${reason} · ${adminBaseUrl}/admin/proposals/${r.id}`
+    return `${title} · ${days}d live · ${units}u 28d · refunds: ${refunds} · ${reason} · ${adminBaseUrl}/admin/proposals/${r.id}`
   }
-
-  // Footer first (it's the never-truncated tail) so its length is known before packing lines, and
-  // hard-cap it — each spared title bounded, then the whole assembled footer bounded.
-  const footerRaw = honoredSpares.length > 0
-    ? `\n\njudge spared ${honoredSpares.length}: ${honoredSpares.map((s) => oneLineField(s.title ?? 'product', TITLE_MAX_CHARS)).join(', ')}`
-    : ''
-  const footer = footerRaw.length > FOOTER_MAX_CHARS ? `${footerRaw.slice(0, FOOTER_MAX_CHARS)}…` : footerRaw
 
   // Pack lines up to LISTED_CAP AND the head budget, reserving room for a trailing overflow line.
   // Because every rendered line is committed only if the whole head still fits, a rendered line is

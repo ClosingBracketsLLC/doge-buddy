@@ -257,6 +257,10 @@ describe('scoring.weekly-digest', () => {
     const body = notify.mock.calls[0]![0].body
     expect(body).toContain('Doomed Chew Toy')
     expect(body).toContain(`${ADMIN}/admin/proposals/${prop!.id}`)
+    // FW-C: the digest line shows the raw refund COUNT, not a fabricated refunds/units rate — consistent
+    // with render-proposal.ts's deliberate refusal to show a rate the payload can't support.
+    expect(body).toContain('refunds: 0')
+    expect(body).not.toContain('% refunds')
     expect(await auditCount('scoring.deprecation_notified', prop!.id)).toBe(1)
   })
 
@@ -369,6 +373,40 @@ describe('scoring.weekly-digest', () => {
     // Only the non-spared product was submitted.
     expect(submit).toHaveBeenCalledTimes(1)
     expect(notify.mock.calls[0]![0].body).toContain('judge spared 1: Spare Me')
+  })
+
+  it('FW-D: a full-spare week (all candidates spared, nothing pending) still sends one spared-only digest', async () => {
+    const spare1 = await seedProduct({ title: 'Spare One' })
+    await seedScore(spare1)
+    const spare2 = await seedProduct({ title: 'Spare Two' })
+    await seedScore(spare2)
+
+    const { deps, notify, submit } = makeDeps({
+      anthropicConfigured: true,
+      judgeImpl: async () => ({ sparedProductIds: new Set([spare1, spare2]), reasons: new Map([[spare1, 'a'], [spare2, 'b']]), failed: false }),
+    })
+
+    const result = await runWeeklyDeprecationDigest(deps)
+
+    // Every candidate spared → no proposal created and none pending — but the owner still owes the
+    // spared footer (spec §4), so exactly one spared-only digest goes out rather than total silence.
+    expect(result).toEqual({ created: 0, notified: 0, spared: 2 })
+    expect(submit).not.toHaveBeenCalled()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls[0]![0].body).toContain('judge spared 2:')
+    expect(notify.mock.calls[0]![0].body).toContain('Spare One')
+  })
+
+  it('FW-E: auto mode emits scoring_auto_mode_fyi_unimplemented (deferred full FYI not built)', async () => {
+    const productId = await seedProduct()
+    await seedScore(productId, { daysLive: 40, unitsSold28d: 0 })
+    await settingsStore.set('workflow.deprecation.mode', 'auto')
+
+    const { deps, alert } = makeDeps() // judge unconfigured → skipped; the survivor is submitted (auto)
+    const result = await runWeeklyDeprecationDigest(deps)
+
+    expect(result.created).toBe(1)
+    expect(alert).toHaveBeenCalledWith('warning', 'scoring_auto_mode_fyi_unimplemented', expect.objectContaining({ created: 1 }))
   })
 
   it('judge spare AT the bound (3 prior consecutive spares) → proposed anyway with the manual-decision note', async () => {
