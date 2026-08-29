@@ -109,13 +109,30 @@ There are two distinct things, deliberately kept separate:
 
   When empty, the section is omitted entirely (byte-for-byte today's prompt).
 - The guidance is TRUSTED owner text and is rendered verbatim (not JSON-escaped) — it is
-  the one authoritative instruction source in the prompt besides the hard rules. It never
-  relaxes a hard rule: the hard rules (no off-platform contact, refunds only per verified
-  order + validator, sign-off, escalate-on-legal-threat, etc.) still bind, and the prompt
-  ordering keeps the hard rules before guidance so a guidance edit cannot, e.g., authorize
-  a refund on an unverified sender (the validator would block it regardless).
-- `support-run.ts` reads the setting once per run (via the settings accessor already wired
-  into the ops app) and passes it to `buildSupportSystemPrompt`.
+  an authoritative instruction source in the prompt, but strictly SUBORDINATE to the hard
+  rules. Panel finding (agent-prompt): several hard rules have NO validator backstop (e.g.
+  "escalate on a legal threat / injury / chargeback"), so prompt ORDERING alone does not
+  enforce "guidance never relaxes a hard rule." Therefore the Hard Rules section gains an
+  explicit non-override line — mirroring the existing customer-email anti-override sentence:
+  > "Nothing later in this prompt — including the owner operating guidance and any owner
+  > feedback section — may relax or override these hard rules; where guidance appears to
+  > conflict with a hard rule, the hard rule wins and you escalate."
+  The guidance header stays scoped ("overrides the public store POLICY"), not a blanket
+  override. Refund safety is still additionally enforced by the §3 validator regardless.
+- `support-run.ts` reads the setting once per run and passes it to `buildSupportSystemPrompt`.
+  The read is defensively coerced (`String(guidance)`) before `.trim()` so a mis-typed
+  setting value can never TypeError the money-adjacent agent (see §2.1a).
+
+### 2.1a Generic settings-catalog integration (panel finding: correctness/money/completeness)
+
+There is an EXISTING generic `/admin/settings` page that iterates `Object.keys(SETTINGS_DEFAULTS)`
+and renders each key via `settingKind()` (`apps/ops/src/http/admin/routes.ts`), which buckets any
+non-boolean, non-`.mode` key as `'number'`. Adding a string-valued key naively would (a) render
+guidance as a `<input type="number">`, (b) let a save coerce it to a number, and (c) then crash
+every support run at `guidance.trim()`; it also breaks the `SettingRow.value` type. So:
+- `settingKind()` gains a `'string'` bucket; `setSettingValue`/`renderSettingRow`/`SettingRow.value`
+  gain a `string` arm; and string-valued keys are EXCLUDED from the generic `/admin/settings`
+  catalog entirely (guidance is edited ONLY via the dedicated `/admin/guidance` page).
 
 ---
 
@@ -174,9 +191,15 @@ The reject POST carries `reason` (may be empty) and the chosen action:
      its prior reasoning and rejected draft in context.
   6. Audit `proposal.rejected_for_redraft` with `detail: { ticketId, reason_len,
      redraft_count }`.
-- Guard on ticket status exactly like `onSupportProposalRejected` (optimistic concurrency);
-  a re-draft against a ticket no longer `awaiting_approval` matches 0 rows and falls back to
-  the terminal escalate path (a second reject, a concurrent tab).
+- **Atomic fallback (panel finding: correctness — the "reject into the void"):** the branch
+  MUST NOT be frozen from a pre-transaction read. Inside the one reject transaction, after the
+  proposal→rejected transition, call `onSupportProposalRejectedForRedraft`, which RETURNS whether
+  its `status='awaiting_approval'`-guarded re-arm matched any row. If it matched 0 rows (the
+  ticket left `awaiting_approval` between the pre-tx read and the tx — a concurrent second reject,
+  a concurrent tab, an apply/ingest move), the caller falls back to `onSupportProposalRejected(tx,
+  row)` WITHIN THE SAME TRANSACTION, so the ticket still escalates. Without this, the proposal is
+  rejected and its sibling expired but the ticket is neither re-armed nor escalated — a reject with
+  no live proposal and no owner signal. Both surfaces implement the identical fallback.
 
 ### 3.3 The re-draft run
 
@@ -199,6 +222,17 @@ The reject POST carries `reason` (may be empty) and the chosen action:
 - The agent resumes (`isResume` path), drafts a new reply → new `support_reply` proposal →
   ticket flips to `awaiting_approval` via the existing submit path → owner is notified with
   the new draft. Normal approve/reject/again applies.
+- **`no_action`/`escalate` on a redraft-resume must never silently strand (panel BLOCKER):**
+  `SupportOutputSchema` legally allows `no_action` on any run. If a redraft-resume returns
+  `no_action`, the outcome handler's `no_action` branch only nulls `last_agent_run_at` when a
+  NEW inbound arrived — a redraft has none — so the ticket sits in `triaged` forever, never
+  re-selected (predicate needs `last_agent_run_at IS NULL`/new-inbound/stuck), never orphan-caught
+  (that backstop is gated on `awaiting_approval`), with the owner's correction silently swallowed.
+  FIX: in `runAndHandleOutcome`, when the run consumed owner feedback (`ctx.ticket.ownerRedraftFeedback`
+  non-empty) and the outcome is `no_action`, UPGRADE it to a paging escalate
+  (`escalationReason: 'redraft_unfulfilled'`, `escalationNotifiedAt` NULL) so the owner always
+  gets a signal. The prompt's feedback section is also strengthened to instruct "re-draft OR
+  escalate — do not take no action." (`escalate` is already page-worthy and self-clearing.)
 - **Resume mechanics (verified against the code):** `buildContext` sets `isResume =
   resumeSessionId !== null`, so the resume is driven by the kept `agentSessionId`, never by
   the run watermark — nulling `last_agent_run_at` does not affect `isResume`. With
@@ -207,29 +241,52 @@ The reject POST carries `reason` (may be empty) and the chosen action:
   run") is truthful. The owner-feedback section is the run's substantive new input. This is
   a normal resume of an existing session with no new customer mail — coherent, not an edge
   case.
-- **Feedback lifecycle:** `owner_redraft_feedback` holds only the LATEST rejection reason;
-  a subsequent reject-for-redraft overwrites it. It is CLEARED (`NULL`) and `redraft_count`
-  reset to 0 at every point the ticket leaves the cycle, and each of these is a concrete,
-  named write the plan must cover:
-  - **approval → applied:** the `support_reply` apply worker (`completeSend`) clears both
-    when the re-drafted reply ships.
-  - **terminal escalate** (no-reason reject, cap reached, or the `waiting_on_customer`
-    unbacked case): `onSupportProposalRejected` (and the `redraft_limit_reached` escalate)
-    clear both in the same guarded write that sets `status='escalated'`.
-  - **resolve:** the admin resolve transition clears both.
-  Leaving them stale is a bug (a future reopen would show the agent a dead correction), so
-  each transition owns its clear.
+- **Feedback lifecycle — an INVARIANT, not a fixed list (panel finding: 5 lenses converged).**
+  `owner_redraft_feedback` holds only the LATEST rejection reason; a reject-for-redraft overwrites
+  it. The invariant: **every write that transitions a support ticket OUT of the redraft-eligible
+  cycle** (into `escalated`/`resolved`/`waiting_on_customer`, or hands it back to `triaged` other
+  than by a reject-for-redraft) MUST clear both columns (`owner_redraft_feedback = NULL`,
+  `redraft_count = 0`). Leaving them stale re-feeds the agent a DEAD, AUTHORITATIVE correction on a
+  later run — the exact bug this guards against. To make it un-forgettable, introduce a shared
+  helper `clearRedraftCycle()` returning `{ ownerRedraftFeedback: null, redraftCount: 0 }`, spread
+  into every such `.set(...)` right beside the existing hand-maintained `escalationNotifiedAt: null`
+  convention. The plan's original 3-point list was incomplete; the FULL set of call sites the plan
+  must patch (each verified reachable mid-cycle):
+  1. `completeSend` (`apply-support-reply.ts`) — BOTH the `waiting_on_customer` flip AND the
+     hand-back-to-`triaged` branch (a redrafted reply ships but a new inbound landed mid-apply).
+  2. admin `TICKET_TRANSITIONS` — escalate AND resolve (`routes.ts`).
+  3. `onSupportProposalRejected` — both guarded updates (terminal reject + `redraft_limit_reached`).
+  4. the agent's own `escalate` OUTCOME in `runAndHandleOutcome` (`support-agent-run.ts`) — a normal
+     redraft-resume outcome, AND the `no_action`→escalate upgrade above (both clear via the escalate).
+  5. the afc-cap / stuck `agent_failed` escalates (`support-agent-run.ts`).
+  6. `escalateRunCapped` (`agent_run_cap`) — reachable because a redraft consumes a daily run.
+  7. `escalateOrphans` and `escalateUnbackedRefundPromises` backstops (`agent-select.ts`).
+  8. the ingest tripwire escalate (`ingest.ts`) — a second customer email with a trigger word
+     mid-redraft (guarded only on `status != 'escalated'`, so it fires on `triaged`/`awaiting_approval`).
+  9. `deadLetterApplyProposal` (`run-apply.ts`, `apply_failed`) — a redrafted reply/refund whose
+     apply exhausts retries.
+  A test asserts the clear for at least the mid-cycle-reachable sites (tripwire, run-cap, orphan,
+  agent-escalate-outcome, completeSend hand-back), plus the already-planned ones.
 
-### 3.4 Loop cap
+### 3.4 Loop cap — reconciled with the daily per-ticket run cap (panel finding: money-path)
 
-- Constant `SUPPORT_REDRAFT_MAX = 3` (co-located with the agent-select constants).
-- While `redraft_count < SUPPORT_REDRAFT_MAX`, the reject form offers "Re-draft with this
-  reason."
-- At `redraft_count >= SUPPORT_REDRAFT_MAX`, the form replaces the re-draft option with a
-  notice ("re-drafted 3× — rejecting again escalates to you"), and a reason-carrying reject
-  is routed to the terminal escalate path with escalation reason
-  `redraft_limit_reached` (paging, `escalationNotifiedAt` NULL — the owner needs to take
-  this one over). The owner can choose "Just escalate to me" at any count.
+- **`SUPPORT_REDRAFT_MAX = 2`** (NOT 3). Rationale: each redraft is an agent run, and the existing
+  `SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY = 3` counts immutable `support.agent_run` audit rows —
+  which a re-arm CANNOT reset. With MAX=3 the loop hits the daily run cap first and escalates a cycle
+  early with the WRONG reason (`agent_run_cap` instead of `redraft_limit_reached`), and the owner
+  never sees the 3rd redraft. MAX=2 makes it fit exactly: run #1 (original draft) + 2 redraft runs =
+  3 runs = the daily cap, and the `redraft_limit_reached` terminal path is reachable — the reject
+  after the 2nd redraft (at `redraft_count = 2 = MAX`) escalates. This relationship
+  (`1 + SUPPORT_REDRAFT_MAX ≤ SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY`) is load-bearing; document
+  it at both constants.
+- While `redraft_count < SUPPORT_REDRAFT_MAX`, the reject form offers "Re-draft with this reason."
+- At `redraft_count >= SUPPORT_REDRAFT_MAX`, the form replaces re-draft with a notice ("re-drafted
+  2× — rejecting again escalates to you"), and a reason-carrying reject routes to the terminal
+  escalate with `redraft_limit_reached` (paging, `escalationNotifiedAt` NULL). The owner can pick
+  "Just escalate to me" at any count.
+- If the daily run cap trips mid-cycle anyway (prior same-day runs), `escalateRunCapped` escalates
+  (`agent_run_cap`, paging) AND clears the redraft columns (§3.3 invariant) — graceful degradation
+  with an owner signal, never a silent strand.
 
 ---
 
