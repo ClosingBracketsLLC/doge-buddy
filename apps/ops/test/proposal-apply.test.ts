@@ -17,15 +17,6 @@ function newListingPayload() {
   }
 }
 
-/** The one proposal type still without an apply executor — test 8's "unimplemented" fixture. */
-function deprecateProductPayload() {
-  return {
-    type: 'deprecate_product',
-    productId: crypto.randomUUID(),
-    evidence: { unitsSold28d: 0, refundCount28d: 3, ticketCount28d: 4, daysLive: 45 },
-  }
-}
-
 function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopifyOps & { calls: string[] } {
   const calls: string[] = []
   let n = 0
@@ -42,6 +33,9 @@ function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopi
     },
     listPublications: async () => [{ id: 'pub-1', name: 'Online Store' }, { id: 'pub-2', name: 'Shop' }],
     publishablePublish: async (_p, pub) => { calls.push(`publish:${pub}`) },
+    // `deprecate_product`'s apply (Task 10) is the only executor that calls this; `new_listing`'s
+    // tests never reach it, so recording here leaves their `calls` assertions unchanged.
+    publishableUnpublish: async (_p, pub) => { calls.push(`unpublish:${pub}`) },
     // Default: "Shopify has no known variants for this product" — same conservative-empty stance
     // as `findProductByHandle`'s default `null`. The resume-path tests (3, 4) and the gid-backfill
     // test below override this to return sku-matched gids, proving the executor's resume branch
@@ -66,6 +60,12 @@ function fakeAdapter(overrides: { subscribeProductWebhook?: (supplierProductId: 
     subscribeProductWebhook: overrides.subscribeProductWebhook ?? (async (supplierProductId: string) => {
       subscribedProductIds.push(supplierProductId)
     }),
+    // Grown for Task 10's `ApplyProposalDeps.adapter` Pick — `deprecate_product`'s executor is what
+    // actually exercises it (see apply-deprecate-product.test.ts). Unused by this file's tests, so
+    // stubbed to throw like the two dispute methods below.
+    unsubscribeProductWebhook: async () => {
+      throw new Error('fakeAdapter.unsubscribeProductWebhook: not used by these tests')
+    },
     getDisputeOptions: async () => {
       throw new Error('fakeAdapter.getDisputeOptions: not used by these tests')
     },
@@ -533,32 +533,33 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // 8. Unimplemented type -> throws, dead-letters to failed
+  // 8. Defensive dispatch backstop: an unmapped proposal type throws
   // ---------------------------------------------------------------------------
-  it('8. unimplemented proposal type throws, then dead-letters to failed', async () => {
-    // `deprecate_product` is the only type left with no executor — `refund` used to stand in here
-    // until Task 16 gave it one.
-    const row = await seedProposal({ status: 'approved', type: 'deprecate_product', payload: deprecateProductPayload() })
+  it('8. unmapped proposal type throws (defensive dispatch backstop)', async () => {
+    // Every real `proposal_type` enum value now has an executor (Task 10 gave `deprecate_product`
+    // its own, `applyDeprecateProduct`), so the `unimplemented proposal type` guard is no longer
+    // reachable through a valid seeded row — Postgres rejects any other value at the enum itself.
+    // Force a SYNTHETIC unmapped type past the type system to keep the guard covered: a fake db
+    // returns exactly one 'applying' row whose `type` is bogus. The shell skips both
+    // status-transition branches for an already-'applying' row and dispatches straight into the
+    // guard, which throws before any executor (or Shopify op) runs. Dead-lettering from that thrown
+    // state to `failed`+critical-alert is exercised separately by test 9.
+    const syntheticRow = { id: crypto.randomUUID(), type: 'nonsense', status: 'applying' }
+    const fakeDb = {
+      select: () => ({ from: () => ({ where: () => Promise.resolve([syntheticRow]) }) }),
+    }
     const shopify = fakeShopify()
     const alert = vi.fn(async () => {})
 
-    await expect(executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)).rejects.toThrow(/unimplemented/)
+    await expect(
+      executeApplyProposal(
+        { db: fakeDb as unknown as typeof db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() },
+        syntheticRow.id,
+      ),
+    ).rejects.toThrow(/unimplemented proposal type: nonsense/)
 
-    const midway = await loadProposal(row.id)
-    expect(midway!.status).toBe('applying')
-
-    const err = new Error('unimplemented proposal type: deprecate_product')
-    await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id, err)
-
-    const after = await loadProposal(row.id)
-    expect(after!.status).toBe('failed')
-    expect(after!.applyError).toMatch(/^unimplemented/)
-
-    expect(alert).toHaveBeenCalledWith(
-      'critical',
-      'proposal_apply_failed',
-      expect.objectContaining({ proposalId: row.id }),
-    )
+    // The guard fires before dispatch reaches any executor — no Shopify op ran.
+    expect(shopify.calls).toEqual([])
   })
 
   // ---------------------------------------------------------------------------

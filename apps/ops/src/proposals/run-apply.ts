@@ -1,5 +1,6 @@
 import { auditLog, proposals, supportTickets } from '@doge-buddy/db'
 import { and, eq } from 'drizzle-orm'
+import { applyDeprecateProduct } from './apply-deprecate-product.ts'
 import { applyNewListing } from './apply-new-listing.ts'
 import { applyRefund } from './apply-refund.ts'
 import { capNotifyBody, type ApplyProposalDeps, type ProposalRow } from './apply-shared.ts'
@@ -17,14 +18,16 @@ export { proposalHandle } from './apply-shared.ts'
 export type { ApplyProposalDeps, OrderRefundState, ProposalRow, ProposalShopifyOps, RefundOps } from './apply-shared.ts'
 
 /**
- * Type-keyed apply-executor dispatch (Task 14). `deprecate_product` has no executor yet, so
- * dispatching it falls through to `executeApplyProposal`'s own `unimplemented proposal type` throw
- * below, same as `new_listing` did before this pipeline existed.
+ * Type-keyed apply-executor dispatch (Task 14). Every `proposal_type` enum value now has an
+ * executor (Task 10 added `deprecate_product`), so the `unimplemented proposal type` throw below is
+ * now a purely defensive backstop — unreachable through a valid DB row, but kept for a future enum
+ * value that lands before its executor does (or a programming error that drops one from this map).
  */
 const executors: Record<string, (deps: ApplyProposalDeps, row: ProposalRow) => Promise<void>> = {
   new_listing: applyNewListing,
   support_reply: applySupportReply,
   refund: applyRefund,
+  deprecate_product: applyDeprecateProduct,
 }
 
 /**
@@ -83,9 +86,10 @@ export async function executeApplyProposal(deps: ApplyProposalDeps, proposalId: 
     return
   }
 
-  // Type-keyed dispatch (Task 14): a type with no entry in the `executors` map above falls through
-  // to the same `unimplemented proposal type` throw `new_listing` itself used to hit before this
-  // pipeline existed (today: `deprecate_product`).
+  // Type-keyed dispatch (Task 14): every `proposal_type` enum value has an entry in the `executors`
+  // map above (Task 10 filled the last one, `deprecate_product`), so this throw is now a defensive
+  // backstop only — it fires for a type that reaches here with no registered executor (a future
+  // enum value added ahead of its executor, or a map regression), never for today's valid data.
   const exec = executors[row.type]
   if (!exec) {
     throw new Error(`unimplemented proposal type: ${row.type}`)

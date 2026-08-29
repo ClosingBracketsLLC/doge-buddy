@@ -11,6 +11,7 @@ import {
   productSet,
   productVariantsByProductId,
   publishablePublish,
+  publishableUnpublish,
   refundCreate,
   ShopifyAdminClient,
   ShopifyTokenManager,
@@ -213,6 +214,7 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       productSet: (input) => productSet(shopifyClient, input),
       listPublications: () => listPublications(shopifyClient),
       publishablePublish: (productId, publicationId) => publishablePublish(shopifyClient, productId, publicationId),
+      publishableUnpublish: (productId, publicationId) => publishableUnpublish(shopifyClient, productId, publicationId),
       productVariantsByProductId: (productGid) => productVariantsByProductId(shopifyClient, productGid),
     }
   : {
@@ -220,6 +222,7 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       productSet: shopifyNotConfigured,
       listPublications: shopifyNotConfigured,
       publishablePublish: shopifyNotConfigured,
+      publishableUnpublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
     }
 

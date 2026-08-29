@@ -161,6 +161,7 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
       productSet: shopifyNotConfigured,
       listPublications: shopifyNotConfigured,
       publishablePublish: shopifyNotConfigured,
+      publishableUnpublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
     },
     // The full supplier adapter every other queue here already threads through covers this Pick
