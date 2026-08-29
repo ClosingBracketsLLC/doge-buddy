@@ -81,10 +81,15 @@ window bounds computed in UTC. For each **active** product (`products.status = '
 - **`revenue_28d_cents`** — `Σ quantity × product_variants.price_cents` (catalog price; the line item
   carries no price). Coarse on multi-product orders and does not net out refunds — observability only,
   never a verdict input.
-- **`refund_count_28d`** — count of DISTINCT `orders` containing this product that have an `applied`
-  `refund` proposal whose order's `paid_at` is **also** in the window (numerator and the §2 denominator
-  share the same clock and both count ORDERS, not units/proposals — see §2). Coarse on multi-product
-  orders (an order-level refund attributes to every product in the order); documented, acceptable v1.
+- **`refund_count_28d`** — count of DISTINCT **single-product** `orders` containing this product (and
+  no variant of any OTHER product) that have an `applied` `refund` proposal whose order's `paid_at` is
+  **also** in the window (numerator and the §2 denominator share the same clock, both count ORDERS, not
+  units/proposals — see §2). *(Amended 2026-08-29, final-review fix FW-A: the refund rule's numerator
+  AND denominator are computed over single-product orders only. A refund proposal carries only
+  `order_id`, so an order-level refund on a MULTI-product order would otherwise attribute to every
+  co-sold product and deprecate a healthy never-refunded one — with digest evidence that would mislead
+  the manual owner into approving. Single-product scoping makes the refund rate correct; a mostly-co-sold
+  product simply never reaches the ≥`refund_rate_min_orders` threshold and falls to the low-sales rule.)*
 - **`ticket_count_28d`** — `support_tickets` (`created_at` in window) whose `order_id` links an order
   containing this product.
 - **`days_live`** — `floor((now − products.created_at)/1 day)` UTC (products are created active by the
