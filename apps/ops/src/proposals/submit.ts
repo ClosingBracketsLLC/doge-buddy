@@ -197,7 +197,7 @@ interface NotifyBodyCtx {
  */
 const NOTIFY_BODY_MAX_CHARS = 3500
 
-function capNotifyBody(head: string, tail: string = ''): string {
+export function capNotifyBody(head: string, tail: string = ''): string {
   const budget = NOTIFY_BODY_MAX_CHARS - tail.length
   const cappedHead = budget <= 0 ? '' : head.length > budget ? head.slice(0, budget) : head
   return cappedHead + tail
