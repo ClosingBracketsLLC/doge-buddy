@@ -164,6 +164,11 @@ export const supportTickets = pgTable('support_tickets', {
   lastAgentPromptedAt: timestamp('last_agent_prompted_at', { withTimezone: true }),
   lastAgentFinishedAt: timestamp('last_agent_finished_at', { withTimezone: true }),
   agentFailureCount: integer('agent_failure_count').notNull().default(0),
+  // Reject-with-reason re-draft loop (spec §3): the owner's latest rejection instruction for the
+  // agent's next resumed run, and how many re-draft cycles this draft has been through (caps at
+  // SUPPORT_REDRAFT_MAX). Both cleared/reset when the ticket leaves the cycle (apply/escalate/resolve).
+  ownerRedraftFeedback: text('owner_redraft_feedback'),
+  redraftCount: integer('redraft_count').notNull().default(0),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 })
