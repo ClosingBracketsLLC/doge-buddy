@@ -29,6 +29,7 @@ import { cjDisputePollHandler, type DisputePollDeps } from './jobs/cj-dispute-po
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
+import { scoringNightlyHandler, SCORING_NIGHTLY_QUEUE, type ScoringNightlyDeps } from './jobs/scoring-nightly.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { sourcingWeeklyHandler } from './jobs/sourcing-weekly.ts'
 import { supportAgentRunHandler, SUPPORT_AGENT_QUEUE, type SupportAgentJobDeps } from './jobs/support-agent-run.ts'
@@ -292,6 +293,16 @@ await registerCron(queue.boss, 'cj.dispute-poll', '0 */6 * * *', cjDisputePollHa
 // `proposal.expire-sweep` (Task 7): daily proposal expiry sweep — transitions any pending
 // proposals that have expired to 'expired' status and audits each transition.
 await registerCron(queue.boss, 'proposal.expire-sweep', '30 6 * * *', proposalExpireSweepHandler(db))
+
+// `scoring.nightly` (Phase 7, Task 7): nightly product-scoring sweep — computes and upserts one
+// `product_scores` row per active product for today's UTC date (`computeProductScores`, Task 6),
+// gated on `killswitch.global`/`workflow.scoring.enabled` inside `executeScoringNightly` itself.
+// Registered unconditionally, same as `cj.dispute-poll`/`proposal.expire-sweep` above — unlike
+// `sourcing.weekly` below, this cron has NO LLM step, so there is nothing here for
+// `ANTHROPIC_API_KEY` to gate.
+const scoringNightlyDeps: ScoringNightlyDeps = { db, settings, alert }
+await registerCron(queue.boss, SCORING_NIGHTLY_QUEUE, '0 3 * * *', scoringNightlyHandler(scoringNightlyDeps))
+app.log.info(`${SCORING_NIGHTLY_QUEUE} cron ARMED — 03:00 UTC daily`)
 
 if (config.shopify && config.adminBaseUrl && shopifyClient) {
   const { adminBaseUrl } = config
