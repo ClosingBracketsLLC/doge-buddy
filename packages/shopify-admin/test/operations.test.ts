@@ -5,7 +5,7 @@ import {
   inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
   listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, orderRefundState,
   ordersUpdatedSince, productDelete,
-  productSet, productVariantsByProductId, publishablePublish, refundCreate, webhookSubscriptionCreate,
+  productSet, productVariantsByProductId, publishablePublish, publishableUnpublish, refundCreate, webhookSubscriptionCreate,
   webhookSubscriptionDelete,
 } from '@doge-buddy/shopify-admin'
 
@@ -75,6 +75,20 @@ describe('publishablePublish', () => {
   it('throws ShopifyUserError on userErrors', async () => {
     const { client } = makeClient(() => gql({ publishablePublish: { userErrors: [{ message: 'not allowed' }] } }))
     await expect(publishablePublish(client, 'gid://shopify/Product/9', 'gid://shopify/Publication/1')).rejects.toThrow(ShopifyUserError)
+  })
+})
+
+describe('publishableUnpublish', () => {
+  it('sends id + publicationId input, resolves void', async () => {
+    const { client, calls } = makeClient(() => gql({ publishableUnpublish: { userErrors: [] } }))
+    await expect(publishableUnpublish(client, 'gid://shopify/Product/9', 'gid://shopify/Publication/1')).resolves.toBeUndefined()
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/mutation[\s\S]*publishableUnpublish/)
+    expect(variables).toEqual({ id: 'gid://shopify/Product/9', input: [{ publicationId: 'gid://shopify/Publication/1' }] })
+  })
+  it('throws ShopifyUserError on userErrors', async () => {
+    const { client } = makeClient(() => gql({ publishableUnpublish: { userErrors: [{ message: 'not allowed' }] } }))
+    await expect(publishableUnpublish(client, 'gid://shopify/Product/9', 'gid://shopify/Publication/1')).rejects.toThrow(ShopifyUserError)
   })
 })
 
