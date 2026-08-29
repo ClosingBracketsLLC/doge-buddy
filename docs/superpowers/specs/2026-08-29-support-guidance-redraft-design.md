@@ -160,13 +160,16 @@ The reject POST carries `reason` (may be empty) and the chosen action:
      length-bounded to **2000 chars** at the handler; longer is refused with a readable
      error).
   3. `support_tickets.redraft_count = redraft_count + 1`.
-  4. Re-arm for a fresh agent run: set ticket `status = 'triaged'`, and clear the run
-     watermark so `selectAndEnqueueAgentRuns` picks it up on the next `support.poll-gmail`
-     cycle — specifically `last_agent_run_at = NULL`, `last_agent_prompted_at = NULL`,
-     `last_agent_finished_at = NULL` (the selection predicate in
-     `apps/ops/src/support/agent-select.ts` requires `last_agent_run_at IS NULL` or a newer
-     inbound or the stuck window; a re-draft has no new inbound, so nulling the watermark is
-     what makes it selectable). Reset `agent_failure_count = 0`.
+  4. Re-arm for a fresh agent run: set ticket `status = 'triaged'`, `last_agent_run_at =
+     NULL`, and `last_agent_finished_at = NULL` — this satisfies `selectAndEnqueueAgentRuns`
+     (`apps/ops/src/support/agent-select.ts`), whose primary branch is `last_agent_run_at IS
+     NULL` (a re-draft has no new inbound, so nulling the run watermark is what makes it
+     selectable). Reset `agent_failure_count = 0`. **KEEP `last_agent_prompted_at` as-is** —
+     `buildContext` (`support-agent-run.ts`) filters the resume's messages with `isResume &&
+     lastAgentPromptedAt !== null ? sentAt > promptedAt : ALL`; keeping the prior watermark
+     yields ZERO new thread messages (correct — no customer wrote; the owner-feedback section
+     is the run's substantive new input), whereas nulling it would flip the filter to ALL
+     messages while the resume note claims "only new," misleading the agent.
   5. **Keep `agentSessionId`** — the re-draft resumes the agent's existing session so it has
      its prior reasoning and rejected draft in context.
   6. Audit `proposal.rejected_for_redraft` with `detail: { ticketId, reason_len,
@@ -196,16 +199,14 @@ The reject POST carries `reason` (may be empty) and the chosen action:
 - The agent resumes (`isResume` path), drafts a new reply → new `support_reply` proposal →
   ticket flips to `awaiting_approval` via the existing submit path → owner is notified with
   the new draft. Normal approve/reject/again applies.
-- **Integration risk the plan MUST verify:** the re-draft is a RESUME driven by the kept
-  `agentSessionId`, NOT by the run watermark. Because a re-draft has no new customer
-  message, nulling `last_agent_prompted_at` means the resume's "new messages since last
-  prompt" filter (`sent_at > last_agent_prompted_at` in the agent-run job) yields zero
-  thread messages — which is correct here: the ONLY new input is the owner-feedback section.
-  The plan must confirm the agent-run job still keys `isResume` off `agentSessionId` (not
-  off the nulled watermark) and that a zero-new-message resume renders a valid prompt (the
-  owner-feedback section is the run's substantive input). If the job cannot resume without a
-  triggering message, the re-arm instead threads the feedback as the run's input explicitly
-  rather than relying on the message filter.
+- **Resume mechanics (verified against the code):** `buildContext` sets `isResume =
+  resumeSessionId !== null`, so the resume is driven by the kept `agentSessionId`, never by
+  the run watermark — nulling `last_agent_run_at` does not affect `isResume`. With
+  `last_agent_prompted_at` KEPT (§3.2 step 4), the message filter yields zero new thread
+  messages, and `buildSupportPrompt`'s resume note ("only the new messages since your last
+  run") is truthful. The owner-feedback section is the run's substantive new input. This is
+  a normal resume of an existing session with no new customer mail — coherent, not an edge
+  case.
 - **Feedback lifecycle:** `owner_redraft_feedback` holds only the LATEST rejection reason;
   a subsequent reject-for-redraft overwrites it. It is CLEARED (`NULL`) and `redraft_count`
   reset to 0 at every point the ticket leaves the cycle, and each of these is a concrete,
