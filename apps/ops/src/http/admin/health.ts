@@ -1,4 +1,4 @@
-import { agentRuns, auditLog, gmailSyncState, proposals, webhookEvents } from '@doge-buddy/db'
+import { agentRuns, auditLog, gmailSyncState, productScores, proposals, webhookEvents } from '@doge-buddy/db'
 import { and, count, desc, eq, gte, sql } from 'drizzle-orm'
 import { AGENT_RUN_AUDIT_ACTION } from '../../jobs/support-agent-run.ts'
 import type { AdminDeps } from './routes.ts'
@@ -32,6 +32,12 @@ export interface HealthStrip {
   /** The newest `agent_runs` row with `workflow = 'support'`, when one exists — null before the
    * support agent has ever run. */
   supportAgentLastRun: { status: string; startedAt: Date } | null
+  /** The newest `product_scores.score_date` (a `YYYY-MM-DD` text value, Postgres `date`), or null
+   * before the scoring job has ever run (no `product_scores` rows at all yet). */
+  scoringLastRunDate: string | null
+  /** Count of `product_scores` rows on `scoringLastRunDate` — 0 when `scoringLastRunDate` is
+   * null. */
+  scoringProductsScored: number
 }
 
 /** UTC-midnight cutoff for "today", mirroring `jobs/support-agent-run.ts`'s own local (unexported)
@@ -114,6 +120,28 @@ async function loadSupportAgentState(
   return { runsToday: countRow?.value ?? 0, lastRun: lastRunRow ?? null }
 }
 
+/**
+ * Task 11 (scoring): the newest `product_scores.score_date` and how many products were scored on
+ * that date — a two-query pattern (max date, then a count filtered to it) mirroring this file's
+ * own `loadSupportAgentState` above, rather than one clever aggregate query. `{ null, 0 }` before
+ * the scoring job has ever run (no `product_scores` rows exist yet), same "not yet run" idiom as
+ * `loadSupportPollState`'s own null/0 default.
+ */
+async function loadScoringState(db: AdminDeps['db']): Promise<{ lastRunDate: string | null; productsScored: number }> {
+  const [latest] = await db
+    .select({ scoreDate: productScores.scoreDate })
+    .from(productScores)
+    .orderBy(desc(productScores.scoreDate))
+    .limit(1)
+  if (!latest) return { lastRunDate: null, productsScored: 0 }
+
+  const [countRow] = await db
+    .select({ value: count() })
+    .from(productScores)
+    .where(eq(productScores.scoreDate, latest.scoreDate))
+  return { lastRunDate: latest.scoreDate, productsScored: countRow?.value ?? 0 }
+}
+
 /** The dashboard's top-of-page health strip: wallet, queue depth, last webhook, the three kill switches, pending proposals. */
 export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
   const [
@@ -127,6 +155,7 @@ export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
     pendingRows,
     supportPollState,
     supportAgentState,
+    scoringState,
   ] = await Promise.all([
     loadWalletCents(deps),
     deps.settings.get('fulfillment.wallet_alert_threshold_cents'),
@@ -142,6 +171,7 @@ export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
     deps.db.select({ value: count() }).from(proposals).where(eq(proposals.status, 'pending')),
     loadSupportPollState(deps.db),
     loadSupportAgentState(deps.db),
+    loadScoringState(deps.db),
   ])
 
   return {
@@ -157,5 +187,7 @@ export async function loadHealthStrip(deps: AdminDeps): Promise<HealthStrip> {
     supportPollConsecutiveFailures: supportPollState.consecutiveFailures,
     supportAgentRunsToday: supportAgentState.runsToday,
     supportAgentLastRun: supportAgentState.lastRun,
+    scoringLastRunDate: scoringState.lastRunDate,
+    scoringProductsScored: scoringState.productsScored,
   }
 }

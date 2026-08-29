@@ -5,6 +5,7 @@ import {
   agentRuns,
   auditLog,
   orders,
+  products,
   proposals,
   proposalStatus,
   sourcingSignals,
@@ -56,9 +57,11 @@ const PROPOSAL_STATUSES = proposalStatus.enumValues
 
 /**
  * Renders the dashboard's health strip: wallet balance (or 'n/a'), queue depth, last webhook
- * received, the three kill switches (ON/OFF so the state reads unambiguously at a glance), and
- * the pending-proposal count. Every field is a `HealthStrip` value already loaded by
- * `loadHealthStrip` — this function only formats and escapes (via html``) for display.
+ * received, the three kill switches (ON/OFF so the state reads unambiguously at a glance), the
+ * pending-proposal count, and (Task 11 scoring) the newest `product_scores.score_date` plus how
+ * many products were scored that day ('never'/0 before the scoring job has ever run). Every
+ * field is a `HealthStrip` value already loaded by `loadHealthStrip` — this function only formats
+ * and escapes (via html``) for display.
  */
 function renderHealthStrip(h: HealthStrip): RawHtml {
   // Visible below-threshold call-out, distinct from the plain "Wallet: $x.xx" line above it: an
@@ -79,6 +82,7 @@ function renderHealthStrip(h: HealthStrip): RawHtml {
     <p>support poll: last ok ${h.supportPollLastSuccessAt ? h.supportPollLastSuccessAt.toISOString() : 'never'} (${h.supportPollConsecutiveFailures} consecutive failures)</p>
     <p>support agent: ${h.supportAgentRunsToday} runs today / ${SUPPORT_AGENT_MAX_RUNS_PER_DAY}</p>
     <p>support agent last run: ${h.supportAgentLastRun ? `${h.supportAgentLastRun.status} at ${h.supportAgentLastRun.startedAt.toISOString()}` : 'none'}</p>
+    <p>scoring: last run ${h.scoringLastRunDate ?? 'never'}, ${h.scoringProductsScored} products scored</p>
   </section>`
 }
 
@@ -699,13 +703,31 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       })
 
       /**
-       * DB-derived extras `renderRefundSummary` needs but a bare `proposals` row doesn't carry
-       * (Task 18): the linked order's number, a cheap sender-auth note, and — Task 16 note — the
-       * `proposal.refund_issued` audit row's `refundId` when present (it exists exactly when money
-       * moved, regardless of the proposal's current status, so this is NOT scoped to `pending`).
-       * `{}` for every other type: `renderProposalDetail` only reads these fields for `refund`.
+       * DB-derived extras `renderRefundSummary`/`renderDeprecateProductSummary` need but a bare
+       * `proposals` row doesn't carry (Task 18): the linked order's number, a cheap sender-auth
+       * note, and — Task 16 note — the `proposal.refund_issued` audit row's `refundId` when
+       * present (it exists exactly when money moved, regardless of the proposal's current status,
+       * so this is NOT scoped to `pending`). Task 11 (scoring) adds `productTitle` for
+       * `deprecate_product`: `row.productId` is the row's own column (set at submit time, same
+       * convention as `refund`'s `row.orderId` above), looked up against `products.title` —
+       * `null` when the product row is somehow missing, so the renderer falls back to the bare id.
+       * `{}` for every other type: `renderProposalDetail` only reads these fields for
+       * `refund`/`deprecate_product`.
        */
       async function loadProposalDetailExtras(row: ProposalRow): Promise<ProposalDetailExtras> {
+        if (row.type === 'deprecate_product') {
+          let productTitle: string | null = null
+          if (row.productId) {
+            const [product] = await deps.db
+              .select({ title: products.title })
+              .from(products)
+              .where(eq(products.id, row.productId))
+              .limit(1)
+            productTitle = product?.title ?? null
+          }
+          return { productTitle }
+        }
+
         if (row.type !== 'refund') return {}
 
         // Resolved via `row.orderId` (Task 18 review, M9) — the proposals row's own column, and
