@@ -4,8 +4,8 @@ import {
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  REASON_MAX_CHARS, runWeeklyDeprecationDigest, SCORING_WEEKLY_QUEUE, scoringWeeklyHandler,
-  type ScoringWeeklyDeps,
+  LISTED_CAP, REASON_MAX_CHARS, runWeeklyDeprecationDigest, SCORING_WEEKLY_QUEUE, scoringWeeklyHandler,
+  TITLE_MAX_CHARS, type ScoringWeeklyDeps,
 } from '../src/jobs/scoring-weekly-digest.ts'
 import type { NotifyOwner, OwnerNotification } from '../src/notify/notify.ts'
 import { submitProposal, type SubmitProposalDeps } from '../src/proposals/submit.ts'
@@ -436,6 +436,83 @@ describe('scoring.weekly-digest', () => {
     const body = notify.mock.calls[0]![0].body
     expect(body).toContain('R'.repeat(REASON_MAX_CHARS))
     expect(body).not.toContain('R'.repeat(REASON_MAX_CHARS + 1))
+  })
+
+  it('fix: a full LISTED_CAP batch of MAX-length titles + reasons renders every listed deep link and stamps ONLY the shown ones (overflow re-lists)', async () => {
+    // LISTED_CAP + 2 pending proposals, each with a 150-char title (capped to 80) and a 300-char
+    // reason (capped to 200) — the reviewer's repro. Every RENDERED line must fit (deep link intact)
+    // and only rendered proposals get stamped, so the overflow re-surfaces next run rather than being
+    // silently excluded forever.
+    const total = LISTED_CAP + 2
+    const propIds: string[] = []
+    for (let i = 0; i < total; i++) {
+      const pid = await seedProduct({ title: 'T'.repeat(150) })
+      propIds.push(await seedProposal(pid, { status: 'pending', reasoning: 'R'.repeat(300) }))
+    }
+
+    const { deps, notify } = makeDeps()
+    await runWeeklyDeprecationDigest(deps)
+
+    expect(notify).toHaveBeenCalledTimes(1)
+    const body = notify.mock.calls[0]![0].body
+
+    let shownCount = 0
+    let stampedCount = 0
+    for (const id of propIds) {
+      const shown = body.includes(`${ADMIN}/admin/proposals/${id}`)
+      const stamped = (await auditCount('scoring.deprecation_notified', id)) === 1
+      // The core invariant: a proposal is stamped IFF its line was actually rendered.
+      expect(shown).toBe(stamped)
+      if (shown) shownCount++
+      if (stamped) stampedCount++
+    }
+    expect(shownCount).toBe(LISTED_CAP)
+    expect(stampedCount).toBe(LISTED_CAP)
+    expect(body).toContain(`…and ${total - LISTED_CAP} more`)
+  })
+
+  it('fix: a huge honored-spare footer stays under Telegram limit and still sends (no permanent-failure loop)', async () => {
+    // 15 honored spares with long titles + 1 proposed → a very long footer, which must be capped so
+    // the never-truncated tail can never push the body past 4096 and wedge the send forever.
+    const spareIds: string[] = []
+    for (let i = 0; i < 15; i++) {
+      const pid = await seedProduct({ title: `Spared ${'S'.repeat(200)}` })
+      await seedScore(pid)
+      spareIds.push(pid)
+    }
+    const proposeId = await seedProduct({ title: 'Proposed One' })
+    await seedScore(proposeId)
+
+    const { deps, notify } = makeDeps({
+      anthropicConfigured: true,
+      judgeImpl: async () => ({ sparedProductIds: new Set(spareIds), reasons: new Map(spareIds.map((id) => [id, 'r'])), failed: false }),
+    })
+
+    const result = await runWeeklyDeprecationDigest(deps)
+
+    expect(result).toEqual({ created: 1, notified: 1, spared: 15 })
+    expect(notify).toHaveBeenCalledTimes(1)
+    const call = notify.mock.calls[0]![0]
+    expect(call.body.length).toBeLessThanOrEqual(4096)
+    expect(call.body).toContain('judge spared 15:')
+    await expect(notify.mock.results[0]!.value).resolves.toBe(true) // actually sent, not a 400
+  })
+
+  it('fix: an untrusted title with newlines / at Shopify max length is collapsed to one truncated line and still renders', async () => {
+    const rawTitle = `Breaking\nNews ${'x'.repeat(250)}` // newline + 263 chars total
+    const pid = await seedProduct({ title: rawTitle })
+    const propId = await seedProposal(pid, { status: 'pending', reasoning: 'short' })
+
+    const { deps, notify } = makeDeps()
+    await runWeeklyDeprecationDigest(deps)
+
+    expect(notify).toHaveBeenCalledTimes(1)
+    const body = notify.mock.calls[0]![0].body
+    expect(body).toContain('Breaking News x') // whitespace collapsed to a single line
+    expect(body).not.toContain('Breaking\nNews') // the raw newline never reaches the body
+    expect(body).toContain(`${ADMIN}/admin/proposals/${propId}`) // line still renders its deep link
+    // The rendered title is capped at TITLE_MAX_CHARS (+ ellipsis), never the full 263 chars.
+    expect(body).not.toContain('x'.repeat(TITLE_MAX_CHARS + 20))
   })
 
   it('advisory lock: the body runs inside a transaction that acquires pg_advisory_xact_lock(scoring-digest)', async () => {

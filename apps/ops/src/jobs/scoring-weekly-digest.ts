@@ -19,10 +19,26 @@ export const SCORING_WEEKLY_QUEUE = 'scoring.weekly-digest'
 /** Per-line reason cap in the digest body — a stored `reasoning` string can be arbitrarily long
  *  (the judge writes it), and one runaway line must not blow the Telegram body past its limit. */
 export const REASON_MAX_CHARS = 200
+/** Per-field cap on the UNTRUSTED product title (supplier/sourcing data) BEFORE it enters either a
+ *  body line or the spare footer — the submit.ts `SUBJECT_MAX_CHARS` precedent. Without it a long
+ *  title pushes a listed proposal's deep link past the body cap (silently stamped-but-never-shown)
+ *  or, in the never-truncated footer tail, past Telegram's 4096-char limit (permanent send failure). */
+export const TITLE_MAX_CHARS = 80
+/** Hard cap on how many proposals are RENDERED — and therefore STAMPED — per digest. Chosen so a
+ *  full batch of worst-case lines (title 80 + reason 200 + a realistic deep link) fits comfortably
+ *  under `BODY_MAX_CHARS`; the "…and M more" overflow carries the rest to the next run, and
+ *  per-rendered stamping (never the overflow) drains that backlog safely. */
+export const LISTED_CAP = 8
 
-/** Mirror of `support/escalate.ts`: cap what's RENDERED into the one message, not what's stamped —
- *  the "…and M more" overflow line carries the rest. */
-const MAX_LISTED_IN_BODY = 10
+/** Hard backstop under Telegram's ~4096-char limit (mirror `support/escalate.ts`'s own
+ *  `BODY_MAX_CHARS` and submit.ts's `NOTIFY_BODY_MAX_CHARS`). The body is BUILT to fit this rather
+ *  than relying on a final head-slice, so a rendered line's deep link is never truncated off. */
+const BODY_MAX_CHARS = 3500
+/** Cap on the assembled spare footer (the never-truncated `capNotifyBody` tail) so it alone can
+ *  never eat the whole budget. */
+const FOOTER_MAX_CHARS = 400
+/** Room reserved for a trailing "…and M more" line while packing, so appending it can't overflow. */
+const OVERFLOW_LINE_RESERVE = 24
 
 export interface ScoringWeeklyDeps {
   db: Db
@@ -200,7 +216,7 @@ async function executeDigest(
   }
 
   // Step 7 — re-runnable notify (recovery-safe), ALWAYS run.
-  const notified = await notifyPending(db, tx, alert, adminBaseUrl, deps.notify, honoredSpares)
+  const notified = await notifyPending(db, tx, adminBaseUrl, deps.notify, honoredSpares)
 
   return { created, notified, spared: honoredSpares.length }
 }
@@ -366,18 +382,28 @@ async function applyJudge(
   return { finalSurvivors, spared }
 }
 
+/** Collapse whitespace (a title is UNTRUSTED and may contain newlines) to one line, then cap with an
+ *  ellipsis — the submit.ts `truncateField` precedent, applied to a title BEFORE it enters a body
+ *  line or the footer so it can never push a mandatory deep link / the footer past the cap. */
+function oneLineField(value: string, max: number): string {
+  const flat = value.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
+}
+
 /**
  * Step 7: the recovery-safe notify. Selects ALL `pending` `deprecate_product` proposals that lack a
- * `scoring.deprecation_notified` audit row, builds ONE bounded Telegram body (listed cap + "…and M
- * more" overflow, mirror of `support/escalate.ts`), and — ONLY when `notify()` returns true — stamps
- * a `scoring.deprecation_notified` audit row per LISTED proposal. A false send leaves the batch
- * unstamped so the next run re-lists it; the proposals themselves are already committed, so a failed
- * send never loses the week's work.
+ * `scoring.deprecation_notified` audit row, then PACKS lines into ONE Telegram body up to both
+ * `LISTED_CAP` and the char budget — with every field pre-bounded (`TITLE_MAX_CHARS`,
+ * `REASON_MAX_CHARS`) so a full batch always renders every line intact, deep link included. Only the
+ * proposals whose line is actually RENDERED get stamped `scoring.deprecation_notified`; the "…and M
+ * more" overflow (both over-cap and over-budget) stays unstamped so it re-surfaces next run. The
+ * spare footer is pre-capped to `FOOTER_MAX_CHARS` so the never-truncated `capNotifyBody` tail can't
+ * blow past Telegram's limit and wedge the send forever. A false send stamps nothing — the proposals
+ * are already committed, so a failed send never loses the week's work.
  */
 async function notifyPending(
   db: Db,
   tx: Tx,
-  alert: Alert,
   adminBaseUrl: string,
   notify: NotifyOwner,
   honoredSpares: { productId: string; title: string | null }[],
@@ -398,24 +424,42 @@ async function notifyPending(
 
   if (pending.length === 0) return 0
 
-  const listed = pending.slice(0, MAX_LISTED_IN_BODY)
-  const lines = listed.map((r) => {
+  const buildLine = (r: (typeof pending)[number]): string => {
     const ev = ((r.payload as { evidence?: Record<string, unknown> } | null)?.evidence ?? {}) as Record<string, unknown>
     const units = Number(ev.unitsSold28d ?? 0)
     const refunds = Number(ev.refundCount28d ?? 0)
     const days = Number(ev.daysLive ?? 0)
     const rate = units > 0 ? Math.round((refunds / units) * 100) : 0
-    const reason = String(ev.reasoning ?? '').slice(0, REASON_MAX_CHARS)
-    const title = r.title ?? 'product'
+    const reason = oneLineField(String(ev.reasoning ?? ''), REASON_MAX_CHARS)
+    const title = oneLineField(r.title ?? 'product', TITLE_MAX_CHARS)
     return `${title} · ${days}d live · ${units}u 28d · ${rate}% refunds · ${reason} · ${adminBaseUrl}/admin/proposals/${r.id}`
-  })
-  const overflow = pending.length - listed.length
-  if (overflow > 0) lines.push(`…and ${overflow} more`)
+  }
 
-  const footer = honoredSpares.length > 0
-    ? `\n\njudge spared ${honoredSpares.length}: ${honoredSpares.map((s) => s.title ?? 'product').join(', ')}`
+  // Footer first (it's the never-truncated tail) so its length is known before packing lines, and
+  // hard-cap it — each spared title bounded, then the whole assembled footer bounded.
+  const footerRaw = honoredSpares.length > 0
+    ? `\n\njudge spared ${honoredSpares.length}: ${honoredSpares.map((s) => oneLineField(s.title ?? 'product', TITLE_MAX_CHARS)).join(', ')}`
     : ''
-  const body = capNotifyBody(lines.join('\n'), footer)
+  const footer = footerRaw.length > FOOTER_MAX_CHARS ? `${footerRaw.slice(0, FOOTER_MAX_CHARS)}…` : footerRaw
+
+  // Pack lines up to LISTED_CAP AND the head budget, reserving room for a trailing overflow line.
+  // Because every rendered line is committed only if the whole head still fits, a rendered line is
+  // never head-sliced away — so "shown" and "stamped" stay exactly in sync.
+  const headBudget = BODY_MAX_CHARS - footer.length - OVERFLOW_LINE_RESERVE
+  const renderedLines: string[] = []
+  const rendered: typeof pending = []
+  for (const r of pending) {
+    if (rendered.length >= LISTED_CAP) break
+    const candidate = [...renderedLines, buildLine(r)].join('\n')
+    if (candidate.length > headBudget) break
+    renderedLines.push(buildLine(r))
+    rendered.push(r)
+  }
+
+  const overflow = pending.length - rendered.length
+  if (overflow > 0) renderedLines.push(`…and ${overflow} more`)
+
+  const body = capNotifyBody(renderedLines.join('\n'), footer)
 
   const ok = await notify({
     title: `${pending.length} products flagged to deprecate`,
@@ -424,12 +468,13 @@ async function notifyPending(
   })
   if (!ok) return 0
 
-  for (const r of listed) {
+  // Stamp ONLY the proposals actually shown — never the overflow, so it re-lists next run.
+  for (const r of rendered) {
     await db.insert(auditLog).values({
       actor: 'system', action: 'scoring.deprecation_notified', entityType: 'proposal', entityId: r.id, detail: {},
     })
   }
-  return listed.length
+  return rendered.length
 }
 
 /**
