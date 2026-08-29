@@ -30,6 +30,19 @@ function refundPayload(amountCents: number, orderId: string = crypto.randomUUID(
   }
 }
 
+function deprecateProductPayload(productId: string = crypto.randomUUID()) {
+  return {
+    type: 'deprecate_product',
+    productId,
+    evidence: {
+      unitsSold28d: 0,
+      refundCount28d: 0,
+      ticketCount28d: 0,
+      daysLive: 30,
+    },
+  }
+}
+
 describe('submitProposal', () => {
   const { db, pool } = createDb(url)
 
@@ -615,5 +628,129 @@ describe('submitProposal', () => {
     const body = sent[0]!.body
     expect(body.length).toBeLessThanOrEqual(3500)
     expect(body).toContain(`https://ops.test/admin/proposals/${result.id}`)
+  })
+
+  // -- Task 4: `suppressNotify` opt --------------------------------------------------------------
+
+  it('manual mode with opts.suppressNotify: lands pending, actionTokenHash NULL, notify NOT called, audit still written', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const productId = crypto.randomUUID()
+
+    const result = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'deprecate_product',
+        summary: 'Deprecate: X',
+        payload: deprecateProductPayload(productId),
+        sourceWorkflow: 'scoring',
+        productId,
+      },
+      { suppressNotify: true },
+    )
+
+    expect(result.status).toBe('pending')
+    expect(sent).toHaveLength(0)
+
+    const [row] = await db.select().from(proposals).where(eq(proposals.id, result.id))
+    expect(row).toBeDefined()
+    expect(row!.actionTokenHash).toBeNull()
+    expect(row!.autoApproved).toBe(false)
+
+    const auditRows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, 'proposal.created'), eq(auditLog.entityId, result.id)))
+    expect(auditRows).toHaveLength(1)
+    expect(auditRows[0]).toMatchObject({
+      actor: 'system',
+      action: 'proposal.created',
+      entityType: 'proposal',
+      entityId: result.id,
+      detail: { type: 'deprecate_product', sourceWorkflow: 'scoring', mode: 'manual' },
+    })
+  })
+
+  it('manual mode WITHOUT suppressNotify (same payload/type): still tokens + notifies as before', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+    const productId = crypto.randomUUID()
+
+    const result = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'deprecate_product',
+        summary: 'Deprecate: X',
+        payload: deprecateProductPayload(productId),
+        sourceWorkflow: 'scoring',
+        productId,
+      },
+    )
+
+    expect(result.status).toBe('pending')
+    expect(sent).toHaveLength(1)
+
+    const [row] = await db.select().from(proposals).where(eq(proposals.id, result.id))
+    expect(row!.actionTokenHash).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  it('manual mode with suppressNotify AND no adminBaseUrl: still no notify, no notify_unconfigured alert either', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn(async () => {})
+    const productId = crypto.randomUUID()
+
+    const result = await submitProposal(
+      { db, settings, notify, enqueue, alert },
+      {
+        type: 'deprecate_product',
+        summary: 'Deprecate: X',
+        payload: deprecateProductPayload(productId),
+        sourceWorkflow: 'scoring',
+        productId,
+      },
+      { suppressNotify: true },
+    )
+
+    expect(result.status).toBe('pending')
+    expect(sent).toHaveLength(0)
+    expect(alert).not.toHaveBeenCalled()
+
+    const [row] = await db.select().from(proposals).where(eq(proposals.id, result.id))
+    expect(row!.actionTokenHash).toBeNull()
+  })
+
+  it('auto mode ignores suppressNotify (irrelevant on the auto path — no notify either way)', async () => {
+    const settings = createSettings(db)
+    const { notify, sent } = createCaptureNotifier()
+    const enqueue = vi.fn(async () => {})
+    const alert = vi.fn()
+
+    await settings.set('workflow.deprecation.mode', 'auto')
+    try {
+      const productId = crypto.randomUUID()
+      const result = await submitProposal(
+        { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+        {
+          type: 'deprecate_product',
+          summary: 'Deprecate: X',
+          payload: deprecateProductPayload(productId),
+          sourceWorkflow: 'scoring',
+          productId,
+        },
+        { suppressNotify: true },
+      )
+
+      expect(result.status).toBe('approved')
+      expect(sent).toHaveLength(0)
+      expect(enqueue).toHaveBeenCalledTimes(1)
+    } finally {
+      await settings.set('workflow.deprecation.mode', 'manual')
+    }
   })
 })

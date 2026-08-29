@@ -248,10 +248,22 @@ export interface SubmitProposalInput {
  * amount cap override that forces manual even when the setting says auto), persists the
  * proposals row, writes the audit trail, and — manual only — notifies the owner with a
  * one-click approve/reject pair sharing a single action token.
+ *
+ * `opts.suppressNotify` (Task 4): manual-path-only escape hatch for callers that want the
+ * pending proposal + audit row persisted WITHOUT an owner push — e.g. a caller that's about to
+ * fold several proposals into a single digest notification of its own, where per-proposal
+ * Telegram pushes would be redundant noise. When true, the `generateActionToken()` mint and
+ * `deps.notify(...)` call are both skipped (no orphaned token hash sitting unused in the row),
+ * and since there's nothing to notify, the `adminBaseUrl`-absent `notify_unconfigured` alert is
+ * skipped too — that alert exists to flag a MISSING push, not to fire when no push was ever
+ * intended. Auto mode has no notify step regardless (it enqueues apply), so `suppressNotify` is
+ * a no-op there. Optional + defaulted so the ~5 existing 2-arg callers and the `submit: typeof
+ * submitProposal` injection seam used elsewhere are unaffected.
  */
 export async function submitProposal(
   deps: SubmitProposalDeps,
   input: SubmitProposalInput,
+  opts?: { suppressNotify?: boolean },
 ): Promise<{ id: string; status: 'pending' | 'approved' }> {
   const schema = PAYLOAD_SCHEMAS[input.type]
   const parsed = schema.parse(input.payload) as { amountCents?: number }
@@ -267,7 +279,8 @@ export async function submitProposal(
   }
 
   if (mode === 'manual') {
-    const { token, hash } = generateActionToken()
+    const suppressNotify = opts?.suppressNotify ?? false
+    const { token, hash } = suppressNotify ? { token: null, hash: null } : generateActionToken()
 
     const [row] = await deps.db
       .insert(proposals)
@@ -295,27 +308,29 @@ export async function submitProposal(
       detail: { type: input.type, sourceWorkflow: input.sourceWorkflow, mode: 'manual' },
     })
 
-    if (deps.adminBaseUrl) {
-      const approveUrl = `${deps.adminBaseUrl}/a/${id}/approve?t=${token}`
-      const rejectUrl = `${deps.adminBaseUrl}/a/${id}/reject?t=${token}`
-      const body = await buildProposalNotifyBody(input.type, parsed, {
-        db: deps.db,
-        id,
-        summary: input.summary,
-        adminBaseUrl: deps.adminBaseUrl,
-        ticketId: input.ticketId,
-      })
+    if (!suppressNotify) {
+      if (deps.adminBaseUrl) {
+        const approveUrl = `${deps.adminBaseUrl}/a/${id}/approve?t=${token}`
+        const rejectUrl = `${deps.adminBaseUrl}/a/${id}/reject?t=${token}`
+        const body = await buildProposalNotifyBody(input.type, parsed, {
+          db: deps.db,
+          id,
+          summary: input.summary,
+          adminBaseUrl: deps.adminBaseUrl,
+          ticketId: input.ticketId,
+        })
 
-      await deps.notify({
-        title: `New ${input.type} proposal`,
-        body,
-        actions: [
-          { label: 'Approve', url: approveUrl },
-          { label: 'Reject', url: rejectUrl },
-        ],
-      })
-    } else {
-      await deps.alert('warning', 'notify_unconfigured', { proposalId: id })
+        await deps.notify({
+          title: `New ${input.type} proposal`,
+          body,
+          actions: [
+            { label: 'Approve', url: approveUrl },
+            { label: 'Reject', url: rejectUrl },
+          ],
+        })
+      } else {
+        await deps.alert('warning', 'notify_unconfigured', { proposalId: id })
+      }
     }
 
     return { id, status: 'pending' }
