@@ -301,7 +301,8 @@ describe('support agent E2E: mailbox -> agent -> owner -> mailbox', () => {
         modelUsage: { [SUPPORT_MODEL]: { costUSD: 0.02 } },
         num_turns: 2,
         session_id: E2E_SESSION_ID,
-        structured_output: output,
+        // The real API/harness receives the ENVELOPE ({ decision: <union> }); the runner unwraps it.
+        structured_output: { decision: output },
       }
     })()
   }

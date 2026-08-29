@@ -45,9 +45,21 @@ export const SupportOutputSchema = z.discriminatedUnion('outcome', [
 export type SupportOutput = z.infer<typeof SupportOutputSchema>
 
 /**
- * JSON Schema handed to the SDK as `outputFormat.schema`. Bridged from the zod schema via
- * `z.toJSONSchema` (zod v4) so the model's structured-output contract stays in lockstep with the
- * zod schema the runner parses the result against.
+ * API-facing ENVELOPE. `SupportOutputSchema` is a discriminated union, which `z.toJSONSchema`
+ * renders as a top-level `oneOf` with NO `type` — and the Anthropic API rejects a tool /
+ * structured-output schema whose top level lacks `type: "object"` (`400
+ * tools.0.custom.input_schema.type: Field required`, found on the FIRST real support run during
+ * the 6B live Tier-2 walk — the stubbed-model unit tests could never see it). Wrapping the union
+ * in an object gives the schema a top-level `type: "object"`; the runner unwraps `.decision`
+ * immediately after parsing so every consumer still sees the flat `SupportOutput` union.
+ */
+export const SupportOutputEnvelopeSchema = z.object({ decision: SupportOutputSchema })
+export type SupportOutputEnvelope = z.infer<typeof SupportOutputEnvelopeSchema>
+
+/**
+ * JSON Schema handed to the SDK as `outputFormat.schema` (the ENVELOPE — see above). Bridged from
+ * the zod schema via `z.toJSONSchema` (zod v4) so the model's structured-output contract stays in
+ * lockstep with the zod schema the runner parses the result against.
  *
  * `target: 'draft-7'` is load-bearing: zod v4 defaults to draft-2020-12, and the Agent SDK's
  * subprocess validator (ajv) ships draft-07 as its built-in meta-schema but NOT 2020-12, so a
@@ -59,4 +71,4 @@ export type SupportOutput = z.infer<typeof SupportOutputSchema>
  * `refund_dispute_reason_required`) against the DB-backed refund object before anything is
  * submitted, same as every other rule in this file.
  */
-export const SUPPORT_OUTPUT_JSON_SCHEMA = z.toJSONSchema(SupportOutputSchema, { target: 'draft-7' })
+export const SUPPORT_OUTPUT_JSON_SCHEMA = z.toJSONSchema(SupportOutputEnvelopeSchema, { target: 'draft-7' })

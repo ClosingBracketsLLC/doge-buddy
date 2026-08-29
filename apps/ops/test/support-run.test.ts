@@ -286,7 +286,7 @@ describe('runSupportAgent — options assembly (stubbed queryFn)', () => {
         modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } },
         num_turns: 1,
         session_id: 's1',
-        structured_output: { outcome: 'no_action', rationale: 'Nothing actionable yet.' },
+        structured_output: { decision: { outcome: 'no_action', rationale: 'Nothing actionable yet.' } },
       }
     })()
   }

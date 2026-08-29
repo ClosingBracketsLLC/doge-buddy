@@ -4,7 +4,7 @@ import { type createDb } from '@doge-buddy/db'
 import { dmarcPasses } from '../support/validator.ts'
 import { runAgentQuery, type HarnessResult, type QueryFn } from './run-harness.ts'
 import { SUPPORT_PROJECT_KEY } from './session-store.ts'
-import { SUPPORT_OUTPUT_JSON_SCHEMA, SupportOutputSchema, type SupportOutput } from './support-output-schema.ts'
+import { SUPPORT_OUTPUT_JSON_SCHEMA, SupportOutputEnvelopeSchema, type SupportOutput } from './support-output-schema.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -244,9 +244,11 @@ export async function runSupportAgent(
       persistSession: true,
       alertKinds: { invalidOutput: 'support_output_invalid', runFailed: 'support_run_failed' },
     },
+    // The API returns the ENVELOPE ({ decision: <union> }); unwrap `.decision` so `result.output`
+    // is the flat SupportOutput union every consumer already reads (validator, outcome handler).
     (raw) => {
-      const parsed = SupportOutputSchema.safeParse(raw)
-      return parsed.success ? { success: true, data: parsed.data } : { success: false, issues: parsed.error.issues }
+      const parsed = SupportOutputEnvelopeSchema.safeParse(raw)
+      return parsed.success ? { success: true, data: parsed.data.decision } : { success: false, issues: parsed.error.issues }
     },
   )
 }

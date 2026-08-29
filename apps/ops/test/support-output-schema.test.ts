@@ -148,4 +148,11 @@ describe('SUPPORT_OUTPUT_JSON_SCHEMA', () => {
     const schemaField = (SUPPORT_OUTPUT_JSON_SCHEMA as { $schema?: string }).$schema
     expect(schemaField).toContain('draft-07')
   })
+
+  it('has a top-level type "object" (the Anthropic API rejects a bare oneOf — the 6B live Tier-2 bug)', () => {
+    // A discriminated union serializes to a top-level `oneOf` with no `type`, which the API
+    // refuses as `400 input_schema.type: Field required`. The envelope wrapper restores `type`.
+    expect((SUPPORT_OUTPUT_JSON_SCHEMA as { type?: string }).type).toBe('object')
+    expect((SUPPORT_OUTPUT_JSON_SCHEMA as { properties?: Record<string, unknown> }).properties).toHaveProperty('decision')
+  })
 })
