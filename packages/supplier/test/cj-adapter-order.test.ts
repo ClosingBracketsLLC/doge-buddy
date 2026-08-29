@@ -383,6 +383,37 @@ describe('CJSupplierAdapter.subscribeProductWebhook', () => {
   })
 })
 
+describe('CJSupplierAdapter.unsubscribeProductWebhook', () => {
+  it('posts the pid list to /webhook/product/unsubscribe', async () => {
+    const { adapter, calls } = await makeAdapter(() => ok({}))
+    await adapter.unsubscribeProductWebhook('x')
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe(`${BASE}/webhook/product/unsubscribe`)
+    expect(bodyOf(calls[0]!)).toEqual({ productIdList: ['x'] })
+  })
+
+  it.each([
+    ['product not subscribed'],
+    ['product not found'],
+    ['Product Not Exist'],
+  ])('treats a CJ not-found/not-subscribed response (message: %s) as success (no throw)', async (message) => {
+    const { adapter } = await makeAdapter(() =>
+      new Response(envelope(null, { code: 1600200, result: false, message }), { status: 200 }),
+    )
+    await expect(adapter.unsubscribeProductWebhook('pid-1')).resolves.toBeUndefined()
+  })
+
+  it('propagates CjApiError for envelope errors that do not look like not-found/not-subscribed', async () => {
+    const { adapter } = await makeAdapter(() =>
+      new Response(envelope(null, { code: 500, result: false, message: 'server error' }), { status: 200 }),
+    )
+    const err = await adapter.unsubscribeProductWebhook('pid-1').catch((e) => e)
+    expect(err).toBeInstanceOf(CjApiError)
+    expect(err.code).toBe(500)
+  })
+})
+
 describe('CJSupplierAdapter.verifyWebhook', () => {
   const openId = 'cj-open-id-123'
   const rawBody = Buffer.from(JSON.stringify({ type: 'ORDER', orderId: 'cjo-1' }))

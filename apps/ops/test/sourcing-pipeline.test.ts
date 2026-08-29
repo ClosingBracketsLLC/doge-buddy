@@ -94,6 +94,7 @@ function makeAdapter(specs: ProductSpec[]): SupplierAdapter {
       return notImplemented()
     },
     async subscribeProductWebhook() {},
+    async unsubscribeProductWebhook() {},
   }
 }
 
