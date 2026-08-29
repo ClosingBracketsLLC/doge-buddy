@@ -22,6 +22,15 @@ export const SETTINGS_DEFAULTS = {
   'workflow.deprecation.mode': 'manual',
   'refund.auto_max_cents': 2500,
   'workflow.support.enabled': true,
+  'workflow.scoring.enabled': true,
+  'scoring.judge_enabled': true,
+  'scoring.deprecate_after_days': 21,
+  'scoring.min_units_28d': 1,
+  'scoring.max_refund_rate_bps': 2500,
+  'scoring.refund_rate_min_orders': 4,
+  'scoring.reject_cooldown_days': 30,
+  'scoring.fail_cooldown_days': 7,
+  'scoring.max_fail_attempts': 3,
 }
 // Deliberately no `as const`/`satisfies` here: either narrows the boolean properties down
 // to their literal default (e.g. `false` instead of `boolean`), which would make `set()`
@@ -34,6 +43,8 @@ type BooleanSettingKey =
   | 'workflow.fulfillment.enabled'
   | 'fulfillment.paused_for_funds'
   | 'workflow.support.enabled'
+  | 'workflow.scoring.enabled'
+  | 'scoring.judge_enabled'
 type ModeSettingKey =
   | 'workflow.sourcing.mode'
   | 'workflow.support_reply.mode'

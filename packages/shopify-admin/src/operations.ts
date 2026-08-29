@@ -96,6 +96,38 @@ export async function publishablePublish(
 }
 
 // ---------------------------------------------------------------------------
+// publishableUnpublish
+// ---------------------------------------------------------------------------
+
+// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:
+//  - The `publishableUnpublish` mutation shape is identical to `publishablePublish` except for
+//    the operation name. Until a real deprecation run, the API version and field shapes are
+//    unverified.
+const PUBLISHABLE_UNPUBLISH_MUTATION = `#graphql
+  mutation PublishableUnpublish($id: ID!, $input: [PublicationInput!]!) {
+    publishableUnpublish(id: $id, input: $input) {
+      userErrors { field message }
+    }
+  }
+`
+
+interface PublishableUnpublishData {
+  publishableUnpublish: { userErrors: ShopifyUserErrorEntry[] }
+}
+
+export async function publishableUnpublish(
+  client: ShopifyAdminClient,
+  publishableId: string,
+  publicationId: string,
+): Promise<void> {
+  const data = await client.graphql<PublishableUnpublishData>(PUBLISHABLE_UNPUBLISH_MUTATION, {
+    id: publishableId,
+    input: [{ publicationId }],
+  })
+  assertNoUserErrors(data, 'publishableUnpublish')
+}
+
+// ---------------------------------------------------------------------------
 // inventorySetQuantities
 // ---------------------------------------------------------------------------
 

@@ -1,4 +1,10 @@
-import { formatCents, type NewListingPayload, type RefundPayload, type SupportReplyPayload } from '@doge-buddy/core'
+import {
+  formatCents,
+  type DeprecateProductPayload,
+  type NewListingPayload,
+  type RefundPayload,
+  type SupportReplyPayload,
+} from '@doge-buddy/core'
 import type { proposals } from '@doge-buddy/db'
 import { validateDescriptionHtml } from '../../sourcing/guards.ts'
 import { html, raw, type RawHtml } from './html.ts'
@@ -125,6 +131,9 @@ export interface ProposalDetailExtras {
   /** The `refundId` off a `proposal.refund_issued` audit row, when one exists (Task 16 note) —
    * present exactly when money actually moved, regardless of the proposal's current status. */
   refundIssuedId?: string | null
+  /** The `products.title` for a `deprecate_product` proposal's `productId`, when the product row
+   * still exists — null/undefined falls back to showing the bare productId. */
+  productTitle?: string | null
 }
 
 /**
@@ -147,12 +156,40 @@ function renderRefundSummary(payload: unknown, extras: ProposalDetailExtras): Ra
 }
 
 /**
+ * `deprecate_product`'s human summary (Task 11 scoring): the product (title when known off
+ * `extras.productTitle`, else the bare `productId` — no `/admin/products/:id` route exists yet
+ * to link to) plus the raw evidence numbers the scoring job persisted (units/refunds/tickets
+ * over the trailing 28 days, days live) and the judge/deterministic `reasoning` string.
+ * Deliberately NOT a computed refund *rate*: the payload only carries a refund *count*, not the
+ * order count a rate would need, so rendering one here would just be a fabricated number — the
+ * raw counts are exactly what the payload can support. Like `renderRefundSummary`, deliberately
+ * NO edit form: see `renderDecisionForms`'s `deprecate_product` branch.
+ */
+function renderDeprecateProductSummary(payload: unknown, extras: ProposalDetailExtras): RawHtml {
+  const p = payload as Partial<DeprecateProductPayload>
+  const evidence = p.evidence ?? ({} as Partial<DeprecateProductPayload['evidence']>)
+  const productLabel = extras.productTitle ?? p.productId ?? 'unknown'
+  return html`<section>
+    <h3>Deprecation evidence</h3>
+    <p>Product: ${productLabel} (${p.productId ?? ''})</p>
+    <p>Units sold (28d): ${evidence.unitsSold28d ?? 0}</p>
+    <p>Refunds (28d): ${evidence.refundCount28d ?? 0}</p>
+    <p>Tickets (28d): ${evidence.ticketCount28d ?? 0}</p>
+    <p>Days live: ${evidence.daysLive ?? 0}</p>
+    <p>Reasoning: ${evidence.reasoning ?? ''}</p>
+  </section>`
+}
+
+/**
  * Approve / reject / edit-then-approve forms, rendered only for pending rows. All three post to
  * the Task 4 session-authed decision routes (`/admin/proposals/:id/approve|reject`).
  *
  * Task 18 splits the edit-then-approve form by type instead of one shape for every type:
  *  - `refund`: NO edit form at all — approve/reject buttons only (a refund amount/order is not
  *    something to hand-edit from a textarea; see `renderRefundSummary`'s own doc comment).
+ *  - `deprecate_product` (Task 11 scoring): same as `refund` — NO edit form. The payload is
+ *    scoring-computed evidence (unit/refund/ticket counts, days live, reasoning), not something
+ *    an owner should hand-edit from a raw-JSON textarea; see `renderDeprecateProductSummary`.
  *  - `support_reply`: the raw-JSON `payload` textarea is SUPPRESSED — a body-only `body` textarea
  *    replaces it (form field name `body`), so an owner editing a reply can only ever touch the
  *    text that will send, never smuggle a different `ticketId`/`threadSnapshotAt` through the edit
@@ -174,6 +211,10 @@ function renderDecisionForms(p: ProposalRow): RawHtml {
     </form>`
 
   if (p.type === 'refund') {
+    return approveReject
+  }
+
+  if (p.type === 'deprecate_product') {
     return approveReject
   }
 
@@ -220,7 +261,9 @@ export function renderProposalDetail(p: ProposalRow, extras: ProposalDetailExtra
         ? renderSupportReplyPreview(p.payload)
         : p.type === 'refund'
           ? renderRefundSummary(p.payload, extras)
-          : renderGenericPayload(p.payload)
+          : p.type === 'deprecate_product'
+            ? renderDeprecateProductSummary(p.payload, extras)
+            : renderGenericPayload(p.payload)
 
   const actions =
     p.status === 'pending' ? renderDecisionForms(p) : p.status === 'approved' ? renderResendForm(p) : html``

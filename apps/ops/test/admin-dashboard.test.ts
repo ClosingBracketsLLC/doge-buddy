@@ -1,4 +1,4 @@
-import { agentRuns, auditLog, createDb, gmailSyncState, proposals, settings, supportTickets } from '@doge-buddy/db'
+import { agentRuns, auditLog, createDb, gmailSyncState, products, productScores, proposals, settings, supportTickets } from '@doge-buddy/db'
 import { and, count, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
@@ -45,6 +45,7 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
   let createdProposalIds: string[] = []
   let createdRunIds: string[] = []
   let createdAuditLogIds: bigint[] = []
+  let createdProductIds: string[] = []
 
   afterEach(async () => {
     if (createdProposalIds.length > 0) {
@@ -59,6 +60,12 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     if (createdAuditLogIds.length > 0) {
       await db.delete(auditLog).where(inArray(auditLog.id, createdAuditLogIds))
       createdAuditLogIds = []
+    }
+    if (createdProductIds.length > 0) {
+      // product_scores has no ON DELETE CASCADE off products — scores go first.
+      await db.delete(productScores).where(inArray(productScores.productId, createdProductIds))
+      await db.delete(products).where(inArray(products.id, createdProductIds))
+      createdProductIds = []
     }
     // Restore the killswitch setting to its code default so later tests (in this file or any
     // other) never observe a row this file left behind.
@@ -150,6 +157,24 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
       .returning({ id: auditLog.id })
     createdAuditLogIds.push(row!.id)
     return row!
+  }
+
+  async function seedProduct(title = 'Test Product') {
+    const [row] = await db
+      .insert(products)
+      .values({
+        shopifyProductGid: `gid://shopify/Product/${crypto.randomUUID()}`,
+        handle: `h-${crypto.randomUUID()}`,
+        title,
+        status: 'active',
+      })
+      .returning()
+    createdProductIds.push(row!.id)
+    return row!
+  }
+
+  async function seedScoreRow(productId: string, scoreDate: string) {
+    await db.insert(productScores).values({ productId, scoreDate })
   }
 
   it('1. unauthenticated GET /admin -> 303 to login', async () => {
@@ -387,6 +412,35 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     expect(res.body).toContain(`support agent: 3 runs today / ${SUPPORT_AGENT_MAX_RUNS_PER_DAY}`)
     expect(res.body).toContain('support agent last run: succeeded')
     void run
+
+    await app.close()
+  })
+
+  // A fixed FAR-FUTURE score_date, not "today" — this environment's shared test DB can carry
+  // pre-existing `product_scores` residue from an interrupted prior run of scoring-nightly/
+  // scoring-weekly-digest's own suites (their own afterEach/afterAll do clean up, so this is
+  // leftover from something not exiting cleanly, not a design gap in this file). Anchoring on a
+  // date years past any real or leftover row keeps this test's "newest" assertion deterministic
+  // regardless of that residue, without this file reaching in to truncate a table it doesn't own.
+  const FAR_FUTURE_SCORE_DATE = '2099-12-31'
+
+  it('13. scoring health row shows the newest score_date and the count of products scored that day', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const p1 = await seedProduct('Product One')
+    const p2 = await seedProduct('Product Two')
+    const p3 = await seedProduct('Product Three')
+    // Older date — must not be counted toward "newest".
+    await seedScoreRow(p3.id, '2026-08-01')
+    await seedScoreRow(p1.id, FAR_FUTURE_SCORE_DATE)
+    await seedScoreRow(p2.id, FAR_FUTURE_SCORE_DATE)
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain(`scoring: last run ${FAR_FUTURE_SCORE_DATE}, 2 products scored`)
 
     await app.close()
   })

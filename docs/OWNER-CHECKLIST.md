@@ -96,6 +96,22 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   gone), and the `refunds` list is **not page-capped** (we select it as a plain unpaginated list;
   if the live API paginates it instead, a busy order could hide our own prior refund and re-pay).
 
+## Phase 7 scoring (built — nothing you must do)
+
+The product-scoring subsystem is built and reviewed. What it means for you day one:
+
+- **Nightly scoring is live and observing from launch.** Every night it writes one `product_scores`
+  row per active product (keep / watch / deprecate) — pure measurement, it never acts on anything.
+- **The weekly deprecation digest stays SILENT until your store's first real paid order.** A
+  pre-revenue gate means no deprecation Telegram, no proposal, nothing, until real revenue exists —
+  so a brand-new store is never told to deprecate the catalog it just launched.
+- **Deprecation is manual-mode by default — nothing acts without your tap.** Once revenue exists, the
+  Monday digest can flag an underperformer, but it only ever creates a *proposal*; the product is
+  drafted + unpublished + its CJ webhook torn down solely after you approve it, exactly like every
+  other proposal. (An `auto` mode exists in settings but is off.)
+- **Optional, anytime:** a `scoring.nightly` dry-run against Railway just writes today's
+  `product_scores` and takes no action — safe to trigger whenever you want to see the verdicts early.
+
 ## Phase 1–3 window
 
 - [x] ~~Railway account + deploy ops.~~ **Done (2026-08-23):** ops + Postgres live at `https://doge-buddyops-production.up.railway.app` — healthz green (`db:ok, queue:ok`), demo job processed on the deployed instance (**Phase 0 exit criterion closed**), and the webhook-audit cron self-registered all three Shopify webhook topics (ORDERS_PAID, ORDERS_CANCELLED, REFUNDS_CREATE) at the Railway URL. *Follow-up closed same day:* CJ webhooks are registered and **proven end-to-end live** — the diagnostic capture revealed the signature rides in the `sign` header (fixed in 2a2e0e5), registration then succeeded, and real sandbox-order events flowed CJ → HMAC verified → recorded → processed on the deployed instance. Nothing on the CJ adapter remains unverified except dispute-write bodies and STOCK/PRODUCT event shapes.

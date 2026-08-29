@@ -308,6 +308,14 @@ export class MockSupplierAdapter implements SupplierAdapter {
     this.subscribedProductIds.push(supplierProductId)
   }
 
+  /** Removes one recorded occurrence of `supplierProductId` if present; a no-op (never throws)
+   * for an id that was never subscribed — mirrors subscribeProductWebhook's best-effort
+   * semantics on the way in. */
+  async unsubscribeProductWebhook(supplierProductId: string): Promise<void> {
+    const index = this.subscribedProductIds.indexOf(supplierProductId)
+    if (index !== -1) this.subscribedProductIds.splice(index, 1)
+  }
+
   verifyWebhook(_rawBody: Buffer, _headers: Record<string, string | string[] | undefined>): boolean {
     return true
   }

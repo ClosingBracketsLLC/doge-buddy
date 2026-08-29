@@ -43,6 +43,15 @@ export interface ProposalShopifyOps {
   listPublications(): Promise<{ id: string; name: string }[]>
   publishablePublish(productId: string, publicationId: string): Promise<void>
   /**
+   * Removes a product from a single publication (`deprecate_product`'s apply, Task 10). The
+   * mirror of `publishablePublish` above and shaped identically — one call per publication in
+   * `listPublications()`'s result. Unlike the publish loop, NO publication is required to succeed:
+   * the product has already been flipped to `DRAFT` by the time this runs (which alone hides it
+   * from every sales channel), so a failed unpublish is alert-and-continue, never a throw — see
+   * `applyDeprecateProduct`.
+   */
+  publishableUnpublish(productGid: string, publicationId: string): Promise<void>
+  /**
    * Looks up a product's current variants (id + sku) directly from Shopify. Needed on every
    * *resume* path — local row already exists, or `findProductByHandle` found it — where the
    * pipeline never called `productSet` this run and so never got a fresh `variants` array back:
@@ -79,10 +88,11 @@ export interface ApplyProposalDeps {
   /**
    * The supplier-adapter surface the executors need: `subscribeProductWebhook` for `new_listing`'s
    * post-apply CJ webhook subscribe, `getDisputeOptions`/`openDispute` for `refund`'s apply
-   * (Task 16). A strict, hand-picked subset of `SupplierAdapter`'s full surface, same spirit as
+   * (Task 16), `unsubscribeProductWebhook` for `deprecate_product`'s safe post-apply CJ unsubscribe
+   * (Task 10). A strict, hand-picked subset of `SupplierAdapter`'s full surface, same spirit as
    * `ProposalShopifyOps` above.
    */
-  adapter: Pick<SupplierAdapter, 'subscribeProductWebhook' | 'getDisputeOptions' | 'openDispute'>
+  adapter: Pick<SupplierAdapter, 'subscribeProductWebhook' | 'unsubscribeProductWebhook' | 'getDisputeOptions' | 'openDispute'>
   /**
    * Gmail client backing `support_reply`'s apply (Task 15). `null` when Gmail isn't configured —
    * `applySupportReply` must fail loudly (alert) in that case, never throw a bare `TypeError` on a

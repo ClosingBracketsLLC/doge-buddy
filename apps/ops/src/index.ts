@@ -11,6 +11,7 @@ import {
   productSet,
   productVariantsByProductId,
   publishablePublish,
+  publishableUnpublish,
   refundCreate,
   ShopifyAdminClient,
   ShopifyTokenManager,
@@ -29,6 +30,8 @@ import { cjDisputePollHandler, type DisputePollDeps } from './jobs/cj-dispute-po
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
+import { scoringNightlyHandler, SCORING_NIGHTLY_QUEUE, type ScoringNightlyDeps } from './jobs/scoring-nightly.ts'
+import { scoringWeeklyHandler, SCORING_WEEKLY_QUEUE, type ScoringWeeklyDeps } from './jobs/scoring-weekly-digest.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { sourcingWeeklyHandler } from './jobs/sourcing-weekly.ts'
 import { supportAgentRunHandler, SUPPORT_AGENT_QUEUE, type SupportAgentJobDeps } from './jobs/support-agent-run.ts'
@@ -37,6 +40,8 @@ import { loadDotEnv } from './load-env.ts'
 import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
 import { createTelegramNotifier } from './notify/telegram.ts'
 import type { ProposalShopifyOps, RefundOps } from './proposals/run-apply.ts'
+import { submitProposal, type SubmitProposalDeps } from './proposals/submit.ts'
+import { runDeprecationJudge } from './scoring/judge.ts'
 import { createQueueRetrying, registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
@@ -209,6 +214,7 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       productSet: (input) => productSet(shopifyClient, input),
       listPublications: () => listPublications(shopifyClient),
       publishablePublish: (productId, publicationId) => publishablePublish(shopifyClient, productId, publicationId),
+      publishableUnpublish: (productId, publicationId) => publishableUnpublish(shopifyClient, productId, publicationId),
       productVariantsByProductId: (productGid) => productVariantsByProductId(shopifyClient, productGid),
     }
   : {
@@ -216,6 +222,7 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       productSet: shopifyNotConfigured,
       listPublications: shopifyNotConfigured,
       publishablePublish: shopifyNotConfigured,
+      publishableUnpublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
     }
 
@@ -292,6 +299,39 @@ await registerCron(queue.boss, 'cj.dispute-poll', '0 */6 * * *', cjDisputePollHa
 // `proposal.expire-sweep` (Task 7): daily proposal expiry sweep — transitions any pending
 // proposals that have expired to 'expired' status and audits each transition.
 await registerCron(queue.boss, 'proposal.expire-sweep', '30 6 * * *', proposalExpireSweepHandler(db))
+
+// `scoring.nightly` (Phase 7, Task 7): nightly product-scoring sweep — computes and upserts one
+// `product_scores` row per active product for today's UTC date (`computeProductScores`, Task 6),
+// gated on `killswitch.global`/`workflow.scoring.enabled` inside `executeScoringNightly` itself.
+// Registered unconditionally, same as `cj.dispute-poll`/`proposal.expire-sweep` above — unlike
+// `sourcing.weekly` below, this cron has NO LLM step, so there is nothing here for
+// `ANTHROPIC_API_KEY` to gate.
+const scoringNightlyDeps: ScoringNightlyDeps = { db, settings, alert }
+await registerCron(queue.boss, SCORING_NIGHTLY_QUEUE, '0 3 * * *', scoringNightlyHandler(scoringNightlyDeps))
+app.log.info(`${SCORING_NIGHTLY_QUEUE} cron ARMED — 03:00 UTC daily`)
+
+// `scoring.weekly-digest` (Phase 7, Task 9): the Monday deprecation digest — pre-revenue gate,
+// freshness guard, cooldown-aware candidate selection, the Sonnet spare-judge, and a re-runnable
+// notify. Registered UNCONDITIONALLY (same as `scoring.nightly` above): unlike `sourcing.weekly`,
+// the LLM step here is INTERNAL and optional — the digest's own body gates the judge on
+// `scoring.judge_enabled && anthropicConfigured` and proceeds deterministically without it, so
+// there is nothing for `ANTHROPIC_API_KEY` to gate at the cron-registration level. `submitDeps` is
+// the same db/settings/notify/enqueue/alert(/adminBaseUrl) bundle every other submitter is built
+// from; `anthropicConfigured` mirrors the support/sourcing gate (`Boolean(config.anthropic)`).
+const scoringSubmitDeps: SubmitProposalDeps = {
+  db, settings, notify, enqueue, alert,
+  ...(config.adminBaseUrl ? { adminBaseUrl: config.adminBaseUrl } : {}),
+}
+const scoringWeeklyDeps: ScoringWeeklyDeps = {
+  db, settings, alert, notify,
+  adminBaseUrl: config.adminBaseUrl ?? '',
+  submit: submitProposal,
+  submitDeps: scoringSubmitDeps,
+  judge: runDeprecationJudge,
+  anthropicConfigured: Boolean(config.anthropic),
+}
+await registerCron(queue.boss, SCORING_WEEKLY_QUEUE, '0 14 * * 1', scoringWeeklyHandler(scoringWeeklyDeps))
+app.log.info(`${SCORING_WEEKLY_QUEUE} cron ARMED — Mondays 14:00 UTC`)
 
 if (config.shopify && config.adminBaseUrl && shopifyClient) {
   const { adminBaseUrl } = config

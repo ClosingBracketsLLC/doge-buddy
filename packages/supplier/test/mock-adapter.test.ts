@@ -43,6 +43,20 @@ describe('MockSupplierAdapter specifics', () => {
     expect(adapter.subscribedProductIds).toEqual(['mock-p1', 'mock-p2'])
   })
 
+  it('unsubscribeProductWebhook removes the pid from subscribedProductIds', async () => {
+    const adapter = new MockSupplierAdapter()
+    await adapter.subscribeProductWebhook('mock-p1')
+    await adapter.subscribeProductWebhook('mock-p2')
+    await expect(adapter.unsubscribeProductWebhook('mock-p1')).resolves.toBeUndefined()
+    expect(adapter.subscribedProductIds).toEqual(['mock-p2'])
+  })
+
+  it('unsubscribeProductWebhook is a no-op (never throws) for an id that was never subscribed', async () => {
+    const adapter = new MockSupplierAdapter()
+    await expect(adapter.unsubscribeProductWebhook('never-subscribed')).resolves.toBeUndefined()
+    expect(adapter.subscribedProductIds).toEqual([])
+  })
+
   it('getProductReviews returns reviews for known pids only', async () => {
     const adapter = new MockSupplierAdapter()
     // Known pid (from MOCK_PRODUCTS)

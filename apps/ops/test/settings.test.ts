@@ -63,4 +63,34 @@ describe('settings', () => {
     expect(await s.get('workflow.sourcing.mode')).toBe('auto')
     await s.set('workflow.sourcing.mode', 'manual') // restore for rerun safety
   })
+
+  it('defaults workflow.scoring.enabled to true', async () => {
+    const s = createSettings(db)
+    expect(await s.get('workflow.scoring.enabled')).toBe(true)
+  })
+
+  it('defaults scoring.judge_enabled to true', async () => {
+    const s = createSettings(db)
+    expect(await s.get('scoring.judge_enabled')).toBe(true)
+  })
+
+  it('defaults scoring.deprecate_after_days to 21', async () => {
+    const s = createSettings(db)
+    expect(await s.get('scoring.deprecate_after_days')).toBe(21)
+  })
+
+  it('round-trips a boolean for workflow.scoring.enabled', async () => {
+    const s = createSettings(db)
+    await s.set('workflow.scoring.enabled', false)
+    expect(await s.get('workflow.scoring.enabled')).toBe(false)
+    await s.set('workflow.scoring.enabled', true)
+    expect(await s.get('workflow.scoring.enabled')).toBe(true)
+  })
+
+  it('round-trips a number for scoring.max_refund_rate_bps', async () => {
+    const s = createSettings(db)
+    await s.set('scoring.max_refund_rate_bps', 1000)
+    expect(await s.get('scoring.max_refund_rate_bps')).toBe(1000)
+    await s.set('scoring.max_refund_rate_bps', 2500) // restore default
+  })
 })

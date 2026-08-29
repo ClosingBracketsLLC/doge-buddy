@@ -73,9 +73,11 @@ window bounds computed in UTC. For each **active** product (`products.status = '
   is the paid signal. **Join (FIXTURE-ASSUMPTION until first real order):** `line_items[].variant_id`
   is Shopify's **numeric** id (`ShopifyOrderPaidPayload`, `order-upsert.ts:18`), `product_variants`
   stores the **gid**; match `(li->>'variant_id')` against the numeric tail of `shopify_variant_gid`.
-  **Guarded expansion:** `LEFT JOIN LATERAL jsonb_array_elements(raw_payload->'line_items') li ON
-  jsonb_typeof(raw_payload->'line_items') = 'array'` so a NULL/thin/malformed payload (reconcile creates
-  raw_payload-NULL orders) skips instead of aborting the whole nightly query.
+  **Guarded expansion:** `jsonb_array_elements(CASE WHEN jsonb_typeof(raw_payload->'line_items')='array' THEN
+  raw_payload->'line_items' ELSE '[]'::jsonb END) li ON true` — the guard must wrap the function ARGUMENT,
+  not sit in an `ON` filter: PG17 evaluates the set-returning `jsonb_array_elements` BEFORE the `ON`
+  clause, so `ON jsonb_typeof='array'` still throws on an object-shaped `line_items` (reproduced live)
+  and aborts the nightly batch. The CASE form makes a NULL/thin/malformed payload skip instead.
 - **`revenue_28d_cents`** — `Σ quantity × product_variants.price_cents` (catalog price; the line item
   carries no price). Coarse on multi-product orders and does not net out refunds — observability only,
   never a verdict input.

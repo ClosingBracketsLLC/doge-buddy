@@ -59,6 +59,21 @@ export function runAdapterContractTests(name: string, setup: () => Promise<Adapt
       await expect(adapter.subscribeProductWebhook(pid)).resolves.toBeUndefined()
     })
 
+    it('unsubscribeProductWebhook resolves after subscribeProductWebhook (mock record cleared when exposed)', async () => {
+      const { adapter } = await setup()
+      await adapter.subscribeProductWebhook('x')
+      await expect(adapter.unsubscribeProductWebhook('x')).resolves.toBeUndefined()
+      // MockSupplierAdapter exposes `subscribedProductIds` (not part of SupplierAdapter itself);
+      // when present, assert the id is actually gone rather than just that the call didn't throw.
+      const recorded = (adapter as unknown as { subscribedProductIds?: string[] }).subscribedProductIds
+      if (recorded) expect(recorded).not.toContain('x')
+    })
+
+    it('unsubscribeProductWebhook resolves without throwing for an id that was never subscribed', async () => {
+      const { adapter } = await setup()
+      await expect(adapter.unsubscribeProductWebhook('never-subscribed')).resolves.toBeUndefined()
+    })
+
     it('reports per-warehouse stock for a known variant', async () => {
       const { adapter, knownVariantId } = await setup()
       const stock = await adapter.getVariantStock(knownVariantId)

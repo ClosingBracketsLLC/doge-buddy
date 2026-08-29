@@ -159,4 +159,11 @@ export interface SupplierAdapter {
   /** Best-effort semantics (skip-and-log on failure) are the CALLER's job — this method throws on
    * wire failure like every other method here. */
   subscribeProductWebhook(supplierProductId: string): Promise<void>
+
+  /** Best-effort by design: a product passed here may never have been subscribed
+   * (subscribeProductWebhook's own failures are skip-and-log per the caller contract above), so
+   * this resolves rather than throwing when the supplier reports the product as not
+   * subscribed/not found. Wire failures unrelated to that (auth, rate limit, server error) still
+   * throw like every other method here. */
+  unsubscribeProductWebhook(supplierProductId: string): Promise<void>
 }

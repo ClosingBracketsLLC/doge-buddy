@@ -1,4 +1,4 @@
-import { auditLog, createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
+import { auditLog, createDb, orders, products, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import { and, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
@@ -44,6 +44,7 @@ describe('proposals queue + detail pages', () => {
   let createdProposalIds: string[] = []
   let createdTicketIds: string[] = []
   let createdOrderIds: string[] = []
+  let createdProductIds: string[] = []
 
   afterEach(async () => {
     if (createdProposalIds.length > 0) {
@@ -60,6 +61,10 @@ describe('proposals queue + detail pages', () => {
     if (createdOrderIds.length > 0) {
       await db.delete(orders).where(inArray(orders.id, createdOrderIds))
       createdOrderIds = []
+    }
+    if (createdProductIds.length > 0) {
+      await db.delete(products).where(inArray(products.id, createdProductIds))
+      createdProductIds = []
     }
   })
 
@@ -110,6 +115,7 @@ describe('proposals queue + detail pages', () => {
       expiresAt: Date
       ticketId: string
       orderId: string
+      productId: string
     }> = {},
   ) {
     const [row] = await db
@@ -122,6 +128,7 @@ describe('proposals queue + detail pages', () => {
         sourceWorkflow: 'test',
         ticketId: overrides.ticketId,
         orderId: overrides.orderId,
+        productId: overrides.productId,
         ...(overrides.expiresAt ? { expiresAt: overrides.expiresAt } : {}),
       })
       .returning()
@@ -186,6 +193,39 @@ describe('proposals queue + detail pages', () => {
       reason: overrides.reason ?? 'damaged in transit',
       openCjDispute: overrides.openCjDispute ?? false,
       threadSnapshotAt: new Date().toISOString(),
+    }
+  }
+
+  // -- Task 11 (scoring): deprecate_product fixtures --------------------------------------------
+
+  async function seedProduct(title = 'Squeaky Dead Widget') {
+    const [product] = await db
+      .insert(products)
+      .values({
+        shopifyProductGid: `gid://shopify/Product/${crypto.randomUUID()}`,
+        handle: `h-${crypto.randomUUID()}`,
+        title,
+        status: 'active',
+      })
+      .returning()
+    createdProductIds.push(product!.id)
+    return product!
+  }
+
+  function deprecateProductPayload(
+    productId: string,
+    overrides: Partial<{ unitsSold28d: number; refundCount28d: number; ticketCount28d: number; daysLive: number; reasoning: string }> = {},
+  ) {
+    return {
+      type: 'deprecate_product' as const,
+      productId,
+      evidence: {
+        unitsSold28d: overrides.unitsSold28d ?? 2,
+        refundCount28d: overrides.refundCount28d ?? 1,
+        ticketCount28d: overrides.ticketCount28d ?? 3,
+        daysLive: overrides.daysLive ?? 45,
+        reasoning: overrides.reasoning ?? 'low sales, high refund/ticket load',
+      },
     }
   }
 
@@ -729,6 +769,66 @@ describe('proposals queue + detail pages', () => {
 
     const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
     expect(after!.status).toBe('pending')
+
+    await app.close()
+  })
+
+  // Task 11 (scoring): deprecate_product currently falls through renderDecisionForms' generic
+  // branch, which exposes a raw-JSON `payload` textarea — wrong for a proposal type whose only
+  // sane owner actions are approve/reject. This proves the detail page renders the evidence +
+  // product, offers approve/reject only, and has NO editable payload textarea.
+  it('21. deprecate_product pending detail: evidence + product render, approve/reject only, NO raw-JSON payload textarea', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const product = await seedProduct('Squeaky Dead Widget')
+    const row = await seedProposal({
+      type: 'deprecate_product',
+      productId: product.id,
+      payload: deprecateProductPayload(product.id, {
+        unitsSold28d: 2,
+        refundCount28d: 1,
+        ticketCount28d: 3,
+        daysLive: 45,
+        reasoning: 'low sales, high refund/ticket load',
+      }),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Squeaky Dead Widget')
+    expect(res.body).toContain(product.id)
+    expect(res.body).toContain('2') // unitsSold28d
+    expect(res.body).toContain('45') // daysLive
+    expect(res.body).toContain('low sales, high refund/ticket load')
+
+    expect(res.body).toContain(`action="/admin/proposals/${row.id}/approve"`)
+    expect(res.body).toContain(`action="/admin/proposals/${row.id}/reject"`)
+    expect(res.body).not.toContain('name="payload"')
+    expect(res.body).not.toContain('name="body"')
+    const approveFormCount = res.body.split(`action="/admin/proposals/${row.id}/approve"`).length - 1
+    expect(approveFormCount).toBe(1) // plain approve only — no edit-then-approve form
+
+    await app.close()
+  })
+
+  it('22. deprecate_product XSS: a <script> reasoning renders escaped, never as live markup', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const product = await seedProduct()
+    const row = await seedProposal({
+      type: 'deprecate_product',
+      productId: product.id,
+      payload: deprecateProductPayload(product.id, { reasoning: '<script>alert(1)</script>' }),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(res.body).not.toContain('<script>alert(1)</script>')
 
     await app.close()
   })

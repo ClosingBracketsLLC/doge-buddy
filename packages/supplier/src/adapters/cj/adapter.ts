@@ -54,6 +54,14 @@ const CJ_WEBHOOK_TYPES: Record<string, SupplierWebhookEvent['type']> = {
 
 const CJ_INSUFFICIENT_BALANCE_CODE = 1600100
 
+// CJ's error shape for `/webhook/product/unsubscribe` is UNVERIFIED (no not-found/not-subscribed
+// example has ever been observed — see docs/cj-api-notes.md §Still unverified), so there is no
+// confirmed numeric code to match on the way CJ_INSUFFICIENT_BALANCE_CODE does above. Matching on
+// message text is the best available signal: it lets a real not-found/not-subscribed response map
+// to success (unsubscribe is best-effort) while still letting an unrelated failure (auth, rate
+// limit, server error) propagate instead of being silently swallowed.
+const CJ_WEBHOOK_NOT_SUBSCRIBED_MESSAGE_PATTERN = /not\s*(found|exist|subscrib)/i
+
 function findSignatureHeader(headers: Record<string, string | string[] | undefined>): string | undefined {
   const lower = new Map<string, string | string[] | undefined>()
   for (const [key, value] of Object.entries(headers)) lower.set(key.toLowerCase(), value)
@@ -384,5 +392,27 @@ export class CJSupplierAdapter implements SupplierAdapter {
       body: { productIdList: [supplierProductId] },
       points: 0,
     })
+  }
+
+  // UNVERIFIED (from the Phase 4A deferral name): endpoint/body guessed as
+  // POST /webhook/product/unsubscribe { productIdList: [pid] }, mirroring subscribeProductWebhook
+  // above. Modeled on webhook config calls elsewhere in this file (simulatePay, sandboxUpdateStatus)
+  // as points: 0 — config/subscription calls are not expected to draw from the daily points budget.
+  // If Tier 2 verification shows product webhooks are actually account-level (registered once via
+  // /webhook/set rather than per-product), this becomes a documented no-op; see
+  // docs/cj-api-notes.md §Still unverified.
+  async unsubscribeProductWebhook(supplierProductId: string): Promise<void> {
+    try {
+      await this.client.request('POST', '/webhook/product/unsubscribe', {
+        body: { productIdList: [supplierProductId] },
+        points: 0,
+      })
+    } catch (err) {
+      // subscribeProductWebhook is best-effort (callers skip-and-log on failure per its interface
+      // doc), so the product passed here may never have actually been subscribed — treat CJ's
+      // not-found/not-subscribed response as success rather than a real failure.
+      if (err instanceof CjApiError && CJ_WEBHOOK_NOT_SUBSCRIBED_MESSAGE_PATTERN.test(err.message)) return
+      throw err
+    }
   }
 }
