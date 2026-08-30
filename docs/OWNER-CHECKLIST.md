@@ -97,10 +97,17 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   last night** (proposal `c6193fd6` rejected with a reason 20:50 PT → re-draft `65a8edf9` 23s
   later → approved and sent). The "Return request" ticket's `agent_failed ×2` is diagnosed: both
   runs SUCCEEDED and drafted fine — the OLD promised-action screen rejected the drafts downstream
-  (exactly the `a81da1e` bug, now deployed-fixed). **Left on walk #1:** Robert replies on the
-  RETURN thread from Outlook (the ticket is `resolved`, so a thread reply reopens it and resets
-  its failure counts) → decline + SORRY10 draft → approve; and confirm the personal-Gmail thread
-  shows as one conversation.
+  (exactly the `a81da1e` bug, now deployed-fixed). **WALK #1 + 1a: CLOSED (2026-08-30).** Robert's
+  screenshot shows the Outlook conversation view grouping his follow-up and the support reply as
+  ONE conversation — the last outstanding piece. (The planned extra reply on the RETURN thread was
+  dropped as redundant: the decline-on-a-refund-ask draft already passed the fixed screen on this
+  very exchange, and 1a's marker round-trip was verified on three sent replies. The "Return
+  request" ticket stays `resolved` — the customer got the decline+SORRY10 answer in this thread.
+  Optional belt-and-braces, anytime: glance at the personal-Gmail "Delivery time question" thread —
+  structurally it must group, References are correct.) **Remaining in Tier-2: #2 (Bogus-gateway
+  refund delivered twice → exactly one refund) and #4 (`openCjDispute` vs the CJ sandbox)** — both
+  need a test order through the test gateway first — plus the `GMAIL_CONTRACT=1` re-record and the
+  two Shopify refund-schema checks (items below).
   1. **Email → approve-from-phone → threading.** Send a real support email → categorized ticket
      with an agent-drafted reply proposal on Telegram + `/admin/proposals` → approve from your
      phone → the reply lands in the customer mailbox, `From: support@dogebuddy.com`, **threaded as
