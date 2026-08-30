@@ -7,6 +7,7 @@ import type { AdminDeps } from '../src/http/admin/routes.ts'
 import { createCaptureNotifier } from '../src/notify/capture.ts'
 import type { OwnerNotification } from '../src/notify/notify.ts'
 import { createSettings } from '../src/settings.ts'
+import { SUPPORT_REDRAFT_MAX } from '../src/support/redraft.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -833,4 +834,95 @@ describe('proposals queue + detail pages', () => {
     await app.close()
   })
 
+  // -- Task 9: admin reject reason form + redraftCount threading ---------------------------------
+  // `loadProposalDetailExtras` now also fetches the linked ticket's redraftCount (for BOTH
+  // support_reply and refund — it used to return `{}` for support_reply entirely) so the reject
+  // form can gate its redraft button the same way the public /a/ route already does.
+
+  it('23. support_reply pending detail: reject form has the reason textarea + redraft/escalate buttons', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const row = await seedProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('<textarea name="reason"')
+    expect(res.body).toContain('name="action" value="redraft"')
+    expect(res.body).toContain('name="action" value="escalate"')
+
+    await app.close()
+  })
+
+  it('24. refund pending detail: reject form ALSO has the reason textarea + redraft/escalate buttons', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const order = await seedOrder('#4300')
+    const row = await seedProposal({
+      type: 'refund',
+      ticketId: ticket.id,
+      orderId: order.id,
+      payload: refundPayload(order.id),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('<textarea name="reason"')
+    expect(res.body).toContain('name="action" value="redraft"')
+    expect(res.body).toContain('name="action" value="escalate"')
+
+    await app.close()
+  })
+
+  it('25. deprecate_product pending detail: reject form stays a plain single button — no reason box (no ticket to redraft against)', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const product = await seedProduct()
+    const row = await seedProposal({
+      type: 'deprecate_product',
+      productId: product.id,
+      payload: deprecateProductPayload(product.id),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).not.toContain('<textarea name="reason"')
+    expect(res.body).not.toContain('name="action" value="redraft"')
+    expect(res.body).toContain('<button type="submit">Reject</button>')
+
+    await app.close()
+  })
+
+  it('26. support_reply detail at SUPPORT_REDRAFT_MAX: the redraft button is gone (escalate-only), textarea stays', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    await db.update(supportTickets).set({ redraftCount: SUPPORT_REDRAFT_MAX }).where(eq(supportTickets.id, ticket.id))
+    const row = await seedProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: `/admin/proposals/${row.id}`, headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('<textarea name="reason"')
+    expect(res.body).not.toContain('name="action" value="redraft"')
+    expect(res.body).toContain('name="action" value="escalate"')
+
+    await app.close()
+  })
 })

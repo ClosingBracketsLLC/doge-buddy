@@ -1,6 +1,6 @@
-import { auditLog, createDb, proposals } from '@doge-buddy/db'
-import { and, eq } from 'drizzle-orm'
-import { afterAll, describe, expect, it, vi } from 'vitest'
+import { auditLog, createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
+import { and, eq, inArray } from 'drizzle-orm'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildServer } from '../src/server.ts'
 import type { AdminDeps } from '../src/http/admin/routes.ts'
@@ -9,6 +9,7 @@ import { createCaptureNotifier } from '../src/notify/capture.ts'
 import type { OwnerNotification } from '../src/notify/notify.ts'
 import { createSettings } from '../src/settings.ts'
 import { generateActionToken } from '../src/proposals/tokens.ts'
+import { SUPPORT_REDRAFT_MAX } from '../src/support/redraft.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -45,6 +46,26 @@ interface TestDeps extends AdminDeps {
 describe('session-authed proposal decisions (+ edit-then-approve)', () => {
   const { db, pool } = createDb(url)
   afterAll(() => pool.end())
+
+  // Task 9: support_reply/refund fixtures create real supportTickets/orders rows — clean those up
+  // (unlike bare `proposals` rows, which this file has never bothered to clean up: they never
+  // collide, being randomUUID-keyed and never queried except by their own id). Same idiom as
+  // action-routes.test.ts's own copy.
+  let createdTicketIds: string[] = []
+  let createdOrderIds: string[] = []
+
+  afterEach(async () => {
+    if (createdTicketIds.length > 0) {
+      // supportMessages.ticketId has no ON DELETE CASCADE — messages must go first.
+      await db.delete(supportMessages).where(inArray(supportMessages.ticketId, createdTicketIds))
+      await db.delete(supportTickets).where(inArray(supportTickets.id, createdTicketIds))
+      createdTicketIds = []
+    }
+    if (createdOrderIds.length > 0) {
+      await db.delete(orders).where(inArray(orders.id, createdOrderIds))
+      createdOrderIds = []
+    }
+  })
 
   function makeDeps(overrides: Partial<AdminDeps> = {}): TestDeps {
     const { notify, sent } = createCaptureNotifier()
@@ -116,6 +137,43 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
 
   function formBody(fields: Record<string, string>): string {
     return new URLSearchParams(fields).toString()
+  }
+
+  // -- Task 9: support_reply fixtures (mirrors action-routes.test.ts's own copy) -----------------
+
+  async function seedTicket(overrides: Partial<{ agentSessionId: string }> = {}) {
+    const [ticket] = await db
+      .insert(supportTickets)
+      .values({
+        gmailThreadId: `t9-${crypto.randomUUID()}`,
+        customerEmail: 'buyer@example.com',
+        subject: 'Where is my order',
+        status: 'awaiting_approval',
+        agentSessionId: overrides.agentSessionId ?? 'sess-abc',
+      })
+      .returning()
+    createdTicketIds.push(ticket!.id)
+    return ticket!
+  }
+
+  async function seedSupportProposal(overrides: { type: 'support_reply' | 'refund'; ticketId: string; orderId?: string; payload: unknown }) {
+    const [row] = await db
+      .insert(proposals)
+      .values({
+        type: overrides.type,
+        status: 'pending',
+        summary: `Test ${overrides.type} ${crypto.randomUUID()}`,
+        payload: overrides.payload,
+        sourceWorkflow: 'test',
+        ticketId: overrides.ticketId,
+        orderId: overrides.orderId,
+      })
+      .returning()
+    return row!
+  }
+
+  function supportReplyPayload(ticketId: string, body: string) {
+    return { type: 'support_reply' as const, ticketId, body, threadSnapshotAt: new Date().toISOString() }
   }
 
   it('1. unauthenticated POST approve -> 303 to login, row untouched, nothing enqueued', async () => {
@@ -523,6 +581,203 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
 
     const auditRows = await auditRowsFor(row!.id, 'proposal.apply_resent')
     expect(auditRows).toHaveLength(0)
+
+    await app.close()
+  })
+
+  // -- Task 9: admin reject form — reason capture + re-draft dispatch (mirrors Task 8's public
+  // /a/ route exactly — same resolveRejectAction dispatch, same atomic fallback) ------------------
+
+  it('14. admin reject action=redraft on an awaiting_approval ticket re-arms it: triaged, feedback stored, count+1, session kept, proposal rejected, audited resolution:redraft', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const row = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/reject`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: formBody({ reason: 'please mention our 30-day return policy', action: 'redraft' }),
+    })
+
+    expect(res.statusCode).toBe(303)
+    expect(res.headers.location).toBe(`/admin/proposals/${row.id}`)
+
+    const [proposalAfter] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(proposalAfter!.status).toBe('rejected')
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('triaged')
+    expect(ticketAfter!.ownerRedraftFeedback).toBe('please mention our 30-day return policy')
+    expect(ticketAfter!.redraftCount).toBe(1)
+    // Redraft is a resume, not a fresh escalation — must not clobber the resumable session.
+    expect(ticketAfter!.agentSessionId).toBe('sess-abc')
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows).toHaveLength(1)
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'admin', edited: false, resolution: 'redraft' })
+
+    expect(deps.enqueue).not.toHaveBeenCalled()
+
+    await app.close()
+  })
+
+  it('15. admin reject action=escalate -> ticket escalated (terminal), audited resolution:escalate_terminal, notified silently', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const row = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/reject`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: formBody({ reason: 'not a good fit for this ticket', action: 'escalate' }),
+    })
+
+    expect(res.statusCode).toBe(303)
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('owner_rejected_draft')
+    expect(ticketAfter!.escalationNotifiedAt).not.toBeNull() // pre-stamped silent, same as today
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'admin', resolution: 'escalate_terminal' })
+
+    await app.close()
+  })
+
+  it('16. admin reject with no body at all -> also terminal escalate, as today (confirms the existing no-reason reject still escalates)', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const row = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/reject`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: '',
+    })
+
+    expect(res.statusCode).toBe(303)
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('owner_rejected_draft')
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'admin', resolution: 'escalate_terminal' })
+
+    await app.close()
+  })
+
+  it('17. admin reject action=redraft when ticket is already at SUPPORT_REDRAFT_MAX -> escalates with redraft_limit_reached and PAGES (not silent)', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    await db.update(supportTickets).set({ redraftCount: SUPPORT_REDRAFT_MAX }).where(eq(supportTickets.id, ticket.id))
+    const row = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/reject`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: formBody({ reason: 'still not right', action: 'redraft' }),
+    })
+
+    expect(res.statusCode).toBe(303)
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('redraft_limit_reached')
+    expect(ticketAfter!.escalationNotifiedAt).toBeNull() // not pre-stamped -> the poller pages
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'admin', resolution: 'escalate_limit' })
+
+    await app.close()
+  })
+
+  it('18. admin reject with a reason over 2000 chars -> readable 400, no state change, token/status untouched', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    const row = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+    const longReason = 'x'.repeat(2001)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/reject`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: formBody({ reason: longReason, action: 'redraft' }),
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toContain('too long')
+
+    const [proposalAfter] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(proposalAfter!.status).toBe('pending')
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('awaiting_approval')
+    expect(ticketAfter!.redraftCount).toBe(0)
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows).toHaveLength(0)
+
+    await app.close()
+  })
+
+  it('19. admin reject of a non-support (new_listing) proposal is unaffected by the new dispatch: still a plain terminal reject, no resolution key', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const row = await seedPending()
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/reject`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: formBody({ reason: 'irrelevant for sourcing', action: 'redraft' }),
+    })
+
+    expect(res.statusCode).toBe(303)
+
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('rejected')
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows).toHaveLength(1)
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'admin', edited: false })
+    expect(auditRows[0]!.detail).not.toHaveProperty('resolution')
 
     await app.close()
   })

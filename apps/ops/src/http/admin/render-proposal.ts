@@ -7,6 +7,7 @@ import {
 } from '@doge-buddy/core'
 import type { proposals } from '@doge-buddy/db'
 import { validateDescriptionHtml } from '../../sourcing/guards.ts'
+import { SUPPORT_REDRAFT_MAX } from '../../support/redraft.ts'
 import { html, raw, type RawHtml } from './html.ts'
 
 export type ProposalRow = typeof proposals.$inferSelect
@@ -134,6 +135,12 @@ export interface ProposalDetailExtras {
   /** The `products.title` for a `deprecate_product` proposal's `productId`, when the product row
    * still exists — null/undefined falls back to showing the bare productId. */
   productTitle?: string | null
+  /** The linked ticket's current `redraft_count` (Task 9) — used by `renderDecisionForms`'s reject
+   * form to gate the "Re-draft" button (`redraftCount < SUPPORT_REDRAFT_MAX`), the same gate the
+   * public `/a/` route's confirm page already applies. Loaded for `support_reply`/`refund` only;
+   * absent (undefined) defaults to 0 — no ticket linked means no redraft cycle to be at the limit
+   * of. */
+  redraftCount?: number
 }
 
 /**
@@ -181,8 +188,43 @@ function renderDeprecateProductSummary(payload: unknown, extras: ProposalDetailE
 }
 
 /**
+ * The reject form's own contents (Task 9, mirroring `actions.ts`'s `confirmPage` — same copy, same
+ * gating, so the admin surface and the public `/a/` one-click surface never diverge in behavior).
+ * For `support_reply`/`refund` this is a reason `<textarea>` (posted as `reason`, capped at 2000
+ * chars client-side via `maxlength` — the route itself is the real 2000-char gate) plus TWO submit
+ * buttons sharing `name="action"`: `value="redraft"` (gated on `redraftCount < SUPPORT_REDRAFT_MAX`
+ * — once the ticket has already been redrafted the max number of times, the button is replaced by
+ * plain copy saying so, same as the public confirm page) and `value="escalate"`. Every other type
+ * (including `deprecate_product`, which has no ticket to redraft against) keeps today's plain
+ * single-button reject form.
+ */
+function renderRejectForm(p: ProposalRow, rejectAction: string, redraftCount: number): RawHtml {
+  const isSupportReject = p.type === 'support_reply' || p.type === 'refund'
+  if (!isSupportReject) {
+    return html`<form method="post" action="${rejectAction}">
+      <button type="submit">Reject</button>
+    </form>`
+  }
+
+  const canRedraft = redraftCount < SUPPORT_REDRAFT_MAX
+  return html`<form method="post" action="${rejectAction}">
+    <p><label>Reason for the agent (optional — leave blank to escalate to you):<br>
+      <textarea name="reason" rows="6" cols="70" maxlength="2000"></textarea></label></p>
+    ${canRedraft
+      ? html`<button type="submit" name="action" value="redraft">Re-draft with this reason</button> `
+      : html`<p>Re-drafted ${SUPPORT_REDRAFT_MAX}× already — rejecting again escalates to you.</p>`}
+    <button type="submit" name="action" value="escalate">Just escalate to me</button>
+  </form>`
+}
+
+/**
  * Approve / reject / edit-then-approve forms, rendered only for pending rows. All three post to
  * the Task 4 session-authed decision routes (`/admin/proposals/:id/approve|reject`).
+ *
+ * `redraftCount` (Task 9) — the linked ticket's current redraft count, loaded by the route's
+ * `loadProposalDetailExtras` and defaulted to 0 here when absent (no ticket linked, or a proposal
+ * type `loadProposalDetailExtras` doesn't bother loading it for) — threaded through only to
+ * `renderRejectForm`'s redraft-button gate; every other form in this function ignores it.
  *
  * Task 18 splits the edit-then-approve form by type instead of one shape for every type:
  *  - `refund`: NO edit form at all — approve/reject buttons only (a refund amount/order is not
@@ -200,15 +242,13 @@ function renderDeprecateProductSummary(payload: unknown, extras: ProposalDetailE
  *    as pretty JSON — escaped by html`` like any other interpolation, so a hostile payload value
  *    can't break out of the <textarea> (e.g. via a literal `</textarea>` in a string field).
  */
-function renderDecisionForms(p: ProposalRow): RawHtml {
+function renderDecisionForms(p: ProposalRow, redraftCount = 0): RawHtml {
   const approveAction = `/admin/proposals/${p.id}/approve`
   const rejectAction = `/admin/proposals/${p.id}/reject`
   const approveReject = html`<form method="post" action="${approveAction}">
       <button type="submit">Approve</button>
     </form>
-    <form method="post" action="${rejectAction}">
-      <button type="submit">Reject</button>
-    </form>`
+    ${renderRejectForm(p, rejectAction, redraftCount)}`
 
   if (p.type === 'refund') {
     return approveReject
@@ -266,7 +306,11 @@ export function renderProposalDetail(p: ProposalRow, extras: ProposalDetailExtra
             : renderGenericPayload(p.payload)
 
   const actions =
-    p.status === 'pending' ? renderDecisionForms(p) : p.status === 'approved' ? renderResendForm(p) : html``
+    p.status === 'pending'
+      ? renderDecisionForms(p, extras.redraftCount ?? 0)
+      : p.status === 'approved'
+        ? renderResendForm(p)
+        : html``
 
   return html`<h1>Proposal ${p.id}</h1>
     <p>Type: ${p.type}</p>

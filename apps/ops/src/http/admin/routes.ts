@@ -22,10 +22,14 @@ import type { SendOpts } from '../../fulfillment/types.ts'
 import { SUPPORT_AGENT_MAX_RUNS_PER_DAY } from '../../jobs/support-agent-run.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
 import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts'
-import { onSupportProposalRejected, validateSupportProposalForApproval } from '../../proposals/support-decision.ts'
+import {
+  onSupportProposalRejected,
+  onSupportProposalRejectedForRedraft,
+  validateSupportProposalForApproval,
+} from '../../proposals/support-decision.ts'
 import { applyProposalTransition, StaleProposalStatusError } from '../../proposals/transitions.ts'
 import { SETTINGS_DEFAULTS, type Settings, type SettingKey, type WorkflowMode } from '../../settings.ts'
-import { clearRedraftCycle } from '../../support/redraft.ts'
+import { clearRedraftCycle, resolveRejectAction } from '../../support/redraft.ts'
 import { senderAuthNote } from '../../support/validator.ts'
 import {
   consumeLoginToken,
@@ -734,16 +738,26 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       })
 
       /**
-       * DB-derived extras `renderRefundSummary`/`renderDeprecateProductSummary` need but a bare
-       * `proposals` row doesn't carry (Task 18): the linked order's number, a cheap sender-auth
-       * note, and — Task 16 note — the `proposal.refund_issued` audit row's `refundId` when
-       * present (it exists exactly when money moved, regardless of the proposal's current status,
-       * so this is NOT scoped to `pending`). Task 11 (scoring) adds `productTitle` for
+       * DB-derived extras `renderRefundSummary`/`renderDeprecateProductSummary`/`renderDecisionForms`
+       * need but a bare `proposals` row doesn't carry (Task 18): the linked order's number, a cheap
+       * sender-auth note, and — Task 16 note — the `proposal.refund_issued` audit row's `refundId`
+       * when present (it exists exactly when money moved, regardless of the proposal's current
+       * status, so this is NOT scoped to `pending`). Task 11 (scoring) adds `productTitle` for
        * `deprecate_product`: `row.productId` is the row's own column (set at submit time, same
        * convention as `refund`'s `row.orderId` above), looked up against `products.title` —
        * `null` when the product row is somehow missing, so the renderer falls back to the bare id.
+       *
+       * Task 9: `redraftCount` — the linked ticket's current re-draft count, which
+       * `renderDecisionForms`'s reject-reason form needs to gate its "Re-draft" button
+       * (`redraftCount < SUPPORT_REDRAFT_MAX`), the SAME gate the public `/a/` route's
+       * `handleGet` already applies. Loaded for BOTH `support_reply` and `refund` — a prior version
+       * of this function returned `{}` for `support_reply` entirely (no ticket data at all), which
+       * is exactly the gap this task closes: `support_reply`'s reject form needs the ticket's
+       * redraft count just as much as `refund`'s does. Defaults to 0 (via `renderDecisionForms`'s
+       * own default, not here) when the proposal carries no `ticketId`.
+       *
        * `{}` for every other type: `renderProposalDetail` only reads these fields for
-       * `refund`/`deprecate_product`.
+       * `refund`/`support_reply`/`deprecate_product`.
        */
       async function loadProposalDetailExtras(row: ProposalRow): Promise<ProposalDetailExtras> {
         if (row.type === 'deprecate_product') {
@@ -759,7 +773,21 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           return { productTitle }
         }
 
-        if (row.type !== 'refund') return {}
+        if (row.type !== 'refund' && row.type !== 'support_reply') return {}
+
+        let redraftCount = 0
+        if (row.ticketId) {
+          const [ticket] = await deps.db
+            .select({ redraftCount: supportTickets.redraftCount })
+            .from(supportTickets)
+            .where(eq(supportTickets.id, row.ticketId))
+            .limit(1)
+          redraftCount = ticket?.redraftCount ?? 0
+        }
+
+        if (row.type === 'support_reply') {
+          return { redraftCount }
+        }
 
         // Resolved via `row.orderId` (Task 18 review, M9) — the proposals row's own column, and
         // the SAME key `validateRefundIntent`'s accumulation bound checks — not `payload.orderId`.
@@ -798,7 +826,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           ? ((refundIssuedRow.detail as Record<string, unknown> | null)?.refundId as string | undefined)
           : undefined
 
-        return { orderNumber, ticketId: row.ticketId, authNote, refundIssuedId: refundIssuedId ?? null }
+        return { orderNumber, ticketId: row.ticketId, authNote, refundIssuedId: refundIssuedId ?? null, redraftCount }
       }
 
       authed.get('/admin/proposals/:id', async (request, reply) => {
@@ -952,10 +980,46 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
 
             const status = decision === 'approve' ? 'approved' : 'rejected'
             const isSupportRejectDecision = decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')
+
+            // Task 9: resolve the reject dispatch OUTSIDE the transaction, before any state
+            // changes — same ordering as `actions.ts`'s public route (Task 8), and for the same
+            // reason: the over-2000-char refusal must return here, before `applyProposalTransition`
+            // ever runs, so a hostile/mistaken paste can never partially land or consume the row's
+            // pending status.
+            let resolution: ReturnType<typeof resolveRejectAction> | undefined
+            let reason = ''
+            if (isSupportRejectDecision) {
+              const body = (request.body ?? {}) as { reason?: string; action?: string }
+              const rawReason = body.reason ?? ''
+              if (rawReason.length > 2000) {
+                return reply
+                  .code(400)
+                  .type('text/html; charset=utf-8')
+                  .send(
+                    layout(
+                      'Proposal',
+                      html`<p>Reason too long (max 2000 characters) — nothing was changed. Go back and shorten it.</p>`,
+                    ),
+                  )
+              }
+              reason = rawReason
+              const [ticket] = await deps.db
+                .select({ status: supportTickets.status, redraftCount: supportTickets.redraftCount })
+                .from(supportTickets)
+                .where(eq(supportTickets.id, row.ticketId!))
+              resolution = resolveRejectAction({
+                reason,
+                action: body.action ?? 'escalate',
+                redraftCount: ticket?.redraftCount ?? 0,
+                ticketStatus: ticket?.status ?? '',
+              })
+            }
+
             try {
               if (isSupportRejectDecision) {
-                // Atomic (Task 18 review, M5): the reject transition, its own audit row, the
-                // sibling proposal's expiry+audit, and the ticket's escalation all land in ONE
+                // Atomic (Task 18 review, M5; Task 9 extends it with the redraft/escalate-limit
+                // dispatch below): the reject transition, its own audit row, the sibling
+                // proposal's expiry+audit, and the ticket's re-arm/escalation all land in ONE
                 // transaction — mirroring `apply-shared.ts`'s `failStaleAndHandBack` precedent. A
                 // throw anywhere inside rolls EVERYTHING back, including the transition itself, so
                 // this can never partially land (e.g. proposal rejected but the ticket left
@@ -971,9 +1035,25 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                     action: 'proposal.reject',
                     entityType: 'proposal',
                     entityId: id,
-                    detail: { via: 'admin', edited },
+                    detail: { via: 'admin', edited, resolution: resolution!.kind },
                   })
-                  await onSupportProposalRejected(tx, { id, ticketId: row.ticketId, type: row.type })
+                  const r = { id: row.id, ticketId: row.ticketId, type: row.type }
+                  if (resolution!.kind === 'redraft') {
+                    // ATOMIC FALLBACK (Task 8/9 brief): a 0-row re-arm means the ticket left
+                    // `awaiting_approval` between our pre-tx read and this guarded UPDATE (a
+                    // concurrent tab, a second reject on the other surface) — fall back to the
+                    // terminal escalate in the SAME tx. Never leave the proposal rejected +
+                    // sibling expired with no ticket-side signal at all.
+                    const rearmed = await onSupportProposalRejectedForRedraft(tx, r, reason, () => new Date())
+                    if (!rearmed) await onSupportProposalRejected(tx, r)
+                  } else if (resolution!.kind === 'escalate_limit') {
+                    await onSupportProposalRejected(tx, r, {
+                      awaitingApprovalReason: 'redraft_limit_reached',
+                      awaitingApprovalNotify: true,
+                    })
+                  } else {
+                    await onSupportProposalRejected(tx, r)
+                  }
                 })
               } else {
                 await applyProposalTransition(deps.db, id, 'pending', status, {
