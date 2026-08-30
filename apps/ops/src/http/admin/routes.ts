@@ -1304,6 +1304,64 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         })
       })
 
+      // Task 4: the dedicated editor for the string-valued 'support.agent_guidance' setting —
+      // excluded from the generic /admin/settings catalog above (see settingKind's doc comment),
+      // this is its ONLY editor. Authoritative for the support agent: overrides the public store
+      // policy where they conflict. Bounded to 8000 chars to keep it a hand-editable operating
+      // note rather than an unbounded blob a run could balloon on.
+      const GUIDANCE_MAX_CHARS = 8000
+
+      authed.get('/admin/guidance', async (_request, reply) => {
+        return safeHandle('guidance', reply, async () => {
+          const current = await deps.settings.get('support.agent_guidance')
+          return reply.code(200).type('text/html; charset=utf-8').send(
+            layout(
+              'Agent guidance',
+              html`<h1>Support agent operating guidance</h1>
+                <p>
+                  Authoritative for the agent — overrides the public store policy where they
+                  conflict. Max ${GUIDANCE_MAX_CHARS} characters.
+                </p>
+                <form method="post" action="/admin/guidance">
+                  <textarea name="guidance" rows="18" cols="90">${current}</textarea>
+                  <div><button type="submit">Save</button></div>
+                </form>`,
+            ),
+          )
+        })
+      })
+
+      authed.post('/admin/guidance', async (request, reply) => {
+        return safeHandle('guidance', reply, async () => {
+          const { guidance } = (request.body ?? {}) as { guidance?: string }
+          const value = typeof guidance === 'string' ? guidance : ''
+          if (value.length > GUIDANCE_MAX_CHARS) {
+            return reply
+              .code(400)
+              .type('text/html; charset=utf-8')
+              .send(
+                layout(
+                  'Agent guidance',
+                  html`<p>Too long (${String(value.length)} chars; max ${GUIDANCE_MAX_CHARS}). Not saved.</p>`,
+                ),
+              )
+          }
+
+          const previous = await deps.settings.get('support.agent_guidance')
+          await deps.settings.set('support.agent_guidance', value)
+
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: 'settings.support_guidance_updated',
+            entityType: 'settings',
+            entityId: 'support.agent_guidance',
+            detail: { newLength: value.length, previousLength: previous.length },
+          })
+
+          return reply.code(303).header('location', '/admin/guidance').send()
+        })
+      })
+
       authed.post('/admin/signals', async (request, reply) => {
         return safeHandle('signals', reply, async () => {
           const body = (request.body ?? {}) as { content?: string; keyword?: string }

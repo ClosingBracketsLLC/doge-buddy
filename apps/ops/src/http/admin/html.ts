@@ -36,7 +36,7 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): RawHt
   return new RawHtml(out)
 }
 
-const NAV = ['', 'proposals', 'orders', 'tickets', 'runs', 'settings'] as const
+const NAV = ['', 'proposals', 'orders', 'tickets', 'runs', 'settings', 'guidance'] as const
 
 // Unconditional in every layout() call, including the pre-login pages: a logged-out viewer
 // clicking it just re-hits the authed onRequest gate (POST /admin/logout, not session-checked
