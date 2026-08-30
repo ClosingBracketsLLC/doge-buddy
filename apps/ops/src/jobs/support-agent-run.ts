@@ -302,7 +302,8 @@ export async function executeSupportAgentRun(deps: SupportAgentJobDeps, ticketId
     }
   }
 
-  const ctx = await buildContext(deps.db, claim.ticket, resumeSessionId)
+  const ownerGuidance = await deps.settings.get('support.agent_guidance')
+  const ctx = await buildContext(deps.db, claim.ticket, resumeSessionId, ownerGuidance)
 
   // --- Step 6: the `agent_runs` row, inserted directly. NOT `claimDailyRun` — that enforces one
   // claimed run per workflow per UTC day, and support legitimately runs many per day.
@@ -434,7 +435,7 @@ async function runAndHandleOutcome(
     // ONE in-process retry as a fresh session. The per-run prompt is standalone-sufficient (spec
     // §3), so the retry gets the FULL thread — that is what makes this fallback safe. Its own
     // `agent_runs` row: overwriting the dead attempt's would erase the record of the failure.
-    const freshCtx = await buildContext(deps.db, ticket, null)
+    const freshCtx = await buildContext(deps.db, ticket, null, args.ctx.ownerGuidance)
     const [retryRun] = await deps.db
       .insert(agentRuns)
       .values({ workflow: 'support', triggerRef: ticketId, model: SUPPORT_MODEL, status: 'running' })
@@ -991,7 +992,12 @@ export async function unwindClaimStamp(
  * ONLY when resuming — a fresh run always gets the full thread, which is what makes the resume
  * fallback safe.
  */
-async function buildContext(db: Db, ticket: LockedTicket, resumeSessionId: string | null): Promise<SupportRunContext> {
+async function buildContext(
+  db: Db,
+  ticket: LockedTicket,
+  resumeSessionId: string | null,
+  ownerGuidance: string,
+): Promise<SupportRunContext> {
   const isResume = resumeSessionId !== null
   const promptedAt = ticket.lastAgentPromptedAt
 
@@ -1038,6 +1044,7 @@ async function buildContext(db: Db, ticket: LockedTicket, resumeSessionId: strin
     priorProposals,
     resumeSessionId,
     isResume,
+    ownerGuidance,
   }
 }
 

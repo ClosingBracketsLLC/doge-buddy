@@ -129,6 +129,7 @@ describe('executeSupportAgentRun', () => {
     // test file cannot flip these runs into auto mode.
     await settings.set('workflow.support_reply.mode', 'manual')
     await settings.set('workflow.refund.mode', 'manual')
+    await settings.set('support.agent_guidance', SETTINGS_DEFAULTS['support.agent_guidance'])
   })
 
   // Everything this file creates is reachable from the `agentrun-%` thread-id prefix (orders from
@@ -163,6 +164,7 @@ describe('executeSupportAgentRun', () => {
     // test file cannot flip these runs into auto mode.
     await settings.set('workflow.support_reply.mode', 'manual')
     await settings.set('workflow.refund.mode', 'manual')
+    await settings.set('support.agent_guidance', SETTINGS_DEFAULTS['support.agent_guidance'])
     vi.restoreAllMocks()
   })
 
@@ -1434,6 +1436,30 @@ describe('executeSupportAgentRun', () => {
       // Each SDK call records its own run row rather than overwriting the dead attempt's.
       expect(runIds[1]).not.toBe(runIds[0])
       expect(await runRows(ticketId)).toHaveLength(2)
+    })
+
+    it('the fresh-session retry still carries the owner operating guidance (not dropped as \'\')', async () => {
+      const guidance = 'Never offer store credit above $50 without escalating.'
+      await settings.set('support.agent_guidance', guidance)
+      const ticketId = await seedTicket({
+        agentSessionId: 'session-live',
+        lastAgentPromptedAt: minutesAgo(40),
+        lastInboundAt: minutesAgo(30),
+      })
+      await seedMessage(ticketId, { bodyText: 'old question', sentAt: minutesAgo(50) })
+      await seedMessage(ticketId, { bodyText: 'new question', sentAt: minutesAgo(30) })
+      sessionEntries = [{ uuid: 'e1' } as unknown as SessionStoreEntry]
+      const deps = withRun(
+        unusableResult({ failedBeforeFirstAssistant: true }),
+        succeededResult({ outcome: 'no_action', rationale: 'ok' }, { sessionId: 'session-fresh' }),
+      )
+
+      await executeSupportAgentRun(deps, ticketId)
+
+      expect(runFn).toHaveBeenCalledTimes(2)
+      expect(contexts[0]!.ownerGuidance).toBe(guidance)
+      // The retry must reuse the guidance already loaded on the original context, not drop it.
+      expect(contexts[1]!.ownerGuidance).toBe(guidance)
     })
 
     // The other shape resume failure arrives in: no HarnessResult at all. A throw out of the

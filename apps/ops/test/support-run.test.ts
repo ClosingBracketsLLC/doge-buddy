@@ -63,7 +63,7 @@ function msg(overrides: Partial<SupportRunContext['messages'][number]> = {}): Su
 }
 
 describe('buildSupportSystemPrompt', () => {
-  const prompt = buildSupportSystemPrompt()
+  const prompt = buildSupportSystemPrompt('')
 
   it('embeds the verbatim returns policy', () => {
     expect(prompt).toContain('30 days of delivery')
@@ -84,6 +84,36 @@ describe('buildSupportSystemPrompt', () => {
   })
 })
 
+describe('buildSupportSystemPrompt guidance', () => {
+  it('is byte-identical to the no-guidance prompt when guidance is empty', () => {
+    expect(buildSupportSystemPrompt('   ')).toBe(buildSupportSystemPrompt(''))
+  })
+
+  it('appends the authoritative owner-guidance section when non-empty', () => {
+    const g = 'No returns just because the dog disliked it.'
+    const out = buildSupportSystemPrompt(g)
+    expect(out).toContain('## Owner operating guidance (AUTHORITATIVE — overrides the public store policy wherever they conflict)')
+    expect(out).toContain(g)
+    // guidance must come AFTER the hard rules (they still bind)
+    expect(out.indexOf('## Hard rules')).toBeLessThan(out.indexOf('## Owner operating guidance'))
+  })
+
+  it('states the hard-rule non-override sentence, and it precedes the guidance section', () => {
+    const out = buildSupportSystemPrompt('x')
+    expect(out.toLowerCase()).toContain('may relax or override these hard rules')
+    const hardRuleIdx = out.toLowerCase().indexOf('may relax or override these hard rules')
+    const guidanceIdx = out.indexOf('## Owner operating guidance')
+    expect(hardRuleIdx).toBeGreaterThan(-1)
+    expect(hardRuleIdx).toBeLessThan(guidanceIdx)
+  })
+
+  it('never TypeErrors on a mis-typed (non-string) setting value', () => {
+    // A settings row can be corrupted/mis-typed at the DB layer; the agent must never crash on it.
+    expect(() => buildSupportSystemPrompt(undefined as unknown as string)).not.toThrow()
+    expect(() => buildSupportSystemPrompt(null as unknown as string)).not.toThrow()
+  })
+})
+
 describe('buildSupportPrompt — fresh run', () => {
   it('includes the subject, both message bodies as tagged JSON lines, the prior-proposal line, an order-linked note, and dmarc=pass', () => {
     const ctx: SupportRunContext = {
@@ -95,6 +125,7 @@ describe('buildSupportPrompt — fresh run', () => {
       priorProposals: [{ id: 'p1', type: 'support_reply', status: 'expired', summary: 'Prior draft asking for order number.' }],
       resumeSessionId: null,
       isResume: false,
+      ownerGuidance: '',
     }
 
     const prompt = buildSupportPrompt(ctx)
@@ -124,6 +155,7 @@ describe('buildSupportPrompt — fresh run', () => {
       priorProposals: [],
       resumeSessionId: null,
       isResume: false,
+      ownerGuidance: '',
     }
 
     const prompt = buildSupportPrompt(ctx)
@@ -154,6 +186,7 @@ describe('buildSupportPrompt — fresh run', () => {
       priorProposals: [],
       resumeSessionId: null,
       isResume: false,
+      ownerGuidance: '',
     }
 
     const prompt = buildSupportPrompt(ctx)
@@ -169,6 +202,7 @@ describe('buildSupportPrompt — fresh run', () => {
       priorProposals: [],
       resumeSessionId: null,
       isResume: false,
+      ownerGuidance: '',
     }
 
     expect(buildSupportPrompt(ctx)).toContain('sender authentication: NOT verified')
@@ -195,6 +229,7 @@ describe('buildSupportPrompt — fresh run', () => {
       priorProposals: [],
       resumeSessionId: null,
       isResume: false,
+      ownerGuidance: '',
     }
 
     expect(buildSupportPrompt(ctx)).toContain('sender authentication: dmarc=pass')
@@ -210,6 +245,7 @@ describe('buildSupportPrompt — fresh run', () => {
       priorProposals: [],
       resumeSessionId: null,
       isResume: false,
+      ownerGuidance: '',
     }
 
     expect(buildSupportPrompt(ctx)).toContain('sender authentication: dmarc=pass')
@@ -229,6 +265,7 @@ describe('buildSupportPrompt — resumed run', () => {
       priorProposals: [],
       resumeSessionId: 'sess-abc',
       isResume: true,
+      ownerGuidance: '',
     }
 
     const prompt = buildSupportPrompt(ctx)
@@ -269,6 +306,7 @@ describe('runSupportAgent — options assembly (stubbed queryFn)', () => {
       priorProposals: [],
       resumeSessionId: null,
       isResume: false,
+      ownerGuidance: '',
       ...overrides,
     }
   }
@@ -312,6 +350,21 @@ describe('runSupportAgent — options assembly (stubbed queryFn)', () => {
     expect(captured!.model).toBe(SUPPORT_MODEL)
     expect(captured!.maxTurns).toBe(SUPPORT_MAX_TURNS)
     expect(captured!.maxBudgetUsd).toBe(SUPPORT_MAX_BUDGET_USD)
+  })
+
+  it('threads ctx.ownerGuidance into the system prompt', async () => {
+    const runId = await claimRow('options-guidance')
+    let captured: Record<string, unknown> | undefined
+    const d = deps((args) => {
+      captured = args.options
+      return successStream()
+    })
+    const guidance = 'Never offer store credit above $50 without escalating.'
+
+    await runSupportAgent(d, { runId, ctx: ctx({ ownerGuidance: guidance }) })
+
+    expect(captured!.systemPrompt as string).toContain(guidance)
+    expect(captured!.systemPrompt as string).toContain('## Owner operating guidance')
   })
 
   it('constants match spec §1', () => {

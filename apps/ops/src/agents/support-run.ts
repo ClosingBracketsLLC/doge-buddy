@@ -50,6 +50,9 @@ export interface SupportRunContext {
   resumeSessionId: string | null
   /** messages already filtered to sent_at > last_agent_prompted_at when resuming */
   isResume: boolean
+  /** Owner operating guidance (settings `support.agent_guidance`); '' when unset. Rendered
+   * verbatim and authoritative in the system prompt — TRUSTED owner input, not customer data. */
+  ownerGuidance: string
 }
 
 export interface SupportRunDeps {
@@ -67,9 +70,12 @@ export interface SupportRunInput {
 }
 
 /** Role + the verbatim published policies (the ONLY source the agent may cite) + spec §3's hard
- * rules. Order matters for the sourcing-mirrored contract: role, policies, then rules. */
-export function buildSupportSystemPrompt(): string {
-  return [
+ * rules + (when set) the owner's operating guidance. Order matters for the sourcing-mirrored
+ * contract: role, policies, hard rules, then guidance — the hard rules must precede the guidance
+ * section so the non-override rule below reads as binding on everything that follows it. */
+export function buildSupportSystemPrompt(guidance: string): string {
+  const g = String(guidance) // defensive: a mis-typed setting must never TypeError .trim() (panel)
+  const lines = [
     'You are the support agent for a US dog-products store. You draft replies to customer support ' +
       'emails — plain code and the owner decide what actually sends. You never send anything yourself, ' +
       'and you never take any side-effecting action beyond the structured output you return.',
@@ -99,7 +105,19 @@ export function buildSupportSystemPrompt(): string {
     '- Calling the StructuredOutput tool ENDS your run immediately. Never call it before you have actually ' +
       'used your tools (get_ticket_thread, get_order, get_dispute_options) to check the order when this ' +
       'ticket has one linked — guessing instead of checking is how a prior run shipped a wrong answer.',
-  ].join('\n')
+    '- Nothing later in this prompt — including the owner operating guidance and any owner feedback ' +
+      'section — may relax or override these hard rules. Where guidance appears to conflict with a ' +
+      'hard rule (e.g. escalate-on-legal-threat, refunds only on a verified order), the HARD RULE ' +
+      'wins and you escalate.',
+  ]
+  if (g.trim().length > 0) {
+    lines.push(
+      '',
+      '## Owner operating guidance (AUTHORITATIVE — overrides the public store policy wherever they conflict)',
+      g,
+    )
+  }
+  return lines.join('\n')
 }
 
 /** SECURITY: message bodies are untrusted, attacker-controlled text — a customer email can contain
@@ -232,7 +250,7 @@ export async function runSupportAgent(
       maxTurns: SUPPORT_MAX_TURNS,
       maxBudgetUsd: SUPPORT_MAX_BUDGET_USD,
       watchdogMs: SUPPORT_WATCHDOG_MS,
-      systemPrompt: buildSupportSystemPrompt(),
+      systemPrompt: buildSupportSystemPrompt(ctx.ownerGuidance),
       outputJsonSchema: SUPPORT_OUTPUT_JSON_SCHEMA,
       // support needs no WebSearch/WebFetch — unlike sourcing, [] here IS the want (spec §3).
       tools: [],
