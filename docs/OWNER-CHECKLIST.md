@@ -46,6 +46,24 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   tell Claude either way. If it was missed: run the migration, then look at `/admin/tickets` for
   mail that arrived during the gap (ingest resumes on the next poll; nothing is lost in Gmail).
   The three commits after `6b26bb3` add NO migration.
+- [ ] 🔴 **Create the standing discount code `SORRY15` in Shopify** (2 minutes; the app has no
+  `write_discounts` scope, so Claude can't do it by API). Shopify admin → Discounts → Create
+  discount → *Amount off order* → Method: **Discount code**, code `SORRY15` → Value: **15%** →
+  Minimum purchase: none → Maximum discount uses: tick **"Limit to one use per customer"** → Active
+  dates: start now, no end date → Save. This is the no-refund strategy's ONLY concession, and the
+  agent will quote it — the validator now treats "we've issued/sent/applied you a code" as an
+  unbacked promise (the agent can't issue codes), while quoting the existing code passes. Until the
+  code exists, any quoted `SORRY15` is a broken promise, so create it BEFORE pasting the guidance.
+- [ ] 🔴 **Paste this into `/admin/guidance`** (edit freely — it's yours; the hard rules still win
+  over it). It replaces whatever coupon wording you wrote earlier:
+  > Our stance: we avoid refunds and returns. All sales are final for change of mind — never offer a
+  > return or a refund for a product that arrived as described; decline politely and offer discount
+  > code SORRY15 (15% off their next order, one use per customer). For damaged, defective, or wrong
+  > items: ask for a photo of what arrived and say we'll arrange a replacement at no charge (no
+  > return needed); do not offer a refund unless the owner has said a replacement isn't possible. For
+  > an order that never arrived: check tracking with get_order; if it's past the promised window, say
+  > we'll reship it. Never bring up refunds unprompted. If a customer insists on a refund, mentions a
+  > chargeback or dispute, or threatens legal action — escalate.
 - [x] ~~Gmail "Send mail as" check.~~ **Moot (2026-08-30):** `support@dogebuddy.com` became the
   user's PRIMARY address during 6A bring-up, so there is no alias to add — and the mailbox now holds
   two live replies stamped `From: support@dogebuddy.com` (see the Tier-2 status below).
@@ -156,7 +174,7 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 - [ ] ⚪ **FunkyDori webfont license check** (Phase 2). Not a blocker — Lilita One is the stand-in display face (the `--font-display` token in tailwind.css is the FunkyDori swap point); Poppins is the body face.
 - [x] ~~Apply for the Google Trends official API alpha.~~ **Applied (2026-08-24).** Approval is slow (months-to-never per applicant reports) — SerpApi bridges it meanwhile; the Phase 5 trends adapter is swappable, so approval landing later is a drop-in.
 - [ ] ⚪ **CJ wallet top-up ~$150** (Phase 7 canary). 🔴 blocks the first real order. Top-up is manual only — no API.
-- [ ] ⚪ **Policy pages → Shopify Settings** (Phase 7). Paste `apps/storefront/app/content/policies.tsx` copy into Shopify Settings → Policies and review/finalize before launch.
+- [ ] ⚪ **Policy pages → Shopify Settings** (Phase 7). Paste the `POLICY_COPY` text (`packages/core/src/policies.ts` — single-sourced; the storefront renders it and the agent quotes it) into Shopify Settings → Policies and review/finalize before launch. **Rewritten 2026-08-30 to match your no-refund stance:** returns = *All sales are final* (change of mind: keep it, discount code at our discretion) + *Damaged, defective, or wrong items* (photo within 14 days → replacement, refund only if we can't replace); shipping = reship for non-delivery, refund only if we can't reship. Legally load-bearing: a no-refund policy is only enforceable when conspicuously posted (CA Civ. Code §1723 / NY GBL §218-a default to a 30-day return right otherwise), and non-delivery must still end in reship-or-refund (FTC Mail/Internet Order Rule) — refusing those turns into chargebacks that cost more than the refund.
 - [ ] ⚪ **Business checks before launch** (Phase 7): Shopify Payments setup, US tax registrations in Shopify Tax, general liability insurance for the LLC (recommended), policy pages review.
 
 - [ ] ⚪ **Store-transfer gotchas to re-verify at Phase 7 cutover** (carried from the never-sent Shopify support question, since the client-transfer path was taken unconfirmed): whether app installs + Admin API credentials, custom domains, and Shopify Payments configuration survive the transfer to your merchant account — budget time to re-create the `doge-buddy` app and re-issue credentials if they don't.
