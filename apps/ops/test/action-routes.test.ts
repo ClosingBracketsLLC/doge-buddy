@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { buildServer } from '../src/server.ts'
 import type { ActionRouteDeps } from '../src/http/actions.ts'
 import { generateActionToken } from '../src/proposals/tokens.ts'
+import { SUPPORT_REDRAFT_MAX } from '../src/support/redraft.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -141,6 +142,12 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
 
   function supportReplyPayload(ticketId: string, body: string) {
     return { type: 'support_reply' as const, ticketId, body, threadSnapshotAt: new Date().toISOString() }
+  }
+
+  /** Serializes like a real `<form method="post">` submit: `URLSearchParams#toString()` encodes
+   * spaces as `+`, which the server's `new URLSearchParams(body)` parser round-trips correctly. */
+  function formBody(fields: Record<string, string>): string {
+    return new URLSearchParams(fields).toString()
   }
 
   function refundPayload(orderId: string, overrides: Partial<{ amountCents: number; reason: string; openCjDispute: boolean }> = {}) {
@@ -587,6 +594,258 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
     const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
     expect(after!.status).toBe('approved')
     expect(deps.enqueue).toHaveBeenCalledTimes(1)
+
+    await app.close()
+  })
+
+  // -- Task 8: public reject form — reason capture + re-draft dispatch ---------------------------
+
+  it('16. GET reject of a support_reply renders a reason textarea + redraft/escalate buttons', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    const { row, token } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+
+    const res = await app.inject({ method: 'GET', url: `/a/${row.id}/reject?t=${token}` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('<textarea name="reason"')
+    expect(res.body).toContain('name="action" value="redraft"')
+    expect(res.body).toContain('name="action" value="escalate"')
+
+    await app.close()
+  })
+
+  it('17. GET reject of a non-support (sourcing) proposal stays a plain single-button confirm — no reason box', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const { row, token } = await seedPending()
+
+    const res = await app.inject({ method: 'GET', url: `/a/${row.id}/reject?t=${token}` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).not.toContain('<textarea')
+    expect(res.body).not.toContain('name="action"')
+    expect(res.body).toContain('<form method="post"')
+    expect(res.body).toContain('<button type="submit">Reject</button>')
+
+    await app.close()
+  })
+
+  it('18. GET approve of a support_reply stays a plain single-button confirm (isSupportReject only gates reject)', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    const { row, token } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+
+    const res = await app.inject({ method: 'GET', url: `/a/${row.id}/approve?t=${token}` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).not.toContain('<textarea')
+    expect(res.body).toContain('<button type="submit">Approve</button>')
+
+    await app.close()
+  })
+
+  it('19. POST reject action=redraft on an awaiting_approval ticket re-arms it: triaged, feedback stored, count+1, proposal rejected', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    const { row, token } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/a/${row.id}/reject?t=${token}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: formBody({ reason: 'please mention our 30-day return policy', action: 'redraft' }),
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Rejected')
+
+    const [proposalAfter] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(proposalAfter!.status).toBe('rejected')
+    expect(proposalAfter!.actionTokenHash).toBeNull()
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('triaged')
+    expect(ticketAfter!.ownerRedraftFeedback).toBe('please mention our 30-day return policy')
+    expect(ticketAfter!.redraftCount).toBe(1)
+    // Redraft is a resume, not a fresh escalation — must not clobber the resumable session.
+    expect(ticketAfter!.agentSessionId).toBe('sess-abc')
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows).toHaveLength(1)
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'link', resolution: 'redraft' })
+
+    await app.close()
+  })
+
+  it('20. POST reject action=escalate -> ticket escalated (terminal), same silent shape as a plain reject', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    const { row, token } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/a/${row.id}/reject?t=${token}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: formBody({ reason: 'not a good fit for this ticket', action: 'escalate' }),
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Rejected')
+
+    const [proposalAfter] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(proposalAfter!.status).toBe('rejected')
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('owner_rejected_draft')
+    expect(ticketAfter!.escalationNotifiedAt).not.toBeNull() // pre-stamped silent, same as today
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'link', resolution: 'escalate_terminal' })
+
+    await app.close()
+  })
+
+  it('21. POST reject with an empty reason (no form body at all) -> also terminal escalate, as today', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    const { row, token } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+
+    const res = await app.inject({ method: 'POST', url: `/a/${row.id}/reject?t=${token}` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Rejected')
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('owner_rejected_draft')
+
+    await app.close()
+  })
+
+  it('22. POST reject action=redraft when ticket is already at SUPPORT_REDRAFT_MAX -> escalates with redraft_limit_reached and PAGES (not silent)', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    await db.update(supportTickets).set({ redraftCount: SUPPORT_REDRAFT_MAX }).where(eq(supportTickets.id, ticket.id))
+    const { row, token } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/a/${row.id}/reject?t=${token}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: formBody({ reason: 'still not right', action: 'redraft' }),
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Rejected')
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('redraft_limit_reached')
+    expect(ticketAfter!.escalationNotifiedAt).toBeNull() // not pre-stamped -> the poller pages
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'link', resolution: 'escalate_limit' })
+
+    await app.close()
+  })
+
+  it('23. POST reject with a reason over 2000 chars -> readable refusal page, no state change, token NOT consumed', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    const { row, token } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const longReason = 'x'.repeat(2001)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/a/${row.id}/reject?t=${token}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: formBody({ reason: longReason, action: 'redraft' }),
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).not.toContain(FRIENDLY_COPY) // must be a readable refusal, not the misleading generic copy
+    expect(res.body).toContain('too long')
+
+    const [proposalAfter] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(proposalAfter!.status).toBe('pending')
+    expect(proposalAfter!.actionTokenHash).not.toBeNull() // token NOT consumed
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('awaiting_approval')
+    expect(ticketAfter!.redraftCount).toBe(0)
+
+    // The same (still-valid, still-pending) token can go on to actually reject afterward.
+    const followUp = await app.inject({
+      method: 'POST',
+      url: `/a/${row.id}/reject?t=${token}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: formBody({ reason: 'ok this is short', action: 'redraft' }),
+    })
+    expect(followUp.statusCode).toBe(200)
+    expect(followUp.body).toContain('Rejected')
+
+    await app.close()
+  })
+
+  it('24. POST reject of a non-support (sourcing) proposal is unaffected by the new dispatch: still a plain terminal reject', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const { row, token } = await seedPending()
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/a/${row.id}/reject?t=${token}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: formBody({ reason: 'irrelevant for sourcing', action: 'redraft' }),
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Rejected')
+
+    const [after] = await db.select().from(proposals).where(eq(proposals.id, row.id))
+    expect(after!.status).toBe('rejected')
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows).toHaveLength(1)
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'link' })
+    expect(auditRows[0]!.detail).not.toHaveProperty('resolution')
 
     await app.close()
   })

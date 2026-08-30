@@ -1,12 +1,13 @@
 import { timingSafeEqual } from 'node:crypto'
-import { auditLog, proposals, type createDb } from '@doge-buddy/db'
+import { auditLog, proposals, supportTickets, type createDb } from '@doge-buddy/db'
 import { eq } from 'drizzle-orm'
 import type { FastifyPluginAsync } from 'fastify'
 import type { SendOpts } from '../fulfillment/types.ts'
 import { enqueueProposalApply } from '../proposals/submit.ts'
-import { onSupportProposalRejected, validateSupportProposalForApproval } from '../proposals/support-decision.ts'
+import { onSupportProposalRejected, onSupportProposalRejectedForRedraft, validateSupportProposalForApproval } from '../proposals/support-decision.ts'
 import { hashActionToken } from '../proposals/tokens.ts'
 import { applyProposalTransition, StaleProposalStatusError } from '../proposals/transitions.ts'
+import { resolveRejectAction, SUPPORT_REDRAFT_MAX } from '../support/redraft.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -43,13 +44,41 @@ function friendlyPage(): string {
   return page(`<p>${FRIENDLY_COPY}</p>`)
 }
 
-function confirmPage(proposalId: string, decision: Decision, summary: string, token: string): string {
+/**
+ * `isSupportReject`/`redraftCount` (Task 8): the reason-capture form only ever renders for a
+ * REJECT of a `support_reply`/`refund` proposal that's tied to a ticket — approve, and reject of a
+ * non-support (e.g. sourcing/product) proposal, stay today's plain single-button confirm. Sourcing
+ * proposals have no ticket to re-draft against, so giving them a reason box would be a dead end
+ * that misleads the clicker into thinking a redraft is possible.
+ */
+function confirmPage(
+  proposalId: string,
+  decision: Decision,
+  summary: string,
+  token: string,
+  isSupportReject: boolean,
+  redraftCount: number,
+): string {
   const label = decision === 'approve' ? 'Approve' : 'Reject'
   const action = `/a/${proposalId}/${decision}?t=${encodeURIComponent(token)}`
+  if (decision === 'approve' || !isSupportReject) {
+    return page(`
+      <p>${esc(summary)}</p>
+      <form method="post" action="${action}">
+        <button type="submit">${label}</button>
+      </form>
+    `)
+  }
+  const canRedraft = redraftCount < SUPPORT_REDRAFT_MAX
   return page(`
     <p>${esc(summary)}</p>
     <form method="post" action="${action}">
-      <button type="submit">${label}</button>
+      <p><label>Reason for the agent (optional — leave blank to escalate to you):<br>
+        <textarea name="reason" rows="6" cols="70" maxlength="2000"></textarea></label></p>
+      ${canRedraft
+        ? `<button type="submit" name="action" value="redraft">Re-draft with this reason</button> `
+        : `<p>Re-drafted ${SUPPORT_REDRAFT_MAX}× already — rejecting again escalates to you.</p>`}
+      <button type="submit" name="action" value="escalate">Just escalate to me</button>
     </form>
   `)
 }
@@ -86,6 +115,17 @@ function validationFailedPage(code: string, detail: string): string {
 }
 
 /**
+ * Rendered when a reject reason exceeds the 2000-char bound (Task 8). Deliberately NOT
+ * `friendlyPage()` — that copy ("already handled or has expired") would mislead the clicker into
+ * thinking the link is dead and their reason was silently swallowed, when actually nothing at all
+ * happened: the check runs before the reject transition, so the token is still valid and the
+ * proposal is still pending. A readable refusal lets them go back and shorten it.
+ */
+function reasonTooLongPage(): string {
+  return page('<p>Reason too long (max 2000 characters) — nothing was changed. Go back and shorten it.</p>')
+}
+
+/**
  * Timing-safe check that `token` (raw, from the query string) matches `row`'s stored hash, on a
  * row that is still pending and not yet expired. Both sides of the comparison are 64-char hex
  * sha256 digests, but length is still guarded before `timingSafeEqual` (which throws on unequal
@@ -108,14 +148,22 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
     // Fastify ships parsers for application/json and text/plain ONLY — a real browser submitting
     // the confirm page's <form method="post"> sends application/x-www-form-urlencoded, which
     // 415'd (FST_ERR_CTP_INVALID_MEDIA_TYPE) before the route ever ran (found live on the first
-    // Telegram-button tap). These routes read nothing from the body — the token rides the query
-    // string — so the parser just accepts and discards it. Scoped to this plugin's encapsulation
-    // context, like the webhook plugin's raw-body parser.
+    // Telegram-button tap) until this parser was added. Task 8: it now actually PARSES the body
+    // into an object (`request.body`) instead of discarding it, because the reject route's reason
+    // form needs `reason`/`action` off the wire. Approve still reads nothing from the body, so
+    // this stays fully backward-compatible with it — an empty/absent body just parses to `{}`, the
+    // same effective no-op the old discard-everything parser produced. Scoped to this plugin's
+    // encapsulation context, like the webhook plugin's raw-body parser.
     fastify.addContentTypeParser(
       'application/x-www-form-urlencoded',
-      { parseAs: 'buffer' },
-      (_req: unknown, _body: unknown, done: (err: Error | null, body?: unknown) => void) => {
-        done(null, undefined)
+      { parseAs: 'string' },
+      (_req: unknown, body: unknown, done: (err: Error | null, body?: unknown) => void) => {
+        try {
+          const params = new URLSearchParams(body as string)
+          done(null, Object.fromEntries(params.entries()))
+        } catch (err) {
+          done(err instanceof Error ? err : new Error('bad form body'), undefined)
+        }
       },
     )
     async function lookup(proposalId: string): Promise<ProposalRow | undefined> {
@@ -126,14 +174,32 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
     async function handleGet(decision: Decision, proposalId: string, token: string | undefined): Promise<string> {
       const row = await lookup(proposalId)
       if (isValidDecision(row, token)) {
+        // Gate the reason form strictly on REJECT of a support-ticket-linked support_reply/refund
+        // — the GET must not consume the single-use token (only the POST does), so this is a
+        // read-only render off the already-validated row plus one extra read-only lookup.
+        const isSupportReject =
+          decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund') && row.ticketId !== null
+        let redraftCount = 0
+        if (isSupportReject) {
+          const [ticket] = await deps.db
+            .select({ redraftCount: supportTickets.redraftCount })
+            .from(supportTickets)
+            .where(eq(supportTickets.id, row.ticketId!))
+          redraftCount = ticket?.redraftCount ?? 0
+        }
         // Use the DB-verified row's own id, not the raw request path param, so the form action
         // attribute can never be built from unvalidated user input.
-        return confirmPage(row.id, decision, row.summary, token!)
+        return confirmPage(row.id, decision, row.summary, token!, isSupportReject, redraftCount)
       }
       return friendlyPage()
     }
 
-    async function handlePost(decision: Decision, proposalId: string, token: string | undefined): Promise<string> {
+    async function handlePost(
+      decision: Decision,
+      proposalId: string,
+      token: string | undefined,
+      formBody: unknown,
+    ): Promise<string> {
       const row = await lookup(proposalId)
 
       // Lazy expiry: a pending row past its expiresAt flips to 'expired' the moment someone
@@ -177,11 +243,35 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
 
       const status = decision === 'approve' ? 'approved' : 'rejected'
       const isSupportRejectDecision = decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')
+
+      // Task 8: resolve the reject dispatch OUTSIDE the transaction, before any state changes. The
+      // over-2000-char refusal must return here — before `applyProposalTransition` ever runs — so
+      // it can never consume the single-use token or change any state (§ "SECURITY/EDGE" in the
+      // brief: the token rides the query string and is only cleared by the transition below).
+      let resolution: ReturnType<typeof resolveRejectAction> | undefined
+      let reason = ''
+      if (isSupportRejectDecision) {
+        const body = (formBody ?? {}) as { reason?: string; action?: string }
+        const rawReason = body.reason ?? ''
+        if (rawReason.length > 2000) return reasonTooLongPage()
+        reason = rawReason
+        const [ticket] = await deps.db
+          .select({ status: supportTickets.status, redraftCount: supportTickets.redraftCount })
+          .from(supportTickets)
+          .where(eq(supportTickets.id, row.ticketId!))
+        resolution = resolveRejectAction({
+          reason,
+          action: body.action ?? 'escalate',
+          redraftCount: ticket?.redraftCount ?? 0,
+          ticketStatus: ticket?.status ?? '',
+        })
+      }
+
       try {
         if (isSupportRejectDecision) {
           // Atomic (Task 18 review, M5): same shape as the admin surface's decision route — the
-          // reject transition, its own audit row, and everything `onSupportProposalRejected` does
-          // (sibling expiry+audit, ticket escalation) land in ONE transaction, mirroring
+          // reject transition, its own audit row, and everything the dispatch below does (sibling
+          // expiry+audit, ticket re-arm or escalation) land in ONE transaction, mirroring
           // `apply-shared.ts`'s `failStaleAndHandBack` precedent. A throw anywhere inside rolls
           // EVERYTHING back, including the transition itself.
           await deps.db.transaction(async (tx) => {
@@ -195,9 +285,24 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
               action: 'proposal.reject',
               entityType: 'proposal',
               entityId: proposalId,
-              detail: { via: 'link' },
+              detail: { via: 'link', resolution: resolution!.kind },
             })
-            await onSupportProposalRejected(tx, { id: row.id, ticketId: row.ticketId, type: row.type })
+            const r = { id: row.id, ticketId: row.ticketId, type: row.type }
+            if (resolution!.kind === 'redraft') {
+              // ATOMIC FALLBACK (Task 8 brief): a 0-row re-arm means the ticket left
+              // `awaiting_approval` between our pre-tx read and this guarded UPDATE (a concurrent
+              // tab, a second reject) — fall back to the terminal escalate in the SAME tx. Never
+              // leave the proposal rejected + sibling expired with no ticket-side signal at all.
+              const rearmed = await onSupportProposalRejectedForRedraft(tx, r, reason, () => new Date())
+              if (!rearmed) await onSupportProposalRejected(tx, r)
+            } else if (resolution!.kind === 'escalate_limit') {
+              await onSupportProposalRejected(tx, r, {
+                awaitingApprovalReason: 'redraft_limit_reached',
+                awaitingApprovalNotify: true,
+              })
+            } else {
+              await onSupportProposalRejected(tx, r)
+            }
           })
         } else {
           await applyProposalTransition(deps.db, proposalId, 'pending', status, {
@@ -270,7 +375,10 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
       fastify.post(`/a/:proposalId/${decision}`, async (request, reply) => {
         const { proposalId } = request.params as { proposalId: string }
         const { t } = request.query as { t?: string }
-        const body = await safeRender(proposalId, () => handlePost(decision, proposalId, t))
+        // Approve never reads the body — pass `undefined` so it can never accidentally observe a
+        // form field, even if one were somehow present. Only reject's dispatch reads `reason`/`action`.
+        const formBody = decision === 'reject' ? request.body : undefined
+        const body = await safeRender(proposalId, () => handlePost(decision, proposalId, t, formBody))
         return reply.code(200).type('text/html; charset=utf-8').send(body)
       })
     }
