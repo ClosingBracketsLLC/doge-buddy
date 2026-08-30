@@ -26,7 +26,7 @@ export const POLICY_COPY: PolicyCopy[] = [
         paragraphs: [
           "All orders ship from US warehouses. Standard delivery arrives in 3–7 business days after your order is processed (processing up to 1 business day). Tracking is emailed as soon as your order ships, and also appears in your account's order history.",
           'We currently ship within the United States only.',
-          "If your order hasn't arrived within the promised window, contact us and we'll make it right — replacement or full refund.",
+          "If your order hasn't arrived within the promised window, contact us with your order number and we'll reship it at no charge. If we can't reship it, we'll refund it.",
         ],
       },
     ],
@@ -36,16 +36,17 @@ export const POLICY_COPY: PolicyCopy[] = [
     title: 'Returns',
     sections: [
       {
-        heading: '30-day returns',
+        heading: 'All sales are final',
         paragraphs: [
-          "If you or your dog aren't happy with an item, contact us within 30 days of delivery for a prepaid return label — refunds go to the original payment method within 5–10 business days of the returned item arriving.",
-          'Items should be unused where possible, but if your dog took a test chew, talk to us anyway.',
+          "We don't accept returns or give refunds for change of mind — a product that arrived as described but didn't suit you or your dog is yours to keep. All sales are final.",
+          "If something isn't working out, write to us anyway: at our discretion we'll offer a discount code toward a future order.",
         ],
       },
       {
-        heading: 'Damaged or wrong items',
+        heading: 'Damaged, defective, or wrong items',
         paragraphs: [
-          'Full refund or replacement, photos appreciated, no return needed for damaged goods.',
+          "Contact us within 14 days of delivery with a photo of what arrived. We'll send a replacement at no charge — no return needed. If we can't replace it, we'll refund it.",
+          'Refunds, when they apply, go back to the original payment method.',
         ],
       },
     ],

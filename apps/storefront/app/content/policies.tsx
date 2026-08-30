@@ -23,8 +23,8 @@ export interface Policy {
 }
 
 const UPDATED: Record<PolicyHandle, string> = {
-  shipping: '2026-08-17',
-  returns: '2026-08-17',
+  shipping: '2026-08-30',
+  returns: '2026-08-30',
   privacy: '2026-08-17',
   terms: '2026-08-17',
 };

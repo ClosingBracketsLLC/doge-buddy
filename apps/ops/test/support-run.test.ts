@@ -78,7 +78,7 @@ describe('buildSupportSystemPrompt', () => {
   const prompt = buildSupportSystemPrompt('')
 
   it('embeds the verbatim returns policy', () => {
-    expect(prompt).toContain('30 days of delivery')
+    expect(prompt).toContain('All sales are final')
   })
 
   it('states the sign-off rule', () => {
