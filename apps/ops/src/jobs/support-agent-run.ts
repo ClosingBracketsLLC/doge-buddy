@@ -1045,6 +1045,7 @@ async function buildContext(
       orderId: ticket.orderId,
       claimedOrderNumber: ticket.claimedOrderNumber,
       escalationReason: ticket.escalationReason,
+      ownerRedraftFeedback: ticket.ownerRedraftFeedback,
     },
     messages,
     priorProposals,

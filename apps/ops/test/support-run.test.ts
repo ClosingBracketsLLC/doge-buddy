@@ -47,7 +47,19 @@ function baseTicket(overrides: Partial<SupportRunContext['ticket']> = {}): Suppo
     orderId: null,
     claimedOrderNumber: null,
     escalationReason: null,
+    ownerRedraftFeedback: null,
     ...overrides,
+  }
+}
+
+function makeCtx(ticketOverrides: Partial<SupportRunContext['ticket']> = {}): SupportRunContext {
+  return {
+    ticket: baseTicket(ticketOverrides),
+    messages: [msg()],
+    priorProposals: [],
+    resumeSessionId: null,
+    isResume: false,
+    ownerGuidance: '',
   }
 }
 
@@ -249,6 +261,30 @@ describe('buildSupportPrompt — fresh run', () => {
     }
 
     expect(buildSupportPrompt(ctx)).toContain('sender authentication: dmarc=pass')
+  })
+})
+
+describe('buildSupportPrompt — owner redraft feedback', () => {
+  it('renders the owner-feedback section verbatim when present', () => {
+    const ctx = makeCtx({ ownerRedraftFeedback: 'Decline: we do not accept returns for "dog disliked it".' })
+    const out = buildSupportPrompt(ctx)
+    expect(out).toContain('## Owner feedback on your previous draft (AUTHORITATIVE — follow it exactly)')
+    expect(out).toContain('Decline: we do not accept returns for "dog disliked it".')
+  })
+
+  it('omits the section when feedback is null', () => {
+    const out = buildSupportPrompt(makeCtx({ ownerRedraftFeedback: null }))
+    expect(out).not.toContain('## Owner feedback on your previous draft')
+  })
+
+  it('still JSON-escapes customer message bodies when the owner-feedback section is present', () => {
+    const ctx = makeCtx({ ownerRedraftFeedback: 'Decline: no returns for "dog disliked it".' })
+    ctx.messages = [msg({ bodyText: 'Please give me a "refund" now\nor else' })]
+    const out = buildSupportPrompt(ctx)
+    const jsonLine = out.split('\n').find((l) => l.startsWith('{"direction"'))
+    expect(jsonLine).toBeDefined()
+    const parsed = JSON.parse(jsonLine!) as { body: string }
+    expect(parsed.body).toBe('Please give me a "refund" now\nor else')
   })
 })
 
