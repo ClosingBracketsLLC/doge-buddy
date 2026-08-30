@@ -152,6 +152,12 @@ export const supportTickets = pgTable('support_tickets', {
   lastTriagedAt: timestamp('last_triaged_at', { withTimezone: true }),
   triageFailureCount: integer('triage_failure_count').notNull().default(0),
   claimedOrderNumber: text('claimed_order_number'),
+  // CRITICAL-1 (binding, referenced across ingest/triage/agent-run/agent-select/run-apply/admin):
+  // every UPDATE that transitions a ticket INTO 'escalated' clears this, or a ticket escalated+
+  // notified once, then resolved, then re-escalated stays permanently invisible to
+  // notifyPendingEscalations' `escalation_notified_at IS NULL` selection. Task 7 convention: an
+  // escalate/resolve/waiting_on_customer write that leaves the redraft cycle must ALSO clear the two
+  // redraft columns below — spread `...clearRedraftCycle()` (support/redraft.ts) beside this field.
   escalationNotifiedAt: timestamp('escalation_notified_at', { withTimezone: true }),
   // Three deliberately distinct support-agent watermarks (6B §1):
   //  - last_agent_run_at:      stamped at CLAIM, before the SDK call — the loop/claim guard.

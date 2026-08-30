@@ -12,6 +12,7 @@ import {
   type ProposalRow,
 } from './apply-shared.ts'
 import { applyProposalTransition } from './transitions.ts'
+import { clearRedraftCycle } from '../support/redraft.ts'
 
 /**
  * These three now live in `apply-shared.ts` — both support executors write the same audit actions
@@ -250,7 +251,12 @@ async function completeSend(
   // owner escalated the ticket) matches 0 rows and leaves their status alone.
   const flipped = await db
     .update(supportTickets)
-    .set({ status: 'waiting_on_customer' })
+    .set({
+      status: 'waiting_on_customer',
+      // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+      // A shipped reply ends the cycle: any owner correction on the row is now fulfilled and dead.
+      ...clearRedraftCycle(),
+    })
     .where(
       and(
         eq(supportTickets.id, ticket.id),
@@ -283,7 +289,14 @@ async function completeSend(
       // restores "never run" and makes it selectable on the next cycle.
       await db
         .update(supportTickets)
-        .set({ status: 'triaged', lastAgentRunAt: null })
+        .set({
+          status: 'triaged',
+          lastAgentRunAt: null,
+          // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+          // A newer inbound moved the conversation on; the agent re-drafts fresh from the full
+          // thread, so the owner's correction on the now-superseded draft is dead — clear it.
+          ...clearRedraftCycle(),
+        })
         .where(and(eq(supportTickets.id, ticket.id), eq(supportTickets.status, 'awaiting_approval')))
     }
   }

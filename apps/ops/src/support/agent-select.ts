@@ -2,6 +2,7 @@ import { proposals, supportTickets, type createDb } from '@doge-buddy/db'
 import { and, eq, exists, inArray, isNull, lt, notExists, or, sql } from 'drizzle-orm'
 import type { SendOpts } from '../fulfillment/types.ts'
 import { enqueueSupportAgentRun, SUPPORT_AGENT_STUCK_AFTER_MINUTES } from '../jobs/support-agent-run.ts'
+import { clearRedraftCycle } from './redraft.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -230,6 +231,8 @@ async function escalateOrphans(db: Db, before: string): Promise<number> {
       // CRITICAL-1: cleared so `notifyPendingEscalations` (the only notifier) picks these tickets
       // up — nothing in this function notifies directly.
       escalationNotifiedAt: null,
+      // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+      ...clearRedraftCycle(),
     })
     .where(and(inArray(supportTickets.id, orphanCandidateIds), eq(supportTickets.status, 'awaiting_approval')))
     .returning({ id: supportTickets.id })
@@ -302,6 +305,8 @@ async function escalateUnbackedRefundPromises(db: Db, limitLeft: number): Promis
       // Cleared so `notifyPendingEscalations` (the only notifier) pages — a shipped promise that
       // lost its backing must reach the owner's phone, unlike the owner's own reject tap.
       escalationNotifiedAt: null,
+      // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+      ...clearRedraftCycle(),
     })
     .where(and(inArray(supportTickets.id, candidateIds), eq(supportTickets.status, 'waiting_on_customer')))
     .returning({ id: supportTickets.id })

@@ -8,6 +8,7 @@ import {
   type NormalizedMessage,
 } from '@doge-buddy/gmail'
 import { and, count, desc, eq, gte, inArray, lt, ne, sql } from 'drizzle-orm'
+import { clearRedraftCycle } from './redraft.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 /** The type of the callback's `tx` parameter inside `db.transaction(async (tx) => {...})` — the
@@ -369,7 +370,13 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
       // paged for the reopened case. The admin Escalate POST is the one exception (routes.ts).
       const escalated = await tx
         .update(supportTickets)
-        .set({ status: 'escalated', escalationReason: `tripwire: ${keyword}`, escalationNotifiedAt: null })
+        // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+        .set({
+          status: 'escalated',
+          escalationReason: `tripwire: ${keyword}`,
+          escalationNotifiedAt: null,
+          ...clearRedraftCycle(),
+        })
         .where(and(eq(supportTickets.id, ticket.id), ne(supportTickets.status, 'escalated')))
         .returning({ id: supportTickets.id })
       tripwireFlipped = escalated.length > 0

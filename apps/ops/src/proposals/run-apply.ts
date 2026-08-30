@@ -6,6 +6,7 @@ import { applyRefund } from './apply-refund.ts'
 import { capNotifyBody, type ApplyProposalDeps, type ProposalRow } from './apply-shared.ts'
 import { applySupportReply } from './apply-support-reply.ts'
 import { applyProposalTransition, StaleProposalStatusError } from './transitions.ts'
+import { clearRedraftCycle } from '../support/redraft.ts'
 
 /**
  * Backward-compatible re-exports: these declarations now live in `apply-shared.ts` (a leaf module
@@ -131,7 +132,8 @@ export async function deadLetterApplyProposal(deps: ApplyProposalDeps, proposalI
       // touch; 0 rows affected is a perfectly normal, non-error outcome.
       await db
         .update(supportTickets)
-        .set({ status: 'escalated', escalationReason: 'apply_failed', escalationNotifiedAt: null })
+        // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+        .set({ status: 'escalated', escalationReason: 'apply_failed', escalationNotifiedAt: null, ...clearRedraftCycle() })
         .where(and(eq(supportTickets.id, row.ticketId), eq(supportTickets.status, 'awaiting_approval')))
     }
     // Best-effort: `NotifyOwner` never rejects by its own contract (see notify.ts), but guard here

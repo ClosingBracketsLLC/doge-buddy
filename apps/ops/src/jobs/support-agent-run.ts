@@ -17,6 +17,7 @@ import type { SendOpts } from '../fulfillment/types.ts'
 import type { NotifyOwner } from '../notify/notify.ts'
 import { SUBJECT_MAX_CHARS, submitProposal, type SubmitProposalDeps } from '../proposals/submit.ts'
 import type { Settings } from '../settings.ts'
+import { clearRedraftCycle } from '../support/redraft.ts'
 import { validateSupportOutput } from '../support/validator.ts'
 
 type Db = ReturnType<typeof createDb>['db']
@@ -499,6 +500,54 @@ async function runAndHandleOutcome(
 
   const output = settled.output
   if (output.outcome === 'no_action') {
+    // BLOCKER fix (Task 7): a redraft-resume that returns no_action would otherwise sit in `triaged`
+    // forever — never re-selected (last_agent_run_at stays set below via the finish stamp, no new
+    // inbound arrives on a resume), and not `awaiting_approval` so the orphan backstop can't catch
+    // it either — silently swallowing the owner's correction. When THIS run consumed owner feedback,
+    // upgrade to a paging escalate instead of the normal no_action path, guarded on the ticket still
+    // being `triaged` (6A convention: 0 rows = the owner moved it, handled by the finish stamp below).
+    const redraftFeedback = args.ctx.ticket.ownerRedraftFeedback
+    if (redraftFeedback !== null && redraftFeedback.trim().length > 0) {
+      const escalated = await deps.db
+        .update(supportTickets)
+        .set({
+          status: 'escalated',
+          escalationReason: 'redraft_unfulfilled',
+          // CRITICAL-1: cleared so the poll's notifyPendingEscalations (the ONLY notifier) pages.
+          escalationNotifiedAt: null,
+          // A redraft resume that produced nothing actionable — presume the transcript exhausted.
+          agentSessionId: null,
+          // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+          ...clearRedraftCycle(),
+        })
+        .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'triaged')))
+        .returning({ id: supportTickets.id })
+
+      // The no_action outcome's trace (the run DID happen and returned no_action), flagged as the
+      // redraft-unfulfilled escalate so the audit trail explains why the ticket left `triaged`.
+      await deps.db.insert(auditLog).values({
+        actor: 'system',
+        action: AGENT_NO_ACTION_ACTION,
+        entityType: 'ticket',
+        entityId: ticketId,
+        detail: { runId, rationale: output.rationale, redraftUnfulfilled: true, escalated: escalated.length > 0 },
+      })
+
+      // Same authoritative-outcome finalization the shared block below runs — the spend row was
+      // already written pre-run (step 4), so finalizing means stamping last_agent_finished_at (+ the
+      // message-time watermark when this run had a snapshot) so the stuck gate never re-claims this
+      // finished run. The session id is NOT re-set here (we just nulled it), which is exactly why
+      // this path RETURNs rather than falling through to the shared block's guarded session write.
+      await deps.db
+        .update(supportTickets)
+        .set({
+          lastAgentFinishedAt: now(),
+          ...(args.threadSnapshotAt !== null ? { lastAgentPromptedAt: args.threadSnapshotAt } : {}),
+        })
+        .where(eq(supportTickets.id, ticketId))
+      return
+    }
+
     await deps.db.insert(auditLog).values({
       actor: 'system',
       action: AGENT_NO_ACTION_ACTION,
@@ -537,6 +586,8 @@ async function runAndHandleOutcome(
         status: 'escalated',
         escalationReason: output.escalationReason.slice(0, 500),
         escalationNotifiedAt: null,
+        // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+        ...clearRedraftCycle(),
       })
       .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'triaged')))
       .returning({ id: supportTickets.id })
@@ -806,8 +857,10 @@ async function recordFailure(
           // standalone-sufficient (spec §3).
           agentSessionId: null,
           // CRITICAL-1: notified stamp cleared; the poll's notifyPendingEscalations is the notifier.
+          // redraft-cycle clear (see support/redraft.ts) — kept beside escalationNotifiedAt, inside
+          // the same guard so it only fires on the actual transition out of `triaged`.
           ...(locked.status === 'triaged'
-            ? { status: 'escalated', escalationReason: 'agent_failed', escalationNotifiedAt: null }
+            ? { status: 'escalated', escalationReason: 'agent_failed', escalationNotifiedAt: null, ...clearRedraftCycle() }
             : {}),
         })
         .where(eq(supportTickets.id, ticketId))
@@ -929,6 +982,8 @@ async function claimTicket(deps: SupportAgentJobDeps, ticketId: string, now: Dat
           escalationReason: 'agent_failed',
           // CRITICAL-1: cleared so `notifyPendingEscalations` (the only notifier) picks it up.
           escalationNotifiedAt: null,
+          // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+          ...clearRedraftCycle(),
           // A transcript that failed twice is presumed poisoned; the fresh-session prompt is
           // standalone-sufficient (spec §3).
           agentSessionId: null,
@@ -1070,7 +1125,8 @@ async function buildContext(
 async function escalateRunCapped(deps: SupportAgentJobDeps, ticketId: string): Promise<void> {
   await deps.db
     .update(supportTickets)
-    .set({ status: 'escalated', escalationReason: 'agent_run_cap', escalationNotifiedAt: null })
+    // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+    .set({ status: 'escalated', escalationReason: 'agent_run_cap', escalationNotifiedAt: null, ...clearRedraftCycle() })
     .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'triaged')))
 }
 

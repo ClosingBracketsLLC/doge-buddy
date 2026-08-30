@@ -3,6 +3,7 @@ import { auditLog, orders, supportMessages, supportTickets, type createDb } from
 import type { GmailClient } from '@doge-buddy/gmail'
 import { and, asc, count, desc, eq, gte, or, sql } from 'drizzle-orm'
 import { applyLabel, createLabelCache, SPAM_LABEL, type Alert } from './ingest.ts'
+import { clearRedraftCycle } from './redraft.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 
@@ -233,6 +234,11 @@ async function recordFailure(deps: TriageDeps, ticket: SelectedTicket): Promise<
       // ticket that was escalated+notified before, then resolved, then re-escalated by two more
       // failed triage attempts is still selectable by notifyPendingEscalations.
       escalationNotifiedAt: null,
+      // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt. A ticket
+      // reaching triage never carries redraft feedback today (the cycle lives in awaiting_approval/
+      // re-armed triaged, not `new`), but this is a genuine INTO-escalated exit, so clearing keeps
+      // the invariant total against any future path.
+      ...clearRedraftCycle(),
     })
     .where(and(eq(supportTickets.id, ticket.id), eq(supportTickets.status, ticket.status)))
     .returning({ id: supportTickets.id })
@@ -266,6 +272,9 @@ async function applyVerdict(
         escalationReason: null,
         lastTriagedAt: now(),
         triageFailureCount: 0,
+        // redraft-cycle clear (see support/redraft.ts). A `new` ticket being triaged never carries
+        // redraft feedback today, but this is a resolve exit, so clearing keeps the invariant total.
+        ...clearRedraftCycle(),
       })
       .where(guard)
       .returning({ id: supportTickets.id })
@@ -294,7 +303,13 @@ async function applyVerdict(
       // after being resolved) is still selectable by notifyPendingEscalations. `ticket.status` is
       // guaranteed 'new'/'triaged' going in (already-escalated tickets are excluded from
       // selection), so this is a genuine new-into-escalated transition whenever it applies.
-      ...(status === 'escalated' ? { escalationNotifiedAt: null } : {}),
+      //
+      // redraft-cycle clear (see support/redraft.ts), ONLY on the escalate branch: a re-armed
+      // redraft ticket is `triaged` with owner feedback set, and this selection re-picks a `triaged`
+      // ticket once a NEW inbound lands (last_inbound_at > last_triaged_at) — so escalating here is a
+      // real cycle exit that must not leave the stale correction behind. The `triaged` branch keeps
+      // it: that ticket stays in the redraft-eligible cycle for the agent's next run.
+      ...(status === 'escalated' ? { escalationNotifiedAt: null, ...clearRedraftCycle() } : {}),
       // Only a verdict that actually claims a number touches the link: a follow-up that simply
       // doesn't repeat the order number must not unlink an order verified on an earlier pass.
       ...(link ?? {}),

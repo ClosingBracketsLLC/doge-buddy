@@ -25,6 +25,7 @@ import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts
 import { onSupportProposalRejected, validateSupportProposalForApproval } from '../../proposals/support-decision.ts'
 import { applyProposalTransition, StaleProposalStatusError } from '../../proposals/transitions.ts'
 import { SETTINGS_DEFAULTS, type Settings, type SettingKey, type WorkflowMode } from '../../settings.ts'
+import { clearRedraftCycle } from '../../support/redraft.ts'
 import { senderAuthNote } from '../../support/validator.ts'
 import {
   consumeLoginToken,
@@ -548,7 +549,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             if (expectedStatus && (TICKET_STATUSES as readonly string[]).includes(expectedStatus)) {
               const [updated] = await deps.db
                 .update(supportTickets)
-                .set({ status: transition.to })
+                // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+                // Escalate/resolve both leave the redraft-eligible cycle, so both clear the columns
+                // (this route deliberately does NOT touch escalation_notified_at — see above).
+                .set({ status: transition.to, ...clearRedraftCycle() })
                 .where(
                   and(
                     eq(supportTickets.id, id),
