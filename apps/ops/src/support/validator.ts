@@ -98,7 +98,7 @@ const ACTION_RE =
  * tool that issues one, so "we've issued you a code" / "your coupon has been sent" / "I've applied a
  * 15% discount" are unbacked promises exactly like a refund promise — and before this they were the
  * one family that passed the screen entirely. Merely QUOTING the standing Shopify code ("use code
- * SORRY15 for 15% off your next order") carries no promise token, so it still passes: the code
+ * SORRY10 for 10% off your next order") carries no promise token, so it still passes: the code
  * already exists, nothing is being promised. */
 /** Words that PROMISE the action already happened or is imminent — the combination is what makes
  * a drafted reply a commitment rather than an explanation of policy. `gone ahead and` (not bare

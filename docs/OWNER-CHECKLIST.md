@@ -46,19 +46,15 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   tell Claude either way. If it was missed: run the migration, then look at `/admin/tickets` for
   mail that arrived during the gap (ingest resumes on the next poll; nothing is lost in Gmail).
   The three commits after `6b26bb3` add NO migration.
-- [ ] 🔴 **Create the standing discount code `SORRY15` in Shopify** (2 minutes; the app has no
-  `write_discounts` scope, so Claude can't do it by API). Shopify admin → Discounts → Create
-  discount → *Amount off order* → Method: **Discount code**, code `SORRY15` → Value: **15%** →
-  Minimum purchase: none → Maximum discount uses: tick **"Limit to one use per customer"** → Active
-  dates: start now, no end date → Save. This is the no-refund strategy's ONLY concession, and the
-  agent will quote it — the validator now treats "we've issued/sent/applied you a code" as an
-  unbacked promise (the agent can't issue codes), while quoting the existing code passes. Until the
-  code exists, any quoted `SORRY15` is a broken promise, so create it BEFORE pasting the guidance.
+- [x] ~~Create the standing discount code in Shopify.~~ **Done (2026-08-30) as `SORRY10` (10% off,
+  one use per customer)** — the no-refund strategy's only concession; the agent quotes it (the
+  validator treats "we've issued/sent/applied you a code" as an unbacked promise, while quoting the
+  existing code passes).
 - [ ] 🔴 **Paste this into `/admin/guidance`** (edit freely — it's yours; the hard rules still win
   over it). It replaces whatever coupon wording you wrote earlier:
   > Our stance: we avoid refunds and returns. All sales are final for change of mind — never offer a
   > return or a refund for a product that arrived as described; decline politely and offer discount
-  > code SORRY15 (15% off their next order, one use per customer). For damaged, defective, or wrong
+  > code SORRY10 (10% off their next order, one use per customer). For damaged, defective, or wrong
   > items: ask for a photo of what arrived and say we'll arrange a replacement at no charge (no
   > return needed); do not offer a refund unless the owner has said a replacement isn't possible. For
   > an order that never arrived: check tracking with get_order; if it's past the promised window, say

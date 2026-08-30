@@ -336,10 +336,10 @@ describe('support validator', () => {
     // Quoting the STANDING discount code (it already exists in Shopify — nothing is being promised)
     // must pass, in every phrasing the agent is likely to use when declining a refund/return.
     const standingCodePhrasings = [
-      'Use code SORRY15 for 15% off your next order.',
-      "Here's a discount code for a future order: SORRY15.",
-      "We can't offer a refund or a return, but here's a discount code for your next order: SORRY15 (15% off, one use per customer).",
-      "All sales are final, so I can't set up a return — but please use coupon SORRY15 for 15% off next time.",
+      'Use code SORRY10 for 10% off your next order.',
+      "Here's a discount code for a future order: SORRY10.",
+      "We can't offer a refund or a return, but here's a discount code for your next order: SORRY10 (10% off, one use per customer).",
+      "All sales are final, so I can't set up a return — but please use coupon SORRY10 for 10% off next time.",
     ]
     for (const body of standingCodePhrasings) {
       it(`"${body.slice(0, 60)}…" passes (quoting the standing code promises no action)`, async () => {
