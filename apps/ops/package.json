@@ -15,7 +15,9 @@
     "seed-proposal": "tsx scripts/seed-proposal.ts",
     "run-sourcing": "tsx scripts/run-sourcing.ts",
     "inspect-mailbox": "tsx scripts/inspect-mailbox.ts",
-    "seed-refund-proposal": "tsx scripts/seed-refund-proposal.ts"
+    "seed-refund-proposal": "tsx scripts/seed-refund-proposal.ts",
+    "read-refund-state": "tsx scripts/read-refund-state.ts",
+    "redeliver-apply": "tsx scripts/redeliver-apply.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.241",
