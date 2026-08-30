@@ -46,25 +46,32 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   tell Claude either way. If it was missed: run the migration, then look at `/admin/tickets` for
   mail that arrived during the gap (ingest resumes on the next poll; nothing is lost in Gmail).
   The three commits after `6b26bb3` add NO migration.
-- [ ] ⚪ **Gmail "Send mail as" check** (carried from 6A's list — now actually load-bearing, since
-  6B is the first phase that SENDS): in Gmail as `admin@` → Settings → Accounts → confirm
-  `support@dogebuddy.com` is listed under "Send mail as" (add it if not — no verification step for
-  your own alias). Every drafted reply goes out `From: support@dogebuddy.com`.
-- [ ] ⚪ **An Outlook-reachable test address** — a free `outlook.com` account is enough. Threading
-  is the one behaviour Gmail-to-Gmail cannot prove: Gmail groups a conversation on its own thread
-  id, Outlook groups it on `In-Reply-To`/`References`, so a reply that threads perfectly in Gmail
-  can still fork into a second conversation in Outlook. This address is how we see that.
+- [x] ~~Gmail "Send mail as" check.~~ **Moot (2026-08-30):** `support@dogebuddy.com` became the
+  user's PRIMARY address during 6A bring-up, so there is no alias to add — and the mailbox now holds
+  two live replies stamped `From: support@dogebuddy.com` (see the Tier-2 status below).
+- [x] ~~An Outlook-reachable test address.~~ **Done:** `CollinsContracting509@outlook.com` — its
+  first test email ("Shipping time + tracking?", 2026-08-29 20:48 PT) is in the support mailbox and
+  was replied to. (Threading is the one behaviour Gmail-to-Gmail cannot prove: Gmail groups on its
+  own thread id, Outlook on `In-Reply-To`/`References`.)
 - [ ] 🟡 **Tier-2 walk (spec §8 + the exit criteria).** Four checks, run with Claude. **Before
   sign-off:** the live `GMAIL_CONTRACT=1` re-record (the item below) must run FIRST — Tier-2 is not
   signed off against stale fixtures, and the re-record updates `client.test.ts`'s call-site id
   literals in the same commit.
-  **Status 2026-08-30 — walk #1 is in progress, nothing approved or sent yet.** The agent's first
-  live drafts reached Telegram on 2026-08-29; you rejected a policy-faithful return-acceptance draft
-  (that produced the reject-WITH-REASON re-draft loop — up to 2 re-drafts per ticket — and the
-  `/admin/guidance` page where you can edit the agent's standing operating guidance), and the
-  promised-action screen then escalated every return-policy answer (fixed on local main `a81da1e`,
-  awaiting your push). After the push: send a fresh support email asking a return-policy question
-  and expect a draft that survives the screen.
+  **Status 2026-08-30 (read straight from the support mailbox via the Gmail API):** two agent
+  replies have gone out, both `From: support@dogebuddy.com`, both in the customer's original Gmail
+  thread with `In-Reply-To` + `References` = the customer's Message-ID and a `Re:` subject —
+  "Delivery time question" → phucutube@gmail.com (2026-08-29 13:28 PT, marker
+  `3fc075c8-cba7-…`) and "Shipping time + tracking?" → the outlook.com address (2026-08-29 20:51 PT,
+  marker `65a8edf9-678b-…`). **Check 1a PASSES** — the `X-DogeBuddy-Proposal` header read back
+  verbatim via `format=metadata` on both SENT copies. Earlier, you rejected a policy-faithful
+  return-acceptance draft (→ the reject-WITH-REASON re-draft loop, up to 2 re-drafts per ticket,
+  and the `/admin/guidance` page for standing guidance), and the promised-action screen escalated
+  every return-policy answer (→ fixed in `a81da1e`, now deployed). Note: Gmail put the Outlook
+  inbound in Spam; ingest deliberately reads spam (`includeSpamTrash: true`, Haiku triage decides),
+  so the reply went out regardless — but expect OUR reply to land in Outlook's Junk too until the
+  domain has reputation. **Left on walk #1:** (a) you confirm ONE conversation in the personal
+  Gmail and in Outlook (check Junk); (b) one more email — a return-policy question from the
+  outlook.com address — to prove a policy answer now survives the screen.
   1. **Email → approve-from-phone → threading.** Send a real support email → categorized ticket
      with an agent-drafted reply proposal on Telegram + `/admin/proposals` → approve from your
      phone → the reply lands in the customer mailbox, `From: support@dogebuddy.com`, **threaded as
@@ -143,7 +150,7 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 - [x] ~~SerpApi account (Google Trends bridge for Phase 5).~~ **Done (2026-08-24):** free-tier account created, `SERPAPI_KEY` in gitignored `apps/ops/.env`, validated against the account endpoint (Free Plan, 250 searches/mo, 250 left — the weekly run uses ~18–45/wk). *Remaining sub-step before Phase 5's live runs on Railway:* add `SERPAPI_KEY` to Railway's variables.
 - [x] ~~Domain name decision.~~ **Decided (2026-08-25): `dogebuddy.com`** (already the store's custom domain). Unblocks Phase 6. *Still needed for Phase 6:* DNS access to add email-auth records (SPF → DKIM 2048 → 48h wait → DMARC p=none) — the next Phase-6 session will hand you the exact record values.
 - [x] ~~Phase 6A parallel setup — Google Workspace + GCP + DNS.~~ **Done (2026-08-25), with one owner decision:** Workspace created (`admin@dogebuddy.com`), SPF + DKIM published, GCP project `doge-buddy-support` + Gmail API + service account + key (required a self-granted org-role fix and an org-policy override on the project — new-org "Secure by Default" blocks SA keys), domain-wide delegation authorized, creds in `apps/ops/.env`, **delegation chain live-verified** (token + getProfile OK). **Decision: `support@` is an ALIAS on `admin@` (1 seat) instead of a dedicated user** — tradeoffs accepted, escape hatch documented in the 6A spec §5. Two follow-ups remain below.
-- [ ] 🟡 **DMARC record in ~48h** (after DKIM has been live 2 days): TXT on `_dmarc.dogebuddy.com`: `v=DMARC1; p=none; rua=mailto:support@dogebuddy.com`.
+- [x] ~~DMARC record in ~48h.~~ **Done — verified by DNS on 2026-08-30:** `_dmarc.dogebuddy.com` = `v=DMARC1; p=none; rua=mailto:support@dogebuddy.com` (Google's first aggregate report already arrived in the support mailbox). SPF (`include:_spf.google.com ~all`) and the `google` DKIM selector both resolve.
 - [ ] ⚪ **Gmail "Send mail as" check (needed by 6B, not 6A):** in Gmail as `admin@` → Settings → Accounts → confirm `support@dogebuddy.com` is listed under "Send mail as" (add it if not — no verification step for your own alias). 6B's replies go out From: support@.
 
 - [ ] ⚪ **FunkyDori webfont license check** (Phase 2). Not a blocker — Lilita One is the stand-in display face (the `--font-display` token in tailwind.css is the FunkyDori swap point); Poppins is the body face.
