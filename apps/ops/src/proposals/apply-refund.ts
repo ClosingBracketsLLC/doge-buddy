@@ -196,6 +196,14 @@ export async function applyRefund(deps: ApplyProposalDeps, row: ProposalRow): Pr
     await failTerminal(deps, row, ticket.id, 'no refundable parent transaction')
     return
   }
+  const gateway = state.gateway
+  if (gateway === null) {
+    // `OrderTransaction.gateway` is nullable coming OUT of Shopify, but `OrderTransactionInput.gateway`
+    // is `String!` going IN (live-introspected against the pinned 2026-07 schema, 2026-08-30) —
+    // sending null is a GraphQL validation error, not a retryable condition. Terminal, and loud.
+    await failTerminal(deps, row, ticket.id, 'parent transaction has no gateway', { parentId })
+    return
+  }
 
   // --- The refund (spec §4 refund step 4) ---
 
@@ -211,10 +219,15 @@ export async function applyRefund(deps: ApplyProposalDeps, row: ProposalRow): Pr
       notify: true,
       transactions: [
         {
+          // `orderId` is REQUIRED on every entry (`OrderTransactionInput.orderId: ID!` on the pinned
+          // 2026-07 schema — live-introspected 2026-08-30), not just on the top-level RefundInput.
+          // Without it the mutation fails validation before any money moves — silently fatal to
+          // every refund, and invisible to the mocked tests until the schema was actually read.
+          orderId: order.shopifyOrderGid,
           parentId,
           amount: centsToUsd(payload.amountCents),
           kind: 'REFUND',
-          gateway: state.gateway,
+          gateway,
         },
       ],
     },

@@ -881,7 +881,7 @@ describe('support agent E2E: mailbox -> agent -> owner -> mailbox', () => {
       note: `db-proposal-${refund.id}`,
       notify: true,
       transactions: [
-        { parentId: 'gid://shopify/OrderTransaction/e2e-1', amount: '100.00', kind: 'REFUND', gateway: 'bogus' },
+        { orderId: orderGid, parentId: 'gid://shopify/OrderTransaction/e2e-1', amount: '100.00', kind: 'REFUND', gateway: 'bogus' },
       ],
     })
     const refundAudit = await auditActionsFor(refund.id)

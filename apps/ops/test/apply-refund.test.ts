@@ -320,7 +320,9 @@ describe('applyRefund', () => {
       orderId: s.shopifyOrderGid,
       note: `db-proposal-${proposal.id}`,
       notify: true,
-      transactions: [{ parentId: PARENT_TXN, amount: '25.00', kind: 'REFUND', gateway: 'bogus' }],
+      // `orderId` on EVERY transaction entry: `OrderTransactionInput.orderId` is `ID!` on the pinned
+      // 2026-07 schema (live-introspected 2026-08-30) — omitting it fails validation before any money moves.
+      transactions: [{ orderId: s.shopifyOrderGid, parentId: PARENT_TXN, amount: '25.00', kind: 'REFUND', gateway: 'bogus' }],
     })
 
     const applied = await readProposal(proposal.id)
@@ -560,6 +562,22 @@ describe('applyRefund', () => {
     const failed = await readProposal(proposal.id)
     expect(failed.status).toBe('failed')
     expect(failed.applyError).toBe('no refundable parent transaction')
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('terminal: a parent transaction with no gateway fails the proposal (OrderTransactionInput.gateway is String!)', async () => {
+    const s = await seed()
+    const proposal = await seedProposal(s)
+    // `OrderTransaction.gateway` is nullable on the way OUT of Shopify but `String!` on the way IN —
+    // sending null would be a GraphQL validation error, and retrying cannot conjure a gateway.
+    const refundOps = fakeRefundOps({ gateway: null })
+
+    await applyRefund(makeDeps({ refundOps }), proposal)
+
+    expect(refundOps.refundCalls).toHaveLength(0)
+    const failed = await readProposal(proposal.id)
+    expect(failed.status).toBe('failed')
+    expect(failed.applyError).toBe('parent transaction has no gateway')
     expect(notify).toHaveBeenCalledTimes(1)
   })
 
