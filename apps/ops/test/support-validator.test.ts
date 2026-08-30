@@ -1,3 +1,4 @@
+import { POLICY_COPY } from '@doge-buddy/core'
 import { createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import { eq, like } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
@@ -347,6 +348,22 @@ describe('support validator', () => {
         const result = await validateReplyBody(db, ticketId, body, noRefund)
         expect(result).toEqual({ ok: true, normalizedBody: body })
       })
+    }
+
+    // The agent quotes POLICY_COPY verbatim (it is the ONLY source it may cite), so no policy
+    // paragraph may ever trip a screen — or a perfectly faithful draft gets escalated. This guards
+    // every future policy edit: wording like "once it's on its way back" or "once you've shipped it"
+    // reads naturally but carries a promise token next to an ACTION token.
+    for (const policy of POLICY_COPY) {
+      for (const section of policy.sections) {
+        for (const paragraph of section.paragraphs) {
+          it(`policy paragraph passes verbatim: "${paragraph.slice(0, 60)}…"`, async () => {
+            const ticketId = await seedTicket()
+            const result = await validateReplyBody(db, ticketId, paragraph, noRefund)
+            expect(result).toEqual({ ok: true, normalizedBody: paragraph })
+          })
+        }
+      }
     }
 
     // But a REAL refund promise phrased as a receipt-timeframe MUST still be caught.

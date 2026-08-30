@@ -45,7 +45,7 @@ export const POLICY_COPY: PolicyCopy[] = [
       {
         heading: 'Damaged, defective, or wrong items',
         paragraphs: [
-          "Contact us within 14 days of delivery with a photo of what arrived. We'll send a replacement at no charge — no return needed. If we can't replace it, we'll refund it.",
+          "Contact us within 14 days of delivery with a photo of what you received, and we'll email you return instructions. Once the return is in transit, we'll ship a replacement at no charge. If we can't replace it, we'll refund it.",
           'Refunds, when they apply, go back to the original payment method.',
         ],
       },
