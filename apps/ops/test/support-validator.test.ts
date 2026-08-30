@@ -223,6 +223,16 @@ describe('support validator', () => {
       'Your order has been cancelled.',
       'A replacement has shipped.',
       'Expect the funds back in 5 business days.', // caught via "funds back" (ACTION), not bare "funds"
+      // In-progress / imminent unbacked promises (adversarial review 2026-08-30): just as much a
+      // "money is coming" statement as a completed one, so the resolution-gated auxiliaries must
+      // catch these too. Each pairs a `has been`/`we've`/`we have` gate with an in-progress money verb.
+      'Your refund has been initiated.',
+      'Your refund has been submitted to your bank.',
+      'Your refund has been authorized.',
+      "We've started your refund.",
+      'We have begun processing your refund.',
+      'Your refund will be credited to your account within 3 business days.',
+      "Within 5 business days you'll see the money back in your account.", // reversed receipt-timeframe
     ]
     for (const phrase of mustCatchPhrases) {
       it(`"${phrase}" is caught by the extended promised-action screen`, async () => {

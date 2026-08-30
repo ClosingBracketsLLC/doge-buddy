@@ -119,7 +119,16 @@ const ACTION_RE =
  * policy explanations and declines through — and it is only ONE of two gates: the owner still
  * approves every reply, and the screen re-runs at approval. It also correctly stops two formerly
  * "accepted" false positives ("We have received your request…", "We have no record of a refund…"). */
-const RESOLUTION_VERBS = 'processed|issued|sent|approved|applied|refunded|reimburs\\w*|credited|cancel\\w*|reversed|complete\\w*|finali[sz]ed|posted|shipped|reflected'
+// Money-action verbs that make a gated auxiliary ("has been X", "we've X", "will be X") a real
+// promise. Includes COMPLETED forms AND in-progress/imminent forms (`initiated`, `started`,
+// `submitted`, `processing`, `authorized`, `scheduled`, `queued`, `released`, `begun`): an unbacked
+// promise is just as often "your refund has been initiated" as "…has been processed" (adversarial
+// review 2026-08-30). These only ever count AFTER a `has been`/`have been`/`we have`/`we've`/`will
+// be` gate, so they never re-introduce the policy false positives that motivated the gating — the
+// policy trailing words ("has been OPENED", "we have RECEIVED / NO RECORD / A 30-DAY POLICY") are
+// not money verbs.
+const RESOLUTION_VERBS =
+  'processed|process\\w*|issued|sent|approved|applied|refunded|reimburs\\w*|credited|cancel\\w*|reversed|complete\\w*|finali[sz]ed|posted|shipped|reflected|initiat\\w*|start\\w*|submit\\w*|authoriz\\w*|schedul\\w*|arrang\\w*|queued|releas\\w*|begun'
 const PROMISE_RE = new RegExp(
   [
     // Strong standalone tokens — specific enough to promise on their own.
@@ -131,8 +140,10 @@ const PROMISE_RE = new RegExp(
     `will be (${RESOLUTION_VERBS})`,
     `(we have|we've) (${RESOLUTION_VERBS}|gone ahead)`,
     // Receipt-timeframe — a bare "within N days" only counts when the customer is RECEIVING money/
-    // an item, not a policy return-window ("accepted within 30 days" has no receipt cue).
-    '(back|posted|credited|reflect\\w*|arriv\\w*) [^.]{0,25}within \\d+ (business )?days',
+    // an item, not a policy return-window ("accepted within 30 days" has no receipt cue). Both
+    // orderings: "…back … within N days" and "within N days … back …" (review 2026-08-30).
+    '(back|posted|credited|reflect\\w*|arriv\\w*|in your account) [^.]{0,25}within \\d+ (business )?days',
+    'within \\d+ (business )?days [^.]{0,25}(back|posted|credited|reflect\\w*|arriv\\w*|in your account)',
   ].join('|'),
   'gi',
 )
