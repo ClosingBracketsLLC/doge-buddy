@@ -1,6 +1,7 @@
 import { RefundPayloadSchema, SupportReplyPayloadSchema } from '@doge-buddy/core'
 import { auditLog, proposals, supportTickets, type createDb } from '@doge-buddy/db'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
+import { clearRedraftCycle } from '../support/redraft.ts'
 import { hasLiveSiblingRefundProposal, validateReplyBody, validateRefundIntent, type ValidationFailure } from '../support/validator.ts'
 
 type Db = ReturnType<typeof createDb>['db']
@@ -72,11 +73,17 @@ function isSupportProposalType(type: string): type is SupportProposalType {
 export async function onSupportProposalRejected(
   db: DbOrTx,
   row: { id: string; ticketId: string | null; type: string },
+  opts?: { awaitingApprovalReason?: string; awaitingApprovalNotify?: boolean },
 ): Promise<void> {
   if (row.ticketId === null || !isSupportProposalType(row.type)) return
 
   const ticketId = row.ticketId
   const siblingType = SIBLING_TYPE[row.type]
+  // The awaiting_approval escalation is parameterizable so the redraft-cap terminal path can page
+  // with its own reason (`redraft_limit_reached`, notify=true) while the plain owner reject stays
+  // silent (`owner_rejected_draft`, notify=false → PRE-STAMPED). Defaults reproduce the old behavior.
+  const awaitingReason = opts?.awaitingApprovalReason ?? 'owner_rejected_draft'
+  const awaitingNotify = opts?.awaitingApprovalNotify ?? false // false = pre-stamped silent
 
   const expiredSiblings = await db
     .update(proposals)
@@ -96,14 +103,17 @@ export async function onSupportProposalRejected(
     )
   }
 
-  // Undecided pair: owner is deciding this ticket right now → SILENT (pre-stamped).
+  // Undecided pair: owner is deciding this ticket right now → SILENT (pre-stamped) by default; the
+  // redraft-cap caller overrides to a real page. Clears the redraft cycle: this is a terminal exit
+  // from the redraft-eligible state, so any stored feedback/count must not linger for a later run.
   await db
     .update(supportTickets)
     .set({
       status: 'escalated',
-      escalationReason: 'owner_rejected_draft',
-      escalationNotifiedAt: new Date(),
+      escalationReason: awaitingReason,
+      escalationNotifiedAt: awaitingNotify ? null : new Date(),
       agentSessionId: null,
+      ...clearRedraftCycle(),
     })
     .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'awaiting_approval')))
 
@@ -116,8 +126,78 @@ export async function onSupportProposalRejected(
       escalationReason: 'refund_promise_unbacked',
       escalationNotifiedAt: null,
       agentSessionId: null,
+      ...clearRedraftCycle(),
     })
     .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'waiting_on_customer')))
+}
+
+/**
+ * Reject-with-reason (spec §3): instead of escalating, hand the ticket back to the agent. Expires
+ * the sibling proposal (the agent reconsiders the whole response), stores the owner's correction,
+ * and re-arms the ticket for a resumed re-draft run — KEEPING agentSessionId (resume) and
+ * last_agent_prompted_at (so the resume's message filter yields zero new thread messages; the
+ * feedback is the run's substantive input). Nulls last_agent_run_at so selectAndEnqueueAgentRuns
+ * picks it up. Guarded on `awaiting_approval` — a re-draft against any other status is a no-op
+ * (caller resolves that to a terminal escalate). Atomic via the caller's `tx`.
+ *
+ * Returns whether its `status='awaiting_approval'`-guarded re-arm matched a row: `false` means the
+ * ticket had already moved (a concurrent tab, a second reject), and the caller falls back to
+ * `onSupportProposalRejected` in the SAME tx (atomic fallback) — the terminal escalate. The sibling
+ * expiry above runs BEFORE the guarded re-arm; if the re-arm matches 0 rows, the caller's fallback
+ * still escalates the already-sibling-expired ticket, which is exactly the terminal outcome, so the
+ * early sibling-expiry is harmless.
+ */
+export async function onSupportProposalRejectedForRedraft(
+  db: DbOrTx,
+  row: { id: string; ticketId: string | null; type: string },
+  reason: string,
+  now: () => Date,
+): Promise<boolean> {
+  if (row.ticketId === null || !isSupportProposalType(row.type)) return false
+  const ticketId = row.ticketId
+  const siblingType = SIBLING_TYPE[row.type]
+
+  const expiredSiblings = await db
+    .update(proposals)
+    .set({ status: 'expired' })
+    .where(and(eq(proposals.ticketId, ticketId), eq(proposals.type, siblingType), eq(proposals.status, 'pending')))
+    .returning({ id: proposals.id })
+  if (expiredSiblings.length > 0) {
+    await db.insert(auditLog).values(
+      expiredSiblings.map((sibling) => ({
+        actor: 'system',
+        action: 'proposal.sibling_rejected',
+        entityType: 'proposal',
+        entityId: sibling.id,
+        detail: { ticketId, rejectedProposalId: row.id, rejectedType: row.type, viaRedraft: true },
+      })),
+    )
+  }
+
+  const rearmed = await db
+    .update(supportTickets)
+    .set({
+      status: 'triaged',
+      ownerRedraftFeedback: reason,
+      redraftCount: sql`${supportTickets.redraftCount} + 1`,
+      agentFailureCount: 0,
+      lastAgentRunAt: null,
+      lastAgentFinishedAt: null,
+      // KEEP agentSessionId (resume) and lastAgentPromptedAt (zero-new-message resume filter).
+    })
+    .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.status, 'awaiting_approval')))
+    .returning({ redraftCount: supportTickets.redraftCount })
+
+  if (rearmed.length > 0) {
+    await db.insert(auditLog).values({
+      actor: 'owner',
+      action: 'proposal.rejected_for_redraft',
+      entityType: 'support_ticket',
+      entityId: ticketId,
+      detail: { rejectedProposalId: row.id, rejectedType: row.type, reason_len: reason.length, redraft_count: rearmed[0]!.redraftCount },
+    })
+  }
+  return rearmed.length > 0 // false => caller falls back to onSupportProposalRejected in the SAME tx (atomic fallback)
 }
 
 /** `validateSupportProposalForApproval`'s success shape — DELIBERATELY not `ValidationResult`

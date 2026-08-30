@@ -27,7 +27,13 @@ export const SUPPORT_AGENT_QUEUE = 'support.agent-run'
 /** Global spend ceiling (spec §1 step 3) — counted from `support.agent_run` audit rows. */
 export const SUPPORT_AGENT_MAX_RUNS_PER_DAY = 50
 /** Per-ticket ceiling (spec §1 step 2): one hostile sender ping-ponging a single ticket must not
- * be able to burn the global cap and black out the agent for every real customer. */
+ * be able to burn the global cap and black out the agent for every real customer.
+ *
+ * Load-bearing relationship with `support/redraft.ts`'s `SUPPORT_REDRAFT_MAX`: each reject-with-
+ * reason redraft is an agent run counted against THIS immutable daily cap (a re-arm cannot reset
+ * it), so `1 + SUPPORT_REDRAFT_MAX <= SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY` must hold — the
+ * original draft plus the allowed redrafts must fit under the cap, or the redraft cycle escalates
+ * early on the run cap (wrong reason) instead of on `redraft_limit_reached`. With MAX=2: 1 + 2 = 3. */
 export const SUPPORT_AGENT_MAX_RUNS_PER_TICKET_PER_DAY = 3
 /** A claim older than this with no FINISH stamp past it is a run that never finished (e.g. a
  * Railway hard-kill that expired the job before any handler code ran) — same 20-minute horizon

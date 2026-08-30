@@ -1,7 +1,7 @@
 import { auditLog, createDb, proposals, supportTickets } from '@doge-buddy/db'
 import { and, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { onSupportProposalRejected, validateSupportProposalForApproval } from '../src/proposals/support-decision.ts'
+import { onSupportProposalRejected, onSupportProposalRejectedForRedraft, validateSupportProposalForApproval } from '../src/proposals/support-decision.ts'
 import { applyProposalTransition } from '../src/proposals/transitions.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
@@ -22,6 +22,7 @@ describe('support-decision.ts', () => {
       createdProposalIds = []
     }
     if (createdTicketIds.length > 0) {
+      await db.delete(auditLog).where(inArray(auditLog.entityId, createdTicketIds))
       await db.delete(supportTickets).where(inArray(supportTickets.id, createdTicketIds))
       createdTicketIds = []
     }
@@ -181,6 +182,86 @@ describe('support-decision.ts', () => {
         .from(auditLog)
         .where(and(eq(auditLog.entityId, reply.id), eq(auditLog.action, 'proposal.sibling_rejected')))
       expect(siblingAudit).toHaveLength(0)
+    })
+  })
+
+  describe('onSupportProposalRejectedForRedraft', () => {
+    it('expires the sibling, stores feedback, re-arms triaged, keeps session, nulls run watermark, keeps prompted watermark', async () => {
+      const T = new Date('2026-08-01T12:00:00.000Z')
+      const ticket = await seedTicket({ agentSessionId: 'sess-1' })
+      // Seed the run + prompt watermarks a resumed re-draft depends on. redraftCount defaults to 0.
+      await db
+        .update(supportTickets)
+        .set({ lastAgentPromptedAt: T, lastAgentRunAt: T, lastAgentFinishedAt: T, agentFailureCount: 3 })
+        .where(eq(supportTickets.id, ticket.id))
+
+      const refund = await seedProposal({ type: 'refund', ticketId: ticket.id })
+      const reply = await seedProposal({ type: 'support_reply', ticketId: ticket.id })
+
+      const rearmed = await onSupportProposalRejectedForRedraft(
+        db,
+        { id: reply.id, ticketId: ticket.id, type: 'support_reply' },
+        'no returns for dislike',
+        () => new Date(),
+      )
+      expect(rearmed).toBe(true)
+
+      const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+      expect(ticketAfter!.status).toBe('triaged')
+      expect(ticketAfter!.ownerRedraftFeedback).toBe('no returns for dislike')
+      expect(ticketAfter!.redraftCount).toBe(1)
+      expect(ticketAfter!.lastAgentRunAt).toBeNull()
+      expect(ticketAfter!.lastAgentFinishedAt).toBeNull()
+      expect(ticketAfter!.agentFailureCount).toBe(0)
+      // KEPT (do NOT null): the resume relies on the session id, and keeping the prompted watermark
+      // makes the resumed run see zero new customer messages.
+      expect(ticketAfter!.lastAgentPromptedAt).toEqual(T)
+      expect(ticketAfter!.agentSessionId).toBe('sess-1')
+
+      // The pending sibling refund is expired so the agent reconsiders the whole response.
+      const [refundAfter] = await db.select().from(proposals).where(eq(proposals.id, refund.id))
+      expect(refundAfter!.status).toBe('expired')
+      const siblingAudit = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityId, refund.id), eq(auditLog.action, 'proposal.sibling_rejected')))
+      expect(siblingAudit).toHaveLength(1)
+
+      // Exactly one rejected_for_redraft audit, keyed on the ticket, carrying the new redraft_count.
+      const redraftAudit = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityId, ticket.id), eq(auditLog.action, 'proposal.rejected_for_redraft')))
+      expect(redraftAudit).toHaveLength(1)
+      expect((redraftAudit[0]!.detail as { redraft_count: number }).redraft_count).toBe(1)
+    })
+
+    it('returns false and does NOT re-arm when the ticket is not awaiting_approval (caller falls back to a terminal escalate)', async () => {
+      const ticket = await seedTicket({ agentSessionId: 'sess-1' })
+      // A ticket already parked on the customer is not redraft-eligible.
+      await db.update(supportTickets).set({ status: 'waiting_on_customer' }).where(eq(supportTickets.id, ticket.id))
+      const reply = await seedProposal({ type: 'support_reply', ticketId: ticket.id })
+
+      const rearmed = await onSupportProposalRejectedForRedraft(
+        db,
+        { id: reply.id, ticketId: ticket.id, type: 'support_reply' },
+        'please redo',
+        () => new Date(),
+      )
+      expect(rearmed).toBe(false)
+
+      const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+      // The guarded re-arm matched 0 rows: status untouched, no feedback stored, count still 0.
+      expect(ticketAfter!.status).toBe('waiting_on_customer')
+      expect(ticketAfter!.ownerRedraftFeedback).toBeNull()
+      expect(ticketAfter!.redraftCount).toBe(0)
+
+      // No rejected_for_redraft audit is written when the re-arm did not match.
+      const redraftAudit = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.entityId, ticket.id), eq(auditLog.action, 'proposal.rejected_for_redraft')))
+      expect(redraftAudit).toHaveLength(0)
     })
   })
 
