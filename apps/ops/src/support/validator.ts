@@ -92,7 +92,14 @@ const HTML_TAG_RE = /<(?!https?:\/\/)[a-z!/]/i
  * false-positiving on ordinary sentences that just happen to mention funds (a chargeback question,
  * a "have the funds arrived" check-in). */
 const ACTION_RE =
-  /refund(ed)?|reimburs\w*|credit(ed)?|store credit|money back|compensat\w*|replacement|reship\w*|resend|cancel\w* (your|the) order|order (has been|was|is) cancel\w*|replacement has (been )?shipped|payment (returned|reversed)|funds back/gi
+  /refund(ed)?|reimburs\w*|credit(ed)?|store credit|money back|compensat\w*|replacement|reship\w*|resend|cancel\w* (your|the) order|order (has been|was|is) cancel\w*|replacement has (been )?shipped|payment (returned|reversed)|funds back|coupon(s)?|discount(s)?|(discount|promo|coupon) code(s)?/gi
+/* `coupon` / `discount` / `… code` joined ACTION_RE on 2026-08-30 with the owner's no-refund
+ * strategy: the agent now declines refunds and returns and offers a discount code instead. It has NO
+ * tool that issues one, so "we've issued you a code" / "your coupon has been sent" / "I've applied a
+ * 15% discount" are unbacked promises exactly like a refund promise — and before this they were the
+ * one family that passed the screen entirely. Merely QUOTING the standing Shopify code ("use code
+ * SORRY15 for 15% off your next order") carries no promise token, so it still passes: the code
+ * already exists, nothing is being promised. */
 /** Words that PROMISE the action already happened or is imminent — the combination is what makes
  * a drafted reply a commitment rather than an explanation of policy. `gone ahead and` (not bare
  * `i've`, dropped after N2 review) catches "I've gone ahead and refunded you." without `i've`
@@ -128,7 +135,7 @@ const ACTION_RE =
 // policy trailing words ("has been OPENED", "we have RECEIVED / NO RECORD / A 30-DAY POLICY") are
 // not money verbs.
 const RESOLUTION_VERBS =
-  'processed|process\\w*|issued|sent|approved|applied|refunded|reimburs\\w*|credited|cancel\\w*|reversed|complete\\w*|finali[sz]ed|posted|shipped|reflected|initiat\\w*|start\\w*|submit\\w*|authoriz\\w*|schedul\\w*|arrang\\w*|queued|releas\\w*|begun'
+  'processed|process\\w*|issued|sent|approved|applied|refunded|reimburs\\w*|credited|cancel\\w*|reversed|complete\\w*|finali[sz]ed|posted|shipped|reflected|initiat\\w*|start\\w*|submit\\w*|authoriz\\w*|schedul\\w*|arrang\\w*|queued|releas\\w*|begun|emailed|mailed'
 const PROMISE_RE = new RegExp(
   [
     // Strong standalone tokens — specific enough to promise on their own.

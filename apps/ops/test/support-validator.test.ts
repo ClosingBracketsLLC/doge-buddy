@@ -233,6 +233,14 @@ describe('support validator', () => {
       'We have begun processing your refund.',
       'Your refund will be credited to your account within 3 business days.',
       "Within 5 business days you'll see the money back in your account.", // reversed receipt-timeframe
+      // Coupon / discount-code promises (owner strategy 2026-08-30: decline refunds and returns,
+      // offer a discount code instead). The agent has NO tool that issues a code, so any phrasing
+      // that says one has been issued/sent/applied is an unbacked promise like any other.
+      "We've issued you a 15% discount code.",
+      'Your coupon has been sent to your email.',
+      'A discount code is on its way to you.',
+      "I've applied a 15% discount to your order.",
+      'Your promo code will be emailed within 24 hours.',
     ]
     for (const phrase of mustCatchPhrases) {
       it(`"${phrase}" is caught by the extended promised-action screen`, async () => {
@@ -324,6 +332,22 @@ describe('support validator', () => {
       const result = await validateReplyBody(db, ticketId, body, noRefund)
       expect(result).toEqual({ ok: true, normalizedBody: body })
     })
+
+    // Quoting the STANDING discount code (it already exists in Shopify — nothing is being promised)
+    // must pass, in every phrasing the agent is likely to use when declining a refund/return.
+    const standingCodePhrasings = [
+      'Use code SORRY15 for 15% off your next order.',
+      "Here's a discount code for a future order: SORRY15.",
+      "We can't offer a refund or a return, but here's a discount code for your next order: SORRY15 (15% off, one use per customer).",
+      "All sales are final, so I can't set up a return — but please use coupon SORRY15 for 15% off next time.",
+    ]
+    for (const body of standingCodePhrasings) {
+      it(`"${body.slice(0, 60)}…" passes (quoting the standing code promises no action)`, async () => {
+        const ticketId = await seedTicket()
+        const result = await validateReplyBody(db, ticketId, body, noRefund)
+        expect(result).toEqual({ ok: true, normalizedBody: body })
+      })
+    }
 
     // But a REAL refund promise phrased as a receipt-timeframe MUST still be caught.
     it('"You\'ll see your refund back within 5 business days." is CAUGHT (receipt-timeframe promise)', async () => {
