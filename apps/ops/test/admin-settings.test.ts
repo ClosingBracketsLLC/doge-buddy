@@ -36,6 +36,7 @@ describe('settings editor + manual-signal paste box', () => {
     await db.delete(settingsTable).where(eq(settingsTable.key, 'killswitch.global'))
     await db.delete(settingsTable).where(eq(settingsTable.key, 'workflow.sourcing.mode'))
     await db.delete(settingsTable).where(eq(settingsTable.key, 'fulfillment.spend_cap_per_order_cents'))
+    await db.delete(settingsTable).where(eq(settingsTable.key, 'support.agent_guidance'))
   })
 
   function makeDeps(overrides: Partial<AdminDeps> = {}): TestDeps {
@@ -114,8 +115,15 @@ describe('settings editor + manual-signal paste box', () => {
 
     expect(res.statusCode).toBe(200)
     for (const key of Object.keys(SETTINGS_DEFAULTS)) {
+      // support.agent_guidance is string-valued: excluded from this generic catalog (it's edited
+      // only via its own dedicated page, /admin/guidance) — see the dedicated assertion below.
+      if (key === 'support.agent_guidance') continue
       expect(res.body).toContain(key)
     }
+    // String-valued settings must NOT get a control on the generic catalog page: a naive add
+    // would otherwise render this as a number input, let a save coerce it to a number, and crash
+    // every support run downstream.
+    expect(res.body).not.toContain('support.agent_guidance')
     // Booleans render as an unchecked checkbox by default (killswitch.global defaults false).
     expect(res.body).toContain('<input type="checkbox" name="value">')
     // Mode keys render as a manual/auto select, defaulted to manual.
@@ -208,6 +216,29 @@ describe('settings editor + manual-signal paste box', () => {
     })
 
     expect(res.statusCode).toBe(400)
+
+    await app.close()
+  })
+
+  it('6b. POST key=support.agent_guidance (string-valued) -> 400, rejected by the generic catalog, value unchanged', async () => {
+    // support.agent_guidance is edited only via its own dedicated page (/admin/guidance), never
+    // through this generic boolean/mode/number path — the POST handler must reject it exactly
+    // like an unknown key, not silently coerce the free-text guidance through Number().
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const before = await deps.settings.get('support.agent_guidance')
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/admin/settings',
+      headers: { cookie, ...FORM_HEADERS },
+      payload: `key=support.agent_guidance&value=${encodeURIComponent('sneak this in through the numeric path')}`,
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(await deps.settings.get('support.agent_guidance')).toBe(before)
 
     await app.close()
   })

@@ -31,6 +31,7 @@ export const SETTINGS_DEFAULTS = {
   'scoring.reject_cooldown_days': 30,
   'scoring.fail_cooldown_days': 7,
   'scoring.max_fail_attempts': 3,
+  'support.agent_guidance': '',
 }
 // Deliberately no `as const`/`satisfies` here: either narrows the boolean properties down
 // to their literal default (e.g. `false` instead of `boolean`), which would make `set()`
@@ -50,11 +51,14 @@ type ModeSettingKey =
   | 'workflow.support_reply.mode'
   | 'workflow.refund.mode'
   | 'workflow.deprecation.mode'
+type StringSettingKey = 'support.agent_guidance'
 export type SettingValue<K extends SettingKey> = K extends BooleanSettingKey
   ? boolean
   : K extends ModeSettingKey
     ? WorkflowMode
-    : number
+    : K extends StringSettingKey
+      ? string
+      : number
 
 type Db = ReturnType<typeof createDb>['db']
 

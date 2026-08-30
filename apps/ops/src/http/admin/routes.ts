@@ -86,17 +86,21 @@ function renderHealthStrip(h: HealthStrip): RawHtml {
   </section>`
 }
 
-type SettingKind = 'boolean' | 'mode' | 'number'
+type SettingKind = 'boolean' | 'mode' | 'number' | 'string'
 
 /**
  * Buckets a settings key by its runtime type, per settings.ts's own source-of-truth comment:
  * boolean defaults are actual booleans, mode keys are the ones ending '.mode' (string default
- * 'manual'), everything else is a cents/bps/days number.
+ * 'manual'), other string defaults (e.g. support.agent_guidance) are free-text 'string' settings,
+ * and everything else is a cents/bps/days number. The '.mode' check MUST come before the generic
+ * string check: mode keys have string defaults too, but they're rendered/coerced as a
+ * manual/auto select, not free text.
  */
 function settingKind(key: SettingKey): SettingKind {
   const def = SETTINGS_DEFAULTS[key]
   if (typeof def === 'boolean') return 'boolean'
   if (key.endsWith('.mode')) return 'mode'
+  if (typeof def === 'string') return 'string'
   return 'number'
 }
 
@@ -111,7 +115,7 @@ async function setSettingValue(
   settingsApi: Settings,
   key: SettingKey,
   kind: SettingKind,
-  value: boolean | WorkflowMode | number,
+  value: boolean | WorkflowMode | number | string,
 ): Promise<void> {
   switch (kind) {
     case 'boolean': {
@@ -126,13 +130,17 @@ async function setSettingValue(
       const setter = settingsApi.set as (k: SettingKey, v: number) => Promise<void>
       return setter(key, value as number)
     }
+    case 'string': {
+      const setter = settingsApi.set as (k: SettingKey, v: string) => Promise<void>
+      return setter(key, value as string)
+    }
   }
 }
 
 interface SettingRow {
   key: SettingKey
   kind: SettingKind
-  value: boolean | WorkflowMode | number
+  value: boolean | WorkflowMode | number | string
 }
 
 /**
@@ -140,17 +148,36 @@ interface SettingRow {
  * select / number input), each posting to `/admin/settings`. Per-row forms (not one big form) is
  * deliberate — an HTML checkbox sends nothing when unchecked, so the only way to submit "flip
  * this boolean off" unambiguously is a form scoped to that one key.
+ *
+ * String-valued settings (e.g. support.agent_guidance) are never handed to this function in
+ * practice — the GET /admin/settings handler filters them out of its catalog, since they're
+ * edited only via their own dedicated page (/admin/guidance). The `default` branch below is a
+ * defensive backstop so a future string-valued key added without that filter fails loudly at
+ * render time instead of silently rendering (and truncating/coercing) as a number input.
  */
 function renderSettingRow(row: SettingRow): RawHtml {
-  const control =
-    row.kind === 'boolean'
-      ? html`<input type="checkbox" name="value"${raw(row.value ? ' checked' : '')}>`
-      : row.kind === 'mode'
-        ? html`<select name="value">
+  let control: RawHtml
+  switch (row.kind) {
+    case 'boolean':
+      control = html`<input type="checkbox" name="value"${raw(row.value ? ' checked' : '')}>`
+      break
+    case 'mode':
+      control = html`<select name="value">
             <option value="manual"${raw(row.value === 'manual' ? ' selected' : '')}>manual</option>
             <option value="auto"${raw(row.value === 'auto' ? ' selected' : '')}>auto</option>
           </select>`
-        : html`<input type="number" name="value" value="${row.value}">`
+      break
+    case 'number':
+      control = html`<input type="number" name="value" value="${row.value}">`
+      break
+    default:
+      // Reached only if a caller bypasses the GET handler's string-key filter above — kept as a
+      // loud failure rather than a `case 'string':` branch, since string-valued settings have no
+      // sane rendering as a checkbox/select/number input.
+      throw new Error(
+        `renderSettingRow: unsupported setting kind '${row.kind}' for key '${row.key}' — string-valued settings must be filtered out of the generic /admin/settings catalog and edited via their own page`,
+      )
+  }
 
   return html`<form method="post" action="/admin/settings">
     <label>${row.key}</label>
@@ -1193,7 +1220,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       // paste box's own POST target renders back here.
       authed.get('/admin/settings', async (_request, reply) => {
         return safeHandle('settings', reply, async () => {
-          const keys = Object.keys(SETTINGS_DEFAULTS) as SettingKey[]
+          // String-valued settings (e.g. support.agent_guidance) are excluded from this generic
+          // catalog: they're free text, not one of this page's boolean/mode/number controls, and
+          // are edited only via their own dedicated page (/admin/guidance).
+          const keys = (Object.keys(SETTINGS_DEFAULTS) as SettingKey[]).filter((key) => settingKind(key) !== 'string')
           const rows: SettingRow[] = await Promise.all(
             keys.map(async (key) => ({ key, kind: settingKind(key), value: await deps.settings.get(key) })),
           )
@@ -1228,6 +1258,12 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           }
           const key = rawKey as SettingKey
           const kind = settingKind(key)
+          if (kind === 'string') {
+            // String-valued settings (e.g. support.agent_guidance) are edited only via their own
+            // dedicated page (/admin/guidance), never through this generic numeric/boolean/mode
+            // path — treat the key as unknown here rather than silently accepting and coercing it.
+            return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Unknown setting.</p>`))
+          }
 
           let coerced: boolean | WorkflowMode | number
           if (kind === 'boolean') {
