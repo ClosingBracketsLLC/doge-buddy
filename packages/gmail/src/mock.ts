@@ -18,6 +18,10 @@ export interface ReceiveInboundInput {
   labelIds?: string[]
   /** Simulates Gmail's own SPF/DKIM/DMARC stamp. Omitted -> normalized authenticationResults is null. */
   authenticationResults?: string
+  /** RFC 2822 threading headers — lets a test model a reply that Gmail put in a DIFFERENT thread
+   * (Gmail will not merge inbox mail into a spam-foldered conversation; seen live 2026-08-30). */
+  inReplyTo?: string | null
+  references?: string | null
 }
 
 export interface SaveDraftInput {
@@ -330,6 +334,8 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
         deliveredTo: m.deliveredTo,
         subject: m.subject,
         bodyText: m.bodyText,
+        inReplyTo: m.inReplyTo ?? null,
+        references: m.references ?? null,
         authenticationResults: m.authenticationResults ?? null,
       })
       pushHistory([{ id: msg.id, threadId: msg.threadId }])

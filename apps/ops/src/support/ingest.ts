@@ -43,6 +43,8 @@ export const SPAM_LABEL = 'DogeBuddy/Spam'
  * page the owner's phone at will just by opening threads.
  */
 export const MAX_TICKETS_PER_SENDER_PER_DAY = 5
+/** Newest N `<message-id>` tokens of In-Reply-To + References consulted by the thread-id fallback. */
+const REFERENCE_LOOKUP_MAX_TOKENS = 20
 
 /** The single-row primary key of `gmail_sync_state`. */
 const SYNC_STATE_ID = 1
@@ -282,7 +284,13 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
   if (meta.labelIds.includes('DRAFT') || meta.labelIds.includes('TRASH')) return
 
   const addressed = [...meta.to, ...meta.cc, ...meta.deliveredTo].includes(ctx.supportAddress)
-  const existingTicket = await findTicketByThread(ctx.deps.db, meta.threadId)
+  // Thread id first; then the RFC 2822 chain. Gmail's thread id is NOT a reliable conversation key
+  // across the spam boundary — a customer whose first email was spam-foldered gets a brand-new
+  // thread id on their (INBOX) follow-up, so thread-keyed lookup alone opens a second ticket for the
+  // same conversation, which then counts toward repeat-complainant (seen live 2026-08-30). A reply
+  // that names a message we already hold belongs to that message's ticket.
+  const existingTicket =
+    (await findTicketByThread(ctx.deps.db, meta.threadId)) ?? (await findTicketByReferences(ctx.deps.db, meta))
   if (!addressed && !existingTicket) return
 
   const full = await getMessageOrSkip(ctx, messageId, 'full')
@@ -432,6 +440,30 @@ async function getMessageOrSkip(
     if (isMessageGone(err)) return null
     throw err
   }
+}
+
+/**
+ * The RFC 2822 fallback for `findTicketByThread`: every `<…>` token in `In-Reply-To` and
+ * `References` is looked up against the message ids we have already ingested; a hit means this
+ * message continues that ticket's conversation regardless of the Gmail thread id it arrived under.
+ * Newest matching message wins (a `References` chain can span several of ours). Tokens are capped
+ * so a hostile 10KB `References` header cannot turn into a 10KB `IN (...)` list.
+ */
+async function findTicketByReferences(
+  db: DbOrTx,
+  meta: { inReplyTo: string | null; references: string | null },
+): Promise<{ id: string } | undefined> {
+  const tokens = [...`${meta.inReplyTo ?? ''} ${meta.references ?? ''}`.matchAll(/<[^<>\s]+>/g)]
+    .map((m) => m[0])
+    .slice(-REFERENCE_LOOKUP_MAX_TOKENS)
+  if (tokens.length === 0) return undefined
+  const [row] = await db
+    .select({ id: supportMessages.ticketId })
+    .from(supportMessages)
+    .where(inArray(supportMessages.rfcMessageId, tokens))
+    .orderBy(desc(supportMessages.sentAt))
+    .limit(1)
+  return row ? { id: row.id } : undefined
 }
 
 async function findTicketByThread(db: DbOrTx, threadId: string): Promise<{ id: string } | undefined> {

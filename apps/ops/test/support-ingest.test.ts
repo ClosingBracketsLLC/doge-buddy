@@ -227,6 +227,33 @@ describe('runIngest', () => {
     expect(reopened.triageFailureCount).toBe(0)
   })
 
+  it('a reply Gmail filed under a NEW thread still attaches to the original ticket via In-Reply-To (no duplicate ticket)', async () => {
+    // Seen live 2026-08-30: the customer's first email sat in Gmail's Spam folder; their follow-up
+    // (a proper reply, In-Reply-To set) landed in the INBOX under a brand-new Gmail thread id, so
+    // thread-keyed lookup opened a SECOND ticket — which then counted toward repeat-complainant.
+    await seedSyncState()
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+    const ticket = (await ticketByThread(first.threadId))!
+    const [firstRow] = await messagesOfTicket(ticket.id)
+    await db.update(supportTickets).set({ status: 'resolved' }).where(eq(supportTickets.id, ticket.id))
+
+    const reply = gmail.receiveInbound({
+      from: 'jane@example.com', to: [SUPPORT], subject: 'Re: Hi', bodyText: 'following up',
+      inReplyTo: firstRow!.rfcMessageId, references: firstRow!.rfcMessageId,
+      // NO threadId → the mock assigns a fresh one, exactly what Gmail did.
+    })
+    await runIngest(deps)
+
+    expect(reply.threadId).not.toBe(first.threadId)
+    expect(await ticketByThread(reply.threadId)).toBeUndefined() // no second ticket
+    const reopened = (await ticketByThread(first.threadId))!
+    expect(reopened.status).toBe('new')
+    const msgs = await messagesOfTicket(ticket.id)
+    expect(msgs).toHaveLength(2)
+    expect(msgs[1]!.gmailMessageId).toBe(reply.id)
+  })
+
   it('a follow-up on a waiting_on_customer ticket reopens it, but an escalated ticket stays escalated', async () => {
     await seedSyncState()
     const waiting = gmail.receiveInbound({ from: 'a@example.com', to: [SUPPORT], subject: 'W', bodyText: 'w' })
