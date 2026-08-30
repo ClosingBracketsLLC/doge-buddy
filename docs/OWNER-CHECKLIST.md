@@ -152,6 +152,23 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
      `2052005c` into the original ticket `784cac33` and reopens it → agent drafts the damaged-item
      reply → Robert rejects WITH reason "can't replace — refund $37.99" → refund proposal → approve →
      double delivery → one refund → `orderRefundState` read-back.
+  **Walk #2 status, later that evening:** Robert ran the merge; the agent then ran on the merged
+     ticket and **ESCALATED with a reasoned refusal** — order #1001 was created that day and never
+     shipped (test orders skip fulfillment), so "arrived with split seams" is inconsistent, and the
+     first email told a different (change-of-mind) story. That is correct behaviour — a
+     fraud-shaped claim on an unshipped order must reach a human — and it means a TEST order can
+     never yield an agent-drafted refund with a consistent story (nor a CJ dispute: walk #4 needs a
+     real supplier order → canary). So the Shopify refund mechanics are exercised via
+     `pnpm --filter @doge-buddy/ops seed-refund-proposal 1001 3799 <ticketId>` (the real
+     `submitProposal` path: real Telegram buttons, DEPLOYED apply worker does the live
+     `refundCreate`; refunds are hard-locked manual). Seeded proposal `114cbe79-…` is PENDING on
+     Robert's phone. Baseline `read-refund-state` before approval: 0 refunds, parent SALE
+     transaction `8771701014616`, gateway `bogus`, `refunds` is a plain list. After approval: verify
+     exactly one refund in Shopify admin → `read-refund-state` shows the `db-proposal-114cbe79…` note
+     verbatim → `redeliver-apply 114cbe79…` (second delivery → `proposal.apply_skipped`) → and, for
+     the crash-window guard, Robert flips the row to `applying` (`UPDATE proposals SET
+     status='applying', applied_at=NULL WHERE id='114cbe79-…'`) and Claude redelivers once more →
+     the note pre-check must land on `applied` with NO second payout.
   2. **Bogus-gateway refund, delivered twice.** Place a test order through the test payment gateway
      → let the agent draft a refund → approve it → deliver the apply job a second time → **exactly
      one refund** in the Shopify admin (Shopify's idempotency key covers the fast duplicate; the
