@@ -9,7 +9,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 ## Now / this week
 
 - [x] ~~Tap APPROVE on a proposal on your phone.~~ **Done (2026-08-25) — and it closed BOTH open live tiers.** You approved the *Low Noise Pet Hair Clipper* **from the admin dashboard** (Telegram login-link → `/admin/proposals` → approve — exactly Phase 4B's walk) and rejected the *Plush Round Dog Bed* via the Telegram link. The apply worker created ACTIVE Shopify product `gid://shopify/Product/8949329592408` ($54.99, SKU `CJJJCWGY01635-Style D`) with its CJ fulfillment mapping 6 seconds after the tap. **Phase 5 is closed on every tier.**
-- [ ] 🟡 **`git push origin main`** — you pushed the code fixes (thanks — the Monday cron now has the US-warehouse filter); main has since accumulated **docs-only commits** (Phase 6A spec + checklist updates). No deploy urgency; push whenever convenient so the repo history is safe off-machine.
+- [ ] 🟡 **`git push origin main`** — local main is at `a81da1e`, 3 commits ahead of origin: the **refund hard-lock** (refunds are ALWAYS manual — your 2026-08-30 ruling; no setting can auto-approve one any more) and the **promised-action screen fix** (the agent could not answer a return-policy question without the screen escalating it — found on the first real live drafts). **No migration in these three** — but do the 🔴 migration-0007 item under "Phase 6B live bring-up" before or with this push. Railway redeploys on push.
 - [x] ~~`SERPAPI_KEY` → Railway variables.~~ **Done (2026-08-25, confirmed by you).** Trends stage fully working live: 1 request/run, real scores for all keywords.
 - [x] ~~Fix `ADMIN_BASE_URL` in `apps/ops/.env`.~~ **Done — verified 2026-08-24 (follow-up session): `.env` now has the `https://` scheme, so plain `run-sourcing` no longer crashes `loadConfig`.**
 - [x] ~~Phase 5 Tier-2 (first live sourcing run).~~ **DONE on the pipeline side (2026-08-25):** you pushed + pasted the Railway DB URL; Claude drove two live runs. Run #1 exposed the last real bug (the whole harvest pool was CN-warehoused — every winner died on the US-stock gate; also learned CJ freight quotes are NOT stock evidence). After `9affbc6`, run #2 went clean: **completed, submitted 2, dropped 0**, 46 turns, **$0.61**, Telegram sent. Only your approve-tap (item above) remains. Total spend across all 6 live runs: ~$1.95 Anthropic, ~4,200 CJ points, ~14 SerpApi credits.
@@ -32,20 +32,20 @@ Phase 6B — the support **agent** (per-ticket Agent SDK sessions, read-only too
 and refunds behind your approval) — is built and reviewed; everything below is its live tier.
 Claude drives the technical steps with you; only the two ⚪ items need your hands on a browser.
 
-- [ ] 🟡 **Run migrations 0005 + 0006 on Railway FIRST, THEN `git push`.** Order is load-bearing —
-  do NOT push before migrating. (1) **Railway does NOT auto-migrate** — run them yourself, same as
-  6A's step: `DATABASE_URL='<railway url>' pnpm --filter @doge-buddy/db migrate`. Run them
-  **STRICTLY BEFORE** `git push origin main` triggers the redeploy. The new 6B ingest/claim code and
-  `/admin` read columns those two migrations add (`agent_session_entries` +
-  `support_messages.auth_results` + the ticket agent watermarks in 0005,
-  `support_tickets.last_agent_finished_at` in 0006). If the redeploy lands against a pre-0005 schema,
-  the poll throws on **every single cycle** (the columns don't exist) — and `/healthz` stays green
-  (it's a bare `SELECT 1`), so Railway happily retires the old 6A instance and you get a ~20-minute
-  SILENT mail outage. The reverse overlap is safe: a migrated schema running the OLD 6A code during
-  the brief deploy window is fine, because migrations 0005/0006 are **purely additive** (new
-  columns/tables only — 6A code never selects them, so nothing breaks). Migrate, confirm, then push.
-  (2) **No new env vars this phase** — 6B adds no config at all; it reuses the `GMAIL_*` /
-  `SUPPORT_ADDRESS` set from 6A and `ANTHROPIC_API_KEY` from Phase 5, all already in Railway.
+- [x] ~~Run migrations 0005 + 0006 on Railway FIRST, THEN `git push`.~~ **Done (by 2026-08-29):** the
+  6B code has been running in production since that push — real agent runs were created on 2026-08-29
+  (the ones that exposed the `input_schema.type` 400, fixed in `3b55d25`), which is only possible
+  with the 0005/0006 schema in place.
+- [ ] 🔴 **Confirm migration 0007 is on Railway — run it now if unsure (it's idempotent):**
+  `DATABASE_URL='<railway PUBLIC url>' pnpm --filter @doge-buddy/db migrate`. Your push of `6b26bb3`
+  (reject-with-reason re-draft + `/admin/guidance`) deployed code that SELECTS the two new
+  `support_tickets` columns (`owner_redraft_feedback`, `redraft_count`). If 0007 was NOT applied
+  before that deploy, the support poll has been throwing on every cycle since (Railway showed ≈13.8h
+  of uptime at 2026-08-30 ~09:50 PT) while `/healthz` stays green — exactly the silent-outage shape
+  the 0005/0006 item warned about. Claude cannot check this (no Railway DB URL or CLI on this side) —
+  tell Claude either way. If it was missed: run the migration, then look at `/admin/tickets` for
+  mail that arrived during the gap (ingest resumes on the next poll; nothing is lost in Gmail).
+  The three commits after `6b26bb3` add NO migration.
 - [ ] ⚪ **Gmail "Send mail as" check** (carried from 6A's list — now actually load-bearing, since
   6B is the first phase that SENDS): in Gmail as `admin@` → Settings → Accounts → confirm
   `support@dogebuddy.com` is listed under "Send mail as" (add it if not — no verification step for
@@ -58,6 +58,13 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   sign-off:** the live `GMAIL_CONTRACT=1` re-record (the item below) must run FIRST — Tier-2 is not
   signed off against stale fixtures, and the re-record updates `client.test.ts`'s call-site id
   literals in the same commit.
+  **Status 2026-08-30 — walk #1 is in progress, nothing approved or sent yet.** The agent's first
+  live drafts reached Telegram on 2026-08-29; you rejected a policy-faithful return-acceptance draft
+  (that produced the reject-WITH-REASON re-draft loop — up to 2 re-drafts per ticket — and the
+  `/admin/guidance` page where you can edit the agent's standing operating guidance), and the
+  promised-action screen then escalated every return-policy answer (fixed on local main `a81da1e`,
+  awaiting your push). After the push: send a fresh support email asking a return-policy question
+  and expect a draft that survives the screen.
   1. **Email → approve-from-phone → threading.** Send a real support email → categorized ticket
      with an agent-drafted reply proposal on Telegram + `/admin/proposals` → approve from your
      phone → the reply lands in the customer mailbox, `From: support@dogebuddy.com`, **threaded as
@@ -126,7 +133,7 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
   proposal from `/admin/proposals` (`proposal.approve {"via": "admin"}`) and the deployed apply
   worker listed it. Phase 4 Plan B's live tier is closed.
 
-- [ ] 🟡 **Rotate the Railway Postgres password** (Settings on the Postgres service → regenerate credentials) — the connection string has now been pasted into Claude chat logs on 2026-08-23 AND twice on 2026-08-25 (internal + public URLs, same password). Still private logs, but three exposures says rotate once you've tapped approve and Tier-2 is closed. Railway re-injects the internal `DATABASE_URL` into the ops service automatically; Claude will need the new public URL only if you want more locally-driven live DB work afterward.
+- [x] ~~Rotate the Railway Postgres password.~~ **Done (2026-08-27)** — it briefly broke the deployed ops service (a stale pasted `DATABASE_URL` literal → healthz `db:error`), fixed by updating the variable + a manual redeploy (Deployments → ⋮ → Redeploy; Railway stages variable edits behind an easy-to-miss Apply banner). Claude has never seen the new URL — paste it when locally-driven live DB work is needed. *Original note:* the connection string has now been pasted into Claude chat logs on 2026-08-23 AND twice on 2026-08-25 (internal + public URLs, same password). Still private logs, but three exposures says rotate once you've tapped approve and Tier-2 is closed. Railway re-injects the internal `DATABASE_URL` into the ops service automatically; Claude will need the new public URL only if you want more locally-driven live DB work afterward.
 
 - [x] ~~Phase 6A live bring-up.~~ **DONE (2026-08-27) — every subsystem verified in production.** The saga: test emails first BOUNCED (support@ didn't exist as an address — the checklist had covered SPF/DKIM but the alias was never created); Robert fixed it by making `support@dogebuddy.com` the user's PRIMARY email (admin@ became the alias), `GMAIL_IMPERSONATE` updated to `support@` in Railway + local `.env`. Then live: real email → `order_issue` ticket with Haiku triage + ownership-checked order claim (correctly unlinked); "chargeback" → code tripwire → Telegram alert on the phone; two more emails tripped the repeat-complainant escalation; Google's own admin notice was spam-auto-resolved; admin resolve→escalate→resolve all audited with guarded transitions; Gmail draft autosaves produced ZERO junk rows and the sent reply landed as exactly one outbound message. Six tickets on `/admin/tickets` tell the whole story. *(Optional 30s completeness check, anytime: reply from the personal gmail to the resolved "Order #1002" thread — the ticket should flip back to `new`.)*
 
@@ -149,6 +156,6 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 
 ---
 
-*Maintained by Claude; last updated 2026-08-27 (Phase 6B built + reviewed on its branch; its live bring-up is the new section above). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
+*Maintained by Claude; last updated 2026-08-30 (refund hard-lock + promised-action screen fix merged to local main; migration-0007 confirmation added; stale items reconciled). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** **6B's live bring-up, then Phase 7.** Phase 6B (the support agent) is BUILT and fully reviewed — 20 task gates, every one closed clean or after its own fix rounds, plus a mailbox-to-mailbox E2E suite; 1,349 tests green workspace-wide, typecheck clean. 6A's parked items (the `isAbortError` TimeoutError bug, MIME-Version, RFC 2047 folding) were cleared first, on this same branch, before anything called `sendReply`. What remains is entirely live: the **Phase 6B live bring-up** section above — push, migrations 0005+0006 on Railway (no auto-migrate, no new env vars), the two owner items (Send-mail-as, an outlook.com address), the four-check Tier-2 walk, and the three carried verifications (live `GMAIL_CONTRACT=1` re-record from the main checkout, the `RefundInput`/`OrderTransactionInput` schema check BEFORE the first live refund, and the `orderRefundState` note/pagination read-back right after it). **Phase 7** = the canary launch, per parent spec §(c)5 — it needs the CJ wallet top-up and the policy-page paste, both already listed below. DMARC DNS record still open (item below); DB password rotation still open.
+**Next build session starts here →** **Finish the 6B live Tier-2 walk; then Phase 7 (canary launch).** Everything is built and reviewed: 6B (the support agent), the reject-with-reason re-draft loop + `/admin/guidance` (`6b26bb3` — pushed and deployed), Phase 7 scoring (nightly + revenue-gated digest, manual mode), and the refund hard-lock + promised-action screen fix (`a81da1e` — local main, UNPUSHED). First: the 🔴 migration-0007 confirmation under "Phase 6B live bring-up" (the `6b26bb3` deploy selects columns only 0007 adds — if it was missed, support ingest is silently down), then Robert pushes `a81da1e`. Then re-run Tier-2 walk #1 from a fresh support email: the agent should now answer a return-policy question without the screen escalating; approve from the phone; verify threading in Gmail AND the outlook.com address; do the 1a marker-header read-back. Walks #2–4 (Bogus-gateway refund delivered twice → one refund; follow-up resume across a redeploy; `openCjDispute` vs the CJ sandbox) and the three carried verifications (`GMAIL_CONTRACT=1` re-record from the main checkout; the `RefundInput`/`OrderTransactionInput` schema check BEFORE the first live refund; the `orderRefundState` read-back after it) follow. **Phase 7** = the canary launch per parent spec §(c)5 — needs the CJ wallet top-up and the policy-page paste (both under "Later phases"). DMARC DNS record still open.
