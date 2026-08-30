@@ -9,7 +9,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 ## Now / this week
 
 - [x] ~~Tap APPROVE on a proposal on your phone.~~ **Done (2026-08-25) — and it closed BOTH open live tiers.** You approved the *Low Noise Pet Hair Clipper* **from the admin dashboard** (Telegram login-link → `/admin/proposals` → approve — exactly Phase 4B's walk) and rejected the *Plush Round Dog Bed* via the Telegram link. The apply worker created ACTIVE Shopify product `gid://shopify/Product/8949329592408` ($54.99, SKU `CJJJCWGY01635-Style D`) with its CJ fulfillment mapping 6 seconds after the tap. **Phase 5 is closed on every tier.**
-- [ ] 🔴 **`git push origin main`** — carries the **refund-input fix** (`OrderTransactionInput.orderId` was missing → every live refund would have failed; gateway-null guard) plus docs. Must be deployed BEFORE the refund walk (#2).
+- [ ] 🔴 **`git push origin main`** — carries the **cross-thread reply fix** (a reply Gmail files under a new thread id now attaches to its ticket via `In-Reply-To`/`References` instead of opening a duplicate — found live when your Outlook reply on the spam-foldered "Return request" thread became a 3rd ticket and tripped repeat-complainant) plus docs. The refund-input fix is already deployed. Push, then Claude merges the duplicate ticket into the original and re-arms it for the refund walk.
 - [ ] 🟡 **Rotate the Railway Postgres password AGAIN before launch** (Settings on the Postgres service → regenerate) — the fresh URL was pasted into chat once on 2026-08-30 for the Tier-2 DB verifications. Same drill as 2026-08-27: after regenerating, check whether the ops service's `DATABASE_URL` is the reference `${{Postgres.DATABASE_URL}}` or a stale pasted literal (the literal is what broke ops last time), and remember Railway stages variable edits behind the easy-to-miss Apply banner + a manual redeploy. No rush today; required before real customer data flows.
 - [ ] ⚪ **Publish the storefront — a LAUNCH-DAY switch, deliberately OFF.** `dogebuddy.com` now
   targets the Hydrogen storefront on Oxygen (done 2026-08-30), and Robert keeps it
@@ -144,6 +144,14 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
      is FIXTURE-ONLY today (the recorder never records our sends). If Gmail drops or rewrites the
      header, a crash between send and the `applied` transition silently sends the customer a SECOND
      copy. This walk is its only live verification.
+  **Walk #2 status (2026-08-30 evening):** test order #1001 exists; the refund-input schema bugs are
+     fixed and deployed. Robert's Outlook reply about the order landed as a NEW Gmail thread (Gmail
+     won't merge inbox mail into a spam-foldered conversation) → duplicate ticket `2052005c` →
+     repeat-complainant escalation (order #1001 DID link — ownership check verified live). Root
+     cause fixed on local main (References fallback in ingest). After the push deploys: Claude merges
+     `2052005c` into the original ticket `784cac33` and reopens it → agent drafts the damaged-item
+     reply → Robert rejects WITH reason "can't replace — refund $37.99" → refund proposal → approve →
+     double delivery → one refund → `orderRefundState` read-back.
   2. **Bogus-gateway refund, delivered twice.** Place a test order through the test payment gateway
      → let the agent draft a refund → approve it → deliver the apply job a second time → **exactly
      one refund** in the Shopify admin (Shopify's idempotency key covers the fast duplicate; the
