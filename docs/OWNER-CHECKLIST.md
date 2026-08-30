@@ -86,9 +86,21 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   every return-policy answer (→ fixed in `a81da1e`, now deployed). Note: Gmail put the Outlook
   inbound in Spam; ingest deliberately reads spam (`includeSpamTrash: true`, Haiku triage decides),
   so the reply went out regardless — but expect OUR reply to land in Outlook's Junk too until the
-  domain has reputation. **Left on walk #1:** (a) you confirm ONE conversation in the personal
-  Gmail and in Outlook (check Junk); (b) one more email — a return-policy question from the
-  outlook.com address — to prove a policy answer now survives the screen.
+  domain has reputation. **Update 2026-08-30 afternoon (verified against the
+  Railway DB):** guidance pasted, the no-refund policy/validator push deployed, and the Outlook
+  follow-up on the shipping thread ("Can I send it back for a refund?") produced a screen-passing
+  draft Robert approved — sent 13:48 PT, marker `72b9da79-…`, full References chain, **landed in
+  the Outlook INBOX (Robert confirmed)**. That same exchange closed TWO more items: **walk #3
+  (follow-up resume across a redeploy) is FORMALLY CLOSED** — one session (`263cabaf-…`, 43
+  transcript entries in Postgres) spans last night's first reply and today's follow-up, straight
+  across the 13:42 PT redeploy — and the **reject-with-reason re-draft loop had its first real use
+  last night** (proposal `c6193fd6` rejected with a reason 20:50 PT → re-draft `65a8edf9` 23s
+  later → approved and sent). The "Return request" ticket's `agent_failed ×2` is diagnosed: both
+  runs SUCCEEDED and drafted fine — the OLD promised-action screen rejected the drafts downstream
+  (exactly the `a81da1e` bug, now deployed-fixed). **Left on walk #1:** Robert replies on the
+  RETURN thread from Outlook (the ticket is `resolved`, so a thread reply reopens it and resets
+  its failure counts) → decline + SORRY10 draft → approve; and confirm the personal-Gmail thread
+  shows as one conversation.
   1. **Email → approve-from-phone → threading.** Send a real support email → categorized ticket
      with an agent-drafted reply proposal on Telegram + `/admin/proposals` → approve from your
      phone → the reply lands in the customer mailbox, `From: support@dogebuddy.com`, **threaded as
