@@ -277,21 +277,55 @@ describe('support validator', () => {
       expect(result).toEqual({ ok: true, normalizedBody: body })
     })
 
-    it('"We have received your request for a replacement and will review it." is CAUGHT (accepted false positive: "we have" + "replacement" in-window)', async () => {
+    // Policy-explanation cleanup (2026-08-30): these two were formerly ACCEPTED false positives —
+    // `we have` matched near an ACTION token in a reply that promises nothing. Now that `we have`
+    // only counts when a resolution verb follows it (`we have refunded`), both correctly PASS.
+    it('"We have received your request for a replacement and will review it." PASSES (we-have not followed by a resolution verb)', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(
-        db,
-        ticketId,
-        'We have received your request for a replacement and will review it.',
-        noRefund,
-      )
+      const body = 'We have received your request for a replacement and will review it.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    it('"We have no record of a refund request on this order." PASSES (we-have not followed by a resolution verb)', async () => {
+      const ticketId = await seedTicket()
+      const body = 'We have no record of a refund request on this order.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    // Policy-explanation cleanup (2026-08-30): the false positive found on the FIRST real live
+    // draft. A refund/return POLICY EXPLANATION must pass — it promises nothing.
+    it('a returns-POLICY explanation passes (within-N-days + refund + "has been opened" are policy, not a promise)', async () => {
+      const ticketId = await seedTicket()
+      const body =
+        'Returns are accepted within 30 days of delivery, but the item needs to be unopened, unused, ' +
+        'and still sealed in its original manufacturer packaging to qualify for a refund. If the item ' +
+        "has been opened or used, we're unable to process a return for it."
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    it('a return DECLINE that quotes the 30-day window passes (no promise)', async () => {
+      const ticketId = await seedTicket()
+      const body =
+        "Unfortunately we can't offer a refund for an item that simply wasn't to your dog's taste — " +
+        'returns are only accepted within 30 days for unopened, unused products.'
+      const result = await validateReplyBody(db, ticketId, body, noRefund)
+      expect(result).toEqual({ ok: true, normalizedBody: body })
+    })
+
+    // But a REAL refund promise phrased as a receipt-timeframe MUST still be caught.
+    it('"You\'ll see your refund back within 5 business days." is CAUGHT (receipt-timeframe promise)', async () => {
+      const ticketId = await seedTicket()
+      const result = await validateReplyBody(db, ticketId, "You'll see your refund back within 5 business days.", noRefund)
       expect(result.ok).toBe(false)
       expect((result as { code: string }).code).toBe('promised_action')
     })
 
-    it('"We have no record of a refund request on this order." is CAUGHT (accepted false positive: "we have" + "refund" in-window)', async () => {
+    it('"Your refund will be credited to your card within 3-5 days." is CAUGHT (will be + resolution verb)', async () => {
       const ticketId = await seedTicket()
-      const result = await validateReplyBody(db, ticketId, 'We have no record of a refund request on this order.', noRefund)
+      const result = await validateReplyBody(db, ticketId, 'Your refund will be credited to your card within 3-5 days.', noRefund)
       expect(result.ok).toBe(false)
       expect((result as { code: string }).code).toBe('promised_action')
     })

@@ -104,9 +104,38 @@ const ACTION_RE =
  * mention of `funds back` self-triggered regardless of context — including a plain question like
  * "Would you like the funds back on your card?", which promises nothing. `expect (it|the
  * funds|...)` below still catches the one phrase this token pair was added for ("Expect the funds
- * back in 5 business days.") via the ACTION `funds back` overlapping THIS token's `the funds`. */
-const PROMISE_RE =
-  /issued|processed|sent|approved|applied|on its way|on the way|within \d+ (business )?days|has been|have been|we have|we've|gone ahead and|is complete|has shipped|expect (it|the funds|your (refund|money))|will be/gi
+ * back in 5 business days.") via the ACTION `funds back` overlapping THIS token's `the funds`.
+ *
+ * POLICY-EXPLANATION cleanup (2026-08-30, found on the first real live drafts): the vague auxiliary
+ * tokens `has been`, `have been`, `we have`, `we've`, `will be`, and the bare `within \d+ days`
+ * were RESOLUTION-GATED. A refund/return POLICY reply naturally contains all of them without
+ * promising anything — "returns are accepted WITHIN 30 DAYS of delivery… for a refund", "if the
+ * item HAS BEEN opened", "WE HAVE a 30-day policy" — and each was tripping the screen near the
+ * "refund"/"return" ACTION token, so the agent could not answer a single return-policy question
+ * without escalating. Each vague auxiliary now only counts when a RESOLUTION verb follows it
+ * (`has been PROCESSED`, `we've REFUNDED`, `will be CREDITED`), and a bare timeframe only counts
+ * when anchored to the customer RECEIVING money/an item (`… BACK … within 5 days`). This still
+ * catches every real promise (each carries a resolution verb or a receipt-timeframe) while letting
+ * policy explanations and declines through — and it is only ONE of two gates: the owner still
+ * approves every reply, and the screen re-runs at approval. It also correctly stops two formerly
+ * "accepted" false positives ("We have received your request…", "We have no record of a refund…"). */
+const RESOLUTION_VERBS = 'processed|issued|sent|approved|applied|refunded|reimburs\\w*|credited|cancel\\w*|reversed|complete\\w*|finali[sz]ed|posted|shipped|reflected'
+const PROMISE_RE = new RegExp(
+  [
+    // Strong standalone tokens — specific enough to promise on their own.
+    'issued', 'processed', 'sent', 'approved', 'applied',
+    'on its way', 'on the way', 'gone ahead and', 'is complete', 'has shipped',
+    'expect (it|the funds|your (refund|money))',
+    // Resolution-gated auxiliaries — only a promise when an actual resolution verb follows.
+    `(has|have|had) been (${RESOLUTION_VERBS})`,
+    `will be (${RESOLUTION_VERBS})`,
+    `(we have|we've) (${RESOLUTION_VERBS}|gone ahead)`,
+    // Receipt-timeframe — a bare "within N days" only counts when the customer is RECEIVING money/
+    // an item, not a policy return-window ("accepted within 30 days" has no receipt cue).
+    '(back|posted|credited|reflect\\w*|arriv\\w*) [^.]{0,25}within \\d+ (business )?days',
+  ].join('|'),
+  'gi',
+)
 /** How close an ACTION token and a PROMISE token must be (in whitespace-normalized chars) to
  * count as one promised-action hit. */
 const PROMISE_PROXIMITY_CHARS = 200
