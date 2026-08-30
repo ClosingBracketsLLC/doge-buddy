@@ -271,11 +271,14 @@ export async function submitProposal(
   const modeKey = MODE_KEYS[input.type]
   let mode = await deps.settings.get(modeKey)
 
-  if (mode === 'auto' && input.type === 'refund') {
-    const cap = await deps.settings.get('refund.auto_max_cents')
-    if ((parsed.amountCents ?? 0) > cap) {
-      mode = 'manual'
-    }
+  // Refunds are NEVER auto-approved — the owner is the sole approver of every refund (owner ruling
+  // 2026-08-30). A refund moves money, so it must ALWAYS require an explicit human approval,
+  // regardless of `workflow.refund.mode` or `refund.auto_max_cents`. This hard-locks the guarantee
+  // in code rather than relying on a flippable setting: no config change can ever make a refund
+  // auto-apply. (Other proposal types still honor their own mode; `refund.auto_max_cents` is now
+  // dead for the refund type and kept only to avoid a settings migration.)
+  if (input.type === 'refund') {
+    mode = 'manual'
   }
 
   if (mode === 'manual') {

@@ -384,12 +384,15 @@ describe('submitProposal', () => {
     }
   })
 
-  it('refund auto-cap fallback: over cap falls back to manual, under cap stays auto', async () => {
+  it('refund is ALWAYS manual — even in auto mode, under OR over cap, it needs owner approval (owner ruling: sole approver of every refund)', async () => {
     const settings = createSettings(db)
     const { notify, sent } = createCaptureNotifier()
     const enqueue = vi.fn(async () => {})
     const alert = vi.fn()
 
+    // Force the strongest auto config: auto mode AND an amount well under the cap. Even so, the
+    // refund type is hard-locked to manual in code — the mode setting and the cap are ignored for
+    // refunds. A refund can never be auto-approved.
     await settings.set('workflow.refund.mode', 'auto')
     try {
       const overCap = await submitProposal(
@@ -403,8 +406,9 @@ describe('submitProposal', () => {
       )
       expect(overCap.status).toBe('pending')
       const [overRow] = await db.select().from(proposals).where(eq(proposals.id, overCap.id))
+      expect(overRow!.autoApproved).toBe(false)
+      expect(overRow!.decidedBy).toBeNull()
       expect(overRow!.actionTokenHash).toMatch(/^[a-f0-9]{64}$/)
-      expect(sent).toHaveLength(1)
 
       const underCap = await submitProposal(
         { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
@@ -415,9 +419,13 @@ describe('submitProposal', () => {
           sourceWorkflow: 'support-agent',
         },
       )
-      expect(underCap.status).toBe('approved')
+      // Under-cap in auto mode would previously have auto-approved; now it stays manual.
+      expect(underCap.status).toBe('pending')
       const [underRow] = await db.select().from(proposals).where(eq(proposals.id, underCap.id))
-      expect(underRow!.autoApproved).toBe(true)
+      expect(underRow!.autoApproved).toBe(false)
+      expect(underRow!.decidedBy).toBeNull()
+      expect(enqueue).not.toHaveBeenCalled() // never enqueued for apply without approval
+      expect(sent).toHaveLength(2) // both notified the owner for a decision
     } finally {
       await settings.set('workflow.refund.mode', 'manual')
     }
