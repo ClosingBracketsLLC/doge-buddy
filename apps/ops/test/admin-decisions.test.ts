@@ -721,6 +721,42 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
     await app.close()
   })
 
+  // Load-bearing (spec §3.4): at cap the form drops the redraft button, so the REAL body the owner
+  // submits carries `action=escalate` + a non-blank reason — NOT the hand-crafted `action=redraft`
+  // case 17 sends. This must still page `redraft_limit_reached` (not the silent owner_rejected_draft
+  // terminal). Guarding against the old action-first guard order that misrouted this to escalate_terminal.
+  it('17b. admin reject action=escalate (the real at-cap form body) at SUPPORT_REDRAFT_MAX -> pages redraft_limit_reached', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const ticket = await seedTicket()
+    await db.update(supportTickets).set({ redraftCount: SUPPORT_REDRAFT_MAX }).where(eq(supportTickets.id, ticket.id))
+    const row = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/proposals/${row.id}/reject`,
+      headers: { ...FORM_HEADERS, cookie },
+      payload: formBody({ reason: 'still not right', action: 'escalate' }),
+    })
+
+    expect(res.statusCode).toBe(303)
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('redraft_limit_reached')
+    expect(ticketAfter!.escalationNotifiedAt).toBeNull() // not pre-stamped -> the poller pages
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'admin', resolution: 'escalate_limit' })
+
+    await app.close()
+  })
+
   it('18. admin reject with a reason over 2000 chars -> readable 400, no state change, token/status untouched', async () => {
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, admin: deps })

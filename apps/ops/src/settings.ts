@@ -36,7 +36,9 @@ export const SETTINGS_DEFAULTS = {
 // Deliberately no `as const`/`satisfies` here: either narrows the boolean properties down
 // to their literal default (e.g. `false` instead of `boolean`), which would make `set()`
 // reject the other value of that same boolean. The keys below are the source of truth for
-// which settings are booleans; modes are `WorkflowMode` strings; everything else is a number (cents/bps/days).
+// which settings are booleans; modes are `WorkflowMode` strings; the free-text string category
+// (currently just `support.agent_guidance`) is `StringSettingKey`; everything else is a number
+// (cents/bps/days).
 
 export type SettingKey = keyof typeof SETTINGS_DEFAULTS
 type BooleanSettingKey =

@@ -781,6 +781,42 @@ describe('public action routes (/a/:proposalId/approve|reject)', () => {
     await app.close()
   })
 
+  // Load-bearing (spec §3.4): at cap the form drops the redraft button, so the REAL body the owner
+  // submits carries `action=escalate` + a non-blank reason — NOT the hand-crafted `action=redraft`
+  // case 22 sends. This must still page `redraft_limit_reached` (not the silent owner_rejected_draft
+  // terminal). Guarding against the old action-first guard order that misrouted this to escalate_terminal.
+  it('22b. POST reject action=escalate (the real at-cap form body) at SUPPORT_REDRAFT_MAX -> pages redraft_limit_reached', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, actions: deps })
+    const ticket = await seedTicket()
+    await db.update(supportTickets).set({ redraftCount: SUPPORT_REDRAFT_MAX }).where(eq(supportTickets.id, ticket.id))
+    const { row, token } = await seedSupportProposal({
+      type: 'support_reply',
+      ticketId: ticket.id,
+      payload: supportReplyPayload(ticket.id, 'We will follow up shortly.'),
+    })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/a/${row.id}/reject?t=${token}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: formBody({ reason: 'still not right', action: 'escalate' }),
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('Rejected')
+
+    const [ticketAfter] = await db.select().from(supportTickets).where(eq(supportTickets.id, ticket.id))
+    expect(ticketAfter!.status).toBe('escalated')
+    expect(ticketAfter!.escalationReason).toBe('redraft_limit_reached')
+    expect(ticketAfter!.escalationNotifiedAt).toBeNull() // not pre-stamped -> the poller pages
+
+    const auditRows = await auditRowsFor(row.id, 'proposal.reject')
+    expect(auditRows[0]!.detail).toMatchObject({ via: 'link', resolution: 'escalate_limit' })
+
+    await app.close()
+  })
+
   it('23. POST reject with a reason over 2000 chars -> readable refusal page, no state change, token NOT consumed', async () => {
     const deps = makeDeps()
     const app = buildServer({ pool, isQueueReady: () => true, actions: deps })

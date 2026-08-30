@@ -356,7 +356,12 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
     // gets its own attempts rather than inheriting a stale count from the last one.
     await tx
       .update(supportTickets)
-      .set({ status: 'new', triageFailureCount: 0, agentFailureCount: 0 })
+      // redraft-cycle clear (see support/redraft.ts): defense-in-depth. Both source states
+      // (`resolved`/`waiting_on_customer`) already had these columns cleared on entry, so this is
+      // redundant today — but including it makes the "a `new` ticket never carries a stale redraft
+      // cycle" invariant self-contained here rather than relying on transitivity through every
+      // upstream writer that parked the ticket.
+      .set({ status: 'new', triageFailureCount: 0, agentFailureCount: 0, ...clearRedraftCycle() })
       .where(and(eq(supportTickets.id, ticket.id), inArray(supportTickets.status, ['resolved', 'waiting_on_customer'])))
 
     // Step 6: the code tripwire.

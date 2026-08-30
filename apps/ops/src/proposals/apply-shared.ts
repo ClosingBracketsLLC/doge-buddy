@@ -217,6 +217,11 @@ export async function failStaleAndHandBack(
   const proposalId = row.id
   await deps.db.transaction(async (tx) => {
     await applyProposalTransition(tx, proposalId, 'applying', 'failed', { applyError: STALE_APPLY_ERROR })
+    // Deliberately does NOT clear the redraft columns (no `...clearRedraftCycle()`). This is a
+    // pre-send stale guard: no reply shipped, so the owner's correction is still UNFULFILLED and must
+    // carry forward into the fresh re-draft the re-run produces. Clearing here would both drop a live
+    // correction AND reset redraft_count, defeating SUPPORT_REDRAFT_MAX. (Contrast completeSend's
+    // hand-back, which DOES clear precisely because the reply already shipped.)
     await tx
       .update(supportTickets)
       .set({ status: 'triaged', lastAgentRunAt: null })

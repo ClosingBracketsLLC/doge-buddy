@@ -21,8 +21,15 @@ export function resolveRejectAction(p: {
   redraftCount: number
   ticketStatus: string
 }): RejectResolution {
-  if (p.reason.trim().length === 0 || p.action !== 'redraft') return { kind: 'escalate_terminal' }
+  // Guard ORDER is load-bearing (spec §3.4). The cap check MUST precede the action check: at cap the
+  // rendered forms drop the redraft button and keep only "escalate" + the reason textarea, so an
+  // at-cap reject arrives as action=escalate. A reason-carrying reject at cap must PAGE as
+  // redraft_limit_reached regardless of which button — checking action first would misroute it to the
+  // silent owner_rejected_draft terminal. The blank-reason "just escalate to me" path stays silent at
+  // ANY count because its guard is first.
+  if (p.reason.trim().length === 0) return { kind: 'escalate_terminal' } // "just escalate to me" — silent, any count
   if (p.ticketStatus !== 'awaiting_approval') return { kind: 'escalate_terminal' }
-  if (p.redraftCount >= SUPPORT_REDRAFT_MAX) return { kind: 'escalate_limit' }
+  if (p.redraftCount >= SUPPORT_REDRAFT_MAX) return { kind: 'escalate_limit' } // reason present + at cap → paging
+  if (p.action !== 'redraft') return { kind: 'escalate_terminal' } // reason present, below cap, chose escalate → silent terminal
   return { kind: 'redraft' }
 }

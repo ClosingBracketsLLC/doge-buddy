@@ -242,7 +242,11 @@ export function actionRoutes(deps: ActionRouteDeps): FastifyPluginAsync {
       }
 
       const status = decision === 'approve' ? 'approved' : 'rejected'
-      const isSupportRejectDecision = decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund')
+      // `row.ticketId !== null` makes the `row.ticketId!` deref below sound and matches handleGet's
+      // gate: a support proposal with a null ticketId falls through to the plain terminal reject
+      // (onSupportProposalRejected early-returns on null ticketId) — same net behavior, just honest.
+      const isSupportRejectDecision =
+        decision === 'reject' && (row.type === 'support_reply' || row.type === 'refund') && row.ticketId !== null
 
       // Task 8: resolve the reject dispatch OUTSIDE the transaction, before any state changes. The
       // over-2000-char refusal must return here — before `applyProposalTransition` ever runs — so

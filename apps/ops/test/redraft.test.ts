@@ -30,4 +30,17 @@ describe('resolveRejectAction', () => {
     expect(resolveRejectAction({ ...base, redraftCount: SUPPORT_REDRAFT_MAX })).toEqual({ kind: 'escalate_limit' }))
   it('escalate_limit above the cap (defensive >=)', () =>
     expect(resolveRejectAction({ ...base, redraftCount: SUPPORT_REDRAFT_MAX + 1 })).toEqual({ kind: 'escalate_limit' }))
+  // Load-bearing (spec §3.4): at cap the rendered forms drop the redraft button and keep only the
+  // "escalate" button + reason textarea, so a reason-carrying reject at cap really arrives as
+  // action=escalate. It MUST page as redraft_limit_reached (escalate_limit), NOT the silent terminal
+  // — the exact case the old action-first guard order got wrong.
+  it('escalate_limit for a reason-carrying reject at cap even via the escalate button', () =>
+    expect(
+      resolveRejectAction({
+        reason: 'x',
+        action: 'escalate',
+        redraftCount: SUPPORT_REDRAFT_MAX,
+        ticketStatus: 'awaiting_approval',
+      }),
+    ).toEqual({ kind: 'escalate_limit' }))
 })
