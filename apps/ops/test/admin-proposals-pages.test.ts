@@ -4,6 +4,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildServer } from '../src/server.ts'
 import type { AdminDeps } from '../src/http/admin/routes.ts'
+import { renderProposalDetail, type ProposalRow } from '../src/http/admin/render-proposal.ts'
 import { createCaptureNotifier } from '../src/notify/capture.ts'
 import type { OwnerNotification } from '../src/notify/notify.ts'
 import { createSettings } from '../src/settings.ts'
@@ -924,5 +925,63 @@ describe('proposals queue + detail pages', () => {
     expect(res.body).toContain('name="action" value="escalate"')
 
     await app.close()
+  })
+
+  // Fix round 1 (Task 9 review, Important): `renderRejectForm`'s gate must match `actions.ts`'s
+  // `handleGet` exactly — that public route additionally requires `row.ticketId !== null` before
+  // rendering the reason form (no ticket, no redraft target). A support_reply/refund proposal with
+  // a null ticketId is currently unreachable in practice (submit.ts always supplies a real
+  // ticketId), so this is a render-level unit test (no DB, no HTTP) rather than a fixture-seeded
+  // one: it calls `renderProposalDetail` directly against a synthetic row to prove the two
+  // surfaces' gating logic stays identical even for a case the DB can't currently produce.
+  function syntheticProposalRow(overrides: Partial<ProposalRow> = {}): ProposalRow {
+    const now = new Date()
+    return {
+      id: crypto.randomUUID(),
+      type: 'support_reply',
+      status: 'pending',
+      summary: 'Synthetic test proposal',
+      payload: supportReplyPayload('ignored-ticket-id', 'We will follow up shortly.'),
+      sourceWorkflow: 'test',
+      agentRunId: null,
+      ticketId: null,
+      productId: null,
+      orderId: null,
+      autoApproved: false,
+      decidedBy: null,
+      decidedAt: null,
+      appliedAt: null,
+      applyError: null,
+      actionTokenHash: null,
+      expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+      createdAt: now,
+      updatedAt: now,
+      ...overrides,
+    }
+  }
+
+  it('27. render-level: a support_reply proposal with a NULL ticketId falls back to the plain reject form — parity with actions.ts\'s handleGet gate', () => {
+    const row = syntheticProposalRow({ type: 'support_reply', ticketId: null })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).not.toContain('<textarea name="reason"')
+    expect(rendered).not.toContain('name="action" value="redraft"')
+    expect(rendered).not.toContain('name="action" value="escalate"')
+    expect(rendered).toContain('<button type="submit">Reject</button>')
+  })
+
+  it('28. render-level: a refund proposal with a NULL ticketId also falls back to the plain reject form', () => {
+    const row = syntheticProposalRow({
+      type: 'refund',
+      ticketId: null,
+      payload: refundPayload('ignored-order-id'),
+    })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).not.toContain('<textarea name="reason"')
+    expect(rendered).not.toContain('name="action" value="redraft"')
+    expect(rendered).toContain('<button type="submit">Reject</button>')
   })
 })

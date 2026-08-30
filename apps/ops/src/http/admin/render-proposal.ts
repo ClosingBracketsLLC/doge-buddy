@@ -196,10 +196,15 @@ function renderDeprecateProductSummary(payload: unknown, extras: ProposalDetailE
  * — once the ticket has already been redrafted the max number of times, the button is replaced by
  * plain copy saying so, same as the public confirm page) and `value="escalate"`. Every other type
  * (including `deprecate_product`, which has no ticket to redraft against) keeps today's plain
- * single-button reject form.
+ * single-button reject form — and so does a `support_reply`/`refund` proposal whose `ticketId` is
+ * null (Task 9 fix round 1): `actions.ts`'s `handleGet` gates its own reason form on
+ * `row.ticketId !== null` (there's no ticket to re-draft against without one), and the POST-side
+ * dispatch here already mirrors that by treating a null `ticketId` as a plain reject (see
+ * `onSupportProposalRejected`'s own early-return) — this GET-side gate must match it exactly, or
+ * the two surfaces would show different forms for the exact same row.
  */
 function renderRejectForm(p: ProposalRow, rejectAction: string, redraftCount: number): RawHtml {
-  const isSupportReject = p.type === 'support_reply' || p.type === 'refund'
+  const isSupportReject = (p.type === 'support_reply' || p.type === 'refund') && p.ticketId !== null
   if (!isSupportReject) {
     return html`<form method="post" action="${rejectAction}">
       <button type="submit">Reject</button>
