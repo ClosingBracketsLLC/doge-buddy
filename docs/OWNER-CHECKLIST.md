@@ -95,7 +95,7 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   first test email ("Shipping time + tracking?", 2026-08-29 20:48 PT) is in the support mailbox and
   was replied to. (Threading is the one behaviour Gmail-to-Gmail cannot prove: Gmail groups on its
   own thread id, Outlook on `In-Reply-To`/`References`.)
-- [ ] 🟡 **Tier-2 walk (spec §8 + the exit criteria).** Four checks, run with Claude. **Before
+- [ ] 🟡 **Tier-2 walk (spec §8 + the exit criteria).** Four checks, run with Claude. **Status 2026-08-30 EOD: #1, #1a, #2, #3 CLOSED.** Left: **#4** (`openCjDispute` vs the CJ sandbox needs a PLACED supplier order, which a test order never produces → rides on the canary's first real order) and the `GMAIL_CONTRACT=1` re-record below (the sign-off gate; next session's opener). **Before
   sign-off:** the live `GMAIL_CONTRACT=1` re-record (the item below) must run FIRST — Tier-2 is not
   signed off against stale fixtures, and the re-record updates `client.test.ts`'s call-site id
   literals in the same commit.
@@ -187,9 +187,11 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
      returns exactly one refund whose note is `db-proposal-594b7211-…` **verbatim** (the durable
      half of never-refund-twice), `totalRefundedCents` 3799, `refunds` a plain un-paginated list.
      **Second delivery PASSES:** `redeliver-apply` → deployed worker → `proposal.apply_skipped
-     {status: applied}` — no second payout. Remaining sub-check: the crash-window re-entry (row
-     flipped to `applying` → redeliver → note pre-check → `applied` with `recovered: true`).
-  2. **Bogus-gateway refund, delivered twice.** Place a test order through the test payment gateway
+     {status: applied}` — no second payout. **Crash-window re-entry PASSES (17:43 PT):** Robert flipped the row to
+     `applying`, redelivery re-entered the executor, the note pre-check found `db-proposal-594b7211-…`
+     on Shopify and completed as `proposal.applied {recovered: true}` — no `refundCreate` call; final
+     read-back still exactly ONE refund, 3799 cents. **WALK #2: CLOSED.**
+  2. ~~**Bogus-gateway refund, delivered twice.**~~ ✅ **CLOSED 2026-08-30** (status above). Place a test order through the test payment gateway
      → let the agent draft a refund → approve it → deliver the apply job a second time → **exactly
      one refund** in the Shopify admin (Shopify's idempotency key covers the fast duplicate; the
      `db-proposal-<id>` refund NOTE is the durable half, since those keys expire in ~24h).
@@ -209,7 +211,7 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
   nullable on a transaction entry (we send the parent transaction's gateway verbatim), and whether
   each transaction entry needs its own `orderId` alongside the top-level one. A wrong shape here
   fails loudly rather than silently, but it fails on a real order — check the schema first.
-- [ ] 🟡 **Right after that test refund, read the state back.** Call `orderRefundState` on the order
+- [x] ~~Right after that test refund, read the state back.~~ **Done (2026-08-30):** on order #1001 after the live refund the `db-proposal-594b7211-…` note round-trips **verbatim**, `refunds` is a plain un-paginated list (1 entry), `totalRefundedCents` 3799. *Original item:* **read the state back.** Call `orderRefundState` on the order
   and confirm two things: the `db-proposal-<id>` note round-trips **verbatim** (it is the durable
   half of the never-refund-twice guarantee — if Shopify trims or rewrites it, that guarantee is
   gone), and the `refunds` list is **not page-capped** (we select it as a plain unpaginated list;
