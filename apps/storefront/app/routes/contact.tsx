@@ -1,3 +1,4 @@
+import {useEffect} from 'react';
 import {Form, useActionData, useLoaderData, useNavigation} from 'react-router';
 import {useNonce} from '@shopify/hydrogen';
 import type {Route} from './+types/contact';
@@ -32,6 +33,14 @@ export async function action({request, context}: Route.ActionArgs) {
 const TURNSTILE_SCRIPT =
   'https://challenges.cloudflare.com/turnstile/v0/api.js';
 
+/** The api.js global. Typed locally rather than pulling in a dependency for one call. */
+type TurnstileWindow = {
+  turnstile?: {reset: (container?: string | HTMLElement) => void};
+};
+
+/** Validation keys that have their own inline <span> under an input. */
+const RENDERED_FIELDS = ['name', 'email', 'orderNumber', 'message'];
+
 export default function Contact() {
   const {siteKey, enabled} = useLoaderData<typeof loader>();
   const data = useActionData<typeof action>();
@@ -46,6 +55,29 @@ export default function Contact() {
   };
   const fieldError = (f: string) =>
     result?.kind === 'validation' ? result.fields[f] : undefined;
+  // Ops derives `fields` from zod paths, so it can name a key the form doesn't render
+  // (e.g. `turnstileToken` when the widget was blocked). Without this those errors would
+  // come back as a silent re-render.
+  const otherErrors =
+    result?.kind === 'validation'
+      ? Object.entries(result.fields)
+          .filter(([key]) => !RENDERED_FIELDS.includes(key))
+          .map(([, message]) => message)
+      : [];
+
+  // Turnstile tokens are single-use: <Form> re-renders the same widget after a failed
+  // submit, so without a reset the redeemed token is resubmitted and every retry fails.
+  // Only the states that keep the form mounted are reset ('unavailable' unmounts it).
+  useEffect(() => {
+    if (
+      result &&
+      (result.kind === 'validation' ||
+        result.kind === 'turnstile' ||
+        result.kind === 'capped')
+    ) {
+      (window as unknown as TurnstileWindow).turnstile?.reset();
+    }
+  }, [data, result]);
 
   if (!enabled || result?.kind === 'unavailable') {
     return (
@@ -84,6 +116,11 @@ export default function Contact() {
           Too many messages right now — please try again later.
         </p>
       )}
+      {otherErrors.length > 0 && (
+        <p role="alert" className="mt-4 text-red-700">
+          {otherErrors.join(' ')}
+        </p>
+      )}
       <Form method="post" className="mt-6 flex flex-col gap-4">
         <label className="flex flex-col gap-1 text-ink">
           Name
@@ -117,6 +154,8 @@ export default function Contact() {
           <input
             name="orderNumber"
             maxLength={20}
+            pattern="#?[0-9A-Za-z-]{1,19}"
+            title="Your order number, e.g. #1001 — letters, digits and dashes only."
             defaultValue={values.orderNumber}
             placeholder="#1001"
             className="rounded border px-3 py-2"

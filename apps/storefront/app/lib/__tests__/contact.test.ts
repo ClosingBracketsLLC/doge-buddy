@@ -1,3 +1,5 @@
+import {readFileSync} from 'node:fs';
+import {resolve} from 'node:path';
 import {describe, expect, it, vi} from 'vitest';
 import {clientIp, forwardContact, parseContactForm} from '../contact';
 
@@ -80,13 +82,19 @@ describe('forwardContact', () => {
     await expect(forwardContact({...base, fetchFn})).resolves.toEqual(expected);
   });
 
-  it('network error → unavailable', async () => {
+  it('network error → unavailable, and logs the cause', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetchFn = vi.fn(async () => {
       throw new Error('down');
     }) as unknown as typeof fetch;
     await expect(forwardContact({...base, fetchFn})).resolves.toEqual({
       kind: 'unavailable',
     });
+    expect(logged).toHaveBeenCalledWith(
+      'contact form: forward failed',
+      expect.any(Error),
+    );
+    logged.mockRestore();
   });
 });
 
@@ -104,5 +112,17 @@ describe('clientIp', () => {
       '2.2.2.2',
     );
     expect(clientIp(new Headers())).toBeNull();
+  });
+});
+
+describe('the /contact page source', () => {
+  // The route module has no unit test of its own, and the owner constraint is absolute:
+  // the public page must never print the support address (bots scraped the last store's).
+  it('never prints the support email address', () => {
+    const source = readFileSync(
+      resolve(process.cwd(), 'app/routes/contact.tsx'),
+      'utf8',
+    );
+    expect(source).not.toContain('support@');
   });
 });

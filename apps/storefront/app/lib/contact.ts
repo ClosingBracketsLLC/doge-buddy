@@ -75,7 +75,10 @@ export async function forwardContact(input: {
       if (body.error === 'turnstile') return {kind: 'turnstile'};
     }
     return {kind: 'unavailable'};
-  } catch {
+  } catch (err) {
+    // Timeout, DNS failure, ops down — the customer sees the unavailable copy either way,
+    // but the Oxygen log needs the cause.
+    console.error('contact form: forward failed', err);
     return {kind: 'unavailable'};
   }
 }
