@@ -580,6 +580,27 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     },
   )
 
+  it('9b. deadLetterApplyProposal surfaces GraphQL errors[] in apply_error and the alert (not just the generic message)', async () => {
+    const row = await seedProposal({ status: 'applying' })
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+    // Shaped like @doge-buddy/shopify-admin's ShopifyGraphqlError: generic message + `errors`.
+    const err = Object.assign(new Error('Shopify GraphQL request returned errors'), {
+      errors: [{ message: "'@idempotent' can't be applied to mutations (allowed: fields)" }],
+    })
+
+    await deadLetterApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id, err)
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('failed')
+    expect(after!.applyError).toMatch(/returned errors: \[\{"message":"'@idempotent' can't be applied/)
+    expect(alert).toHaveBeenCalledWith(
+      'critical',
+      'proposal_apply_failed',
+      expect.objectContaining({ proposalId: row.id, graphqlErrors: [{ message: expect.stringContaining('@idempotent') }] }),
+    )
+  })
+
   // ---------------------------------------------------------------------------
   // Critical fix regression: a pre-existing null-gid variant row (left over from an earlier
   // partial apply, before this fix existed) self-heals on a later resumed run — but ONLY the gid

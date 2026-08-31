@@ -49,9 +49,18 @@ describe('helpers', () => {
       .toThrow(ShopifyUserError)
     expect(() => assertNoUserErrors({ productSet: { userErrors: [] } }, 'productSet')).not.toThrow()
   })
-  it('withIdempotencyKey injects the directive after the operation header', () => {
+  it('withIdempotencyKey puts the directive on the mutation FIELD, never the operation header', () => {
+    // Live 2026-07 Admin API (probed 2026-08-30): `'@idempotent' can't be applied to mutations
+    // (allowed: fields)` when it sits on the operation, and `The @idempotent directive is required
+    // for this mutation but was not provided` when it is absent — so the ONLY accepted placement is
+    // on the root mutation field, after its arguments.
     const doc = withIdempotencyKey('mutation RefundCreate($input: RefundInput!) { refundCreate(input: $input) { userErrors { message } } }', 'prop-123')
-    expect(doc).toContain('mutation RefundCreate($input: RefundInput!) @idempotent(key: "prop-123") {')
+    expect(doc).toContain('mutation RefundCreate($input: RefundInput!) {')
+    expect(doc).toContain('refundCreate(input: $input) @idempotent(key: "prop-123") {')
+    expect(doc).not.toMatch(/RefundInput!\)\s*@idempotent/)
+    // Multi-line documents with an unnamed operation and no arguments on the field still work.
+    const doc2 = withIdempotencyKey('mutation {\n  ping {\n    ok\n  }\n}', 'k-1')
+    expect(doc2).toContain('ping @idempotent(key: "k-1") {')
     expect(() => withIdempotencyKey('mutation X { y }', 'bad key!')).toThrow(RangeError)
   })
 })

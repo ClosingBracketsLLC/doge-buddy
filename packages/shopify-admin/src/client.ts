@@ -26,6 +26,8 @@ const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 // but not including — the opening `{` of the operation body) so the directive can be spliced
 // in right before that brace.
 const OPERATION_HEADER_PATTERN = /^(\s*)(query|mutation|subscription)([^{]*)\{/
+/** `fieldName` or `fieldName(args…)` — the root selection right after the operation header (whose match already consumed the opening brace). */
+const ROOT_FIELD_PATTERN = /^\s*[A-Za-z_]\w*(?:\s*\([^)]*\))?/
 
 /**
  * Thin GraphQL client for the Shopify Admin API. Handles token attachment (via
@@ -108,22 +110,37 @@ export function assertNoUserErrors(payload: unknown, mutationField: string): voi
 }
 
 /**
- * Inserts an `@idempotent(key: "...")` directive into the operation header of a GraphQL
- * document, right before its opening `{`. This is the ONLY place the directive syntax lives.
+ * Inserts an `@idempotent(key: "...")` directive on the ROOT MUTATION FIELD of a GraphQL document
+ * (`mutation X($v: T) { field(args) @idempotent(key: "…") { … } }`). This is the ONLY place the
+ * directive syntax lives.
+ *
+ * Placement is load-bearing and was settled against the LIVE 2026-07 Admin API (2026-08-30): on
+ * the operation header Shopify answers `'@idempotent' can't be applied to mutations (allowed:
+ * fields)`, and without it at all `The @idempotent directive is required for this mutation but was
+ * not provided` — so every idempotent mutation (refundCreate, inventorySetQuantities) failed
+ * validation until the directive moved onto the field. Mocked tests could not see this.
  */
-// Directive per Admin API 2026-04 requirement; verify exact syntax against live 2026-07 docs on
-// first real call (isolated here on purpose).
 export function withIdempotencyKey(document: string, key: string): string {
   if (!IDEMPOTENCY_KEY_PATTERN.test(key)) {
     throw new RangeError(`Invalid Shopify idempotency key: ${JSON.stringify(key)}`)
   }
 
-  const match = OPERATION_HEADER_PATTERN.exec(document)
-  if (!match) {
+  const header = OPERATION_HEADER_PATTERN.exec(document)
+  if (!header) {
     throw new Error('withIdempotencyKey: could not locate an operation header in the given GraphQL document')
   }
-  const [full, leadingWs = '', opType, header] = match
-  const trimmedHeader = (header ?? '').replace(/\s+$/, '')
-  const replacement = `${leadingWs}${opType}${trimmedHeader} @idempotent(key: "${key}") {`
-  return replacement + document.slice(full.length)
+  // The first field selection after the operation's opening brace: a name, optionally followed by
+  // an argument list. Variable-only arguments never nest parentheses, so `\([^)]*\)` is exact here.
+  const afterHeader = document.slice(header[0].length)
+  const field = ROOT_FIELD_PATTERN.exec(afterHeader)
+  if (!field) {
+    throw new Error('withIdempotencyKey: could not locate the root mutation field in the given GraphQL document')
+  }
+  const fieldEnd = field.index + field[0].length
+  return (
+    document.slice(0, header[0].length) +
+    afterHeader.slice(0, fieldEnd) +
+    ` @idempotent(key: "${key}")` +
+    afterHeader.slice(fieldEnd)
+  )
 }

@@ -112,9 +112,22 @@ export async function deadLetterApplyProposal(deps: ApplyProposalDeps, proposalI
   if (!row) return
   if (row.status !== 'approved' && row.status !== 'applying') return
 
-  const message = err instanceof Error ? err.message : String(err)
+  // A GraphQL-level failure (ShopifyGraphqlError) carries the server's actual `errors[]` — the
+  // message alone is the generic "request returned errors", which is what the first live refund
+  // dead-lettered with (2026-08-30) and told nobody that the @idempotent directive was misplaced.
+  // Surface those errors in BOTH the row and the page; duck-typed so this file needs no import.
+  const graphqlErrors =
+    err !== null && typeof err === 'object' && Array.isArray((err as { errors?: unknown }).errors)
+      ? ((err as { errors: unknown[] }).errors)
+      : null
+  const baseMessage = err instanceof Error ? err.message : String(err)
+  const message = graphqlErrors ? `${baseMessage}: ${JSON.stringify(graphqlErrors)}` : baseMessage
   await applyProposalTransition(db, proposalId, row.status, 'failed', { applyError: String(message).slice(0, 500) })
-  await deps.alert('critical', 'proposal_apply_failed', { proposalId, error: message })
+  await deps.alert('critical', 'proposal_apply_failed', {
+    proposalId,
+    error: message,
+    ...(graphqlErrors ? { graphqlErrors } : {}),
+  })
 
   // Support dead-letter growth (Tasks 15/16, spec §4 preamble): an approved `support_reply`/
   // `refund` proposal that fails to apply must surface back to its ticket AND page the owner — a

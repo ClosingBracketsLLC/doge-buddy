@@ -99,7 +99,7 @@ describe('inventorySetQuantities', () => {
     await expect(inventorySetQuantities(client, input, 'prop-1')).resolves.toBeUndefined()
     const { query, variables } = lastGraphqlCall(calls)
     expect(query).toMatch(/mutation[\s\S]*inventorySetQuantities/)
-    expect(query).toContain('@idempotent(key: "prop-1")')
+    expect(query).toMatch(/inventorySetQuantities\(input: \$input\)\s*@idempotent\(key: "prop-1"\)/) // on the FIELD
     expect(variables).toEqual({ input })
   })
   it('throws ShopifyUserError on userErrors', async () => {
@@ -117,7 +117,7 @@ describe('refundCreate', () => {
     expect(result).toEqual({ refundId: 'gid://shopify/Refund/5' })
     const { query, variables } = lastGraphqlCall(calls)
     expect(query).toMatch(/mutation[\s\S]*refundCreate/)
-    expect(query).toContain('@idempotent(key: "prop-1")')
+    expect(query).toMatch(/refundCreate\(input: \$input\)\s*@idempotent\(key: "prop-1"\)/) // on the FIELD (live 2026-07 rule)
     expect(variables).toEqual({ input })
   })
   it('throws ShopifyUserError on userErrors', async () => {
