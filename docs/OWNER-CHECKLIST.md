@@ -180,6 +180,15 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
      accepted (userError "Order does not exist" on a fake id — document valid, no money moved).
      Next: push → redeploy → re-seed on the shipping ticket → Approve → one refund → read-back →
      redeliver → crash-window re-entry.
+  **WALK #2 — LIVE REFUND LANDED (2026-08-30 17:41 PT).** Robert re-armed the shipping ticket, the
+     watcher auto-seeded `594b7211-…`, he approved, and 2 seconds later the deployed worker issued
+     **`gid://shopify/Refund/999129448536` for $37.99** (`proposal.refund_issued` → `proposal.applied`,
+     ticket left at `waiting_on_customer` as designed). **Read-back PASSES:** `orderRefundState`
+     returns exactly one refund whose note is `db-proposal-594b7211-…` **verbatim** (the durable
+     half of never-refund-twice), `totalRefundedCents` 3799, `refunds` a plain un-paginated list.
+     **Second delivery PASSES:** `redeliver-apply` → deployed worker → `proposal.apply_skipped
+     {status: applied}` — no second payout. Remaining sub-check: the crash-window re-entry (row
+     flipped to `applying` → redeliver → note pre-check → `applied` with `recovered: true`).
   2. **Bogus-gateway refund, delivered twice.** Place a test order through the test payment gateway
      → let the agent draft a refund → approve it → deliver the apply job a second time → **exactly
      one refund** in the Shopify admin (Shopify's idempotency key covers the fast duplicate; the
