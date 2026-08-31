@@ -2,6 +2,7 @@ import { POLICY_COPY } from '@doge-buddy/core'
 import { createDb, orders, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
 import { eq, like } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
+import { formAckBody } from '../src/jobs/support-form-ack.ts'
 import { validateReplyBody, validateRefundIntent, validateSupportOutput, senderAuthNote, dmarcPasses } from '../src/support/validator.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
@@ -365,6 +366,11 @@ describe('support validator', () => {
         }
       }
     }
+
+    it('the contact-form ack copy passes the reply screens verbatim', async () => {
+      const r = await validateReplyBody(db, await seedTicket(), formAckBody('Rob'), noRefund)
+      expect(r.ok).toBe(true)
+    })
 
     // But a REAL refund promise phrased as a receipt-timeframe MUST still be caught.
     it('"You\'ll see your refund back within 5 business days." is CAUGHT (receipt-timeframe promise)', async () => {

@@ -9,6 +9,7 @@ import { selectAndEnqueueAgentRuns, type AgentSelectDeps } from '../support/agen
 import { notifyPendingEscalations, type EscalateDeps } from '../support/escalate.ts'
 import { runIngest, type Alert, type IngestDeps, type IngestResult } from '../support/ingest.ts'
 import { runTriage, type TriageCall, type TriageDeps } from '../support/triage.ts'
+import { sweepUnackedFormTickets } from './support-form-ack.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type SendFn = (name: string, data: object, opts?: SendOpts) => Promise<void>
@@ -50,6 +51,7 @@ export interface SupportPollDeps {
   triageFn?: (deps: TriageDeps) => Promise<{ triaged: number; escalatedTicketIds: string[] }>
   escalateFn?: (deps: EscalateDeps) => Promise<{ notified: number }>
   agentSelect?: (deps: AgentSelectDeps) => Promise<{ enqueued: number; orphansEscalated: number; unbackedEscalated: number }>
+  formAckSweep?: (deps: { db: Db; enqueue: SendFn; alert: Alert; now?: () => Date }) => Promise<{ enqueued: number }>
 }
 
 // Once-per-boot info alerts (spec §2 header) for the two configuration-absent skip paths below.
@@ -94,8 +96,9 @@ async function recordFailure(db: Db): Promise<number> {
 }
 
 /**
- * One `support.poll-gmail` cycle (spec §2 header + §2.9, Task 13's 4th stage): ingest → triage →
- * escalate → agent-select, in strict sequence with each stage isolated in its own try/catch.
+ * One `support.poll-gmail` cycle (spec §2 header + §2.9, Task 13's 4th stage; contact-form spec
+ * §4's 5th stage): ingest → triage → escalate → agent-select → form-ack sweep, in strict sequence
+ * with each stage isolated in its own try/catch.
  *
  * - Skip paths (Gmail absent, killswitch, `workflow.support.enabled` off) return WITHOUT touching
  *   `gmail_sync_state` at all — they are configuration/policy no-ops, not failures.
@@ -110,6 +113,9 @@ async function recordFailure(db: Db): Promise<number> {
  * - agent-select runs AFTER escalate (not before) so a ticket the orphan backstop escalates this
  *   cycle is picked up by `notifyPendingEscalations` on the NEXT cycle, one minute later — never
  *   this same one (see `agent-select.ts`'s own doc comment).
+ * - The form-ack sweep (5th) is NOT gated on `ingestFailed` — it needs no Gmail read, only a plain
+ *   `support_tickets` scan, so it runs every cycle regardless of what ingest/triage/escalate/
+ *   agent-select did.
  * - The FIRST stage error is what gets recorded/alerted; later stage errors are swallowed the same
  *   way (still counted as "this poll failed"), just not the one surfaced in alert detail.
  * - Never throws: `retryLimit: 0` on this queue means pg-boss would not retry a thrown job anyway
@@ -176,6 +182,14 @@ export async function executeSupportPoll(deps: SupportPollDeps): Promise<void> {
     } catch (err) {
       firstError = firstError ?? err
     }
+  }
+
+  // 5th stage (contact-form spec §4): re-enqueue acks for form tickets stuck on their placeholder.
+  const sweepFn = deps.formAckSweep ?? sweepUnackedFormTickets
+  try {
+    await sweepFn({ db: deps.db, enqueue: deps.enqueue, alert: deps.alert, now })
+  } catch (err) {
+    firstError = firstError ?? err
   }
 
   if (firstError === null) {

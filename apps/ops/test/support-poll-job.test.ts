@@ -63,6 +63,7 @@ describe('executeSupportPoll', () => {
       triageFn: vi.fn(async () => ({ triaged: 0, escalatedTicketIds: [] })),
       escalateFn: vi.fn(async () => ({ notified: 0 })),
       agentSelect: vi.fn(async () => ({ enqueued: 0, orphansEscalated: 0, unbackedEscalated: 0 })),
+      formAckSweep: vi.fn(async () => ({ enqueued: 0 })),
       now: () => new Date('2026-08-25T12:00:00.000Z'),
       ...overrides,
     }
@@ -299,6 +300,19 @@ describe('executeSupportPoll', () => {
         'support_poll_degraded',
         expect.objectContaining({ consecutiveFailures: 5, error: 'ingest-specific failure' }),
       )
+    })
+
+    it('5th stage: the form-ack sweep runs every cycle, even when ingest failed', async () => {
+      await seedSyncState(0, null)
+      const ingestFn = vi.fn(async () => {
+        throw new Error('ingest boom')
+      })
+      const formAckSweep = vi.fn(async () => ({ enqueued: 0 }))
+      const deps = baseDeps({ ingestFn, formAckSweep })
+
+      await executeSupportPoll(deps)
+
+      expect(formAckSweep).toHaveBeenCalledTimes(1)
     })
   })
 

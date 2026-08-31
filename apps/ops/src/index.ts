@@ -36,6 +36,7 @@ import { scoringWeeklyHandler, SCORING_WEEKLY_QUEUE, type ScoringWeeklyDeps } fr
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
 import { sourcingWeeklyHandler } from './jobs/sourcing-weekly.ts'
 import { supportAgentRunHandler, SUPPORT_AGENT_QUEUE, type SupportAgentJobDeps } from './jobs/support-agent-run.ts'
+import { formAckHandler, FORM_ACK_QUEUE } from './jobs/support-form-ack.ts'
 import { supportPollGmailHandler, SUPPORT_POLL_QUEUE, type SupportPollDeps } from './jobs/support-poll-gmail.ts'
 import { loadDotEnv } from './load-env.ts'
 import { createNoopNotifier, type NotifyOwner } from './notify/notify.ts'
@@ -447,6 +448,16 @@ await queue.boss.updateQueue(SUPPORT_AGENT_QUEUE, { name: SUPPORT_AGENT_QUEUE, p
 // let one run's cleanup delete another's live mirror out from under it.
 await queue.boss.work(SUPPORT_AGENT_QUEUE, { batchSize: 1 }, supportAgentRunHandler(supportAgentDeps))
 app.log.info(`${SUPPORT_AGENT_QUEUE} worker ARMED — stately, batch size 1`)
+
+// `support.form-ack` (contact-form spec §4): sends the acknowledgement that creates a form
+// ticket's Gmail thread. `stately` + singletonKey (set by every producer via FORM_ACK_SEND_OPTS)
+// bounds duplicates to one outstanding job per ticket; the handler itself is idempotent on top.
+await createQueueRetrying(queue.boss, FORM_ACK_QUEUE, { name: FORM_ACK_QUEUE, policy: 'stately' })
+await queue.boss.updateQueue(FORM_ACK_QUEUE, { name: FORM_ACK_QUEUE, policy: 'stately' })
+await queue.boss.work(FORM_ACK_QUEUE, { includeMetadata: true }, formAckHandler({
+  db, gmail: gmailClient, supportAddress: config.gmail?.supportAddress ?? '', alert,
+}))
+app.log.info(`${FORM_ACK_QUEUE} worker ARMED`)
 
 const supportPollDeps: SupportPollDeps = {
   db,
