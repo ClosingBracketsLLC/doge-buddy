@@ -27,10 +27,11 @@ function sanitizeHeaderField(value: string): string {
 const EXTRA_HEADER_NAME_RE = /^[A-Za-z0-9-]+$/
 
 /** Validates an extra header's field name — anything outside token chars could otherwise be used
- * to smuggle a colon/line-break-adjacent header name. */
+ * to smuggle a colon/line-break-adjacent header name. Shared by BOTH builders, so the message is
+ * builder-neutral (`rfc2822:`) rather than naming `buildReplyRaw` at a `buildNewRaw` call site. */
 function validateExtraHeaderName(name: string): void {
   if (!EXTRA_HEADER_NAME_RE.test(name)) {
-    throw new Error(`buildReplyRaw: invalid extra header name "${name}"`)
+    throw new Error(`rfc2822: invalid extra header name "${name}"`)
   }
 }
 
@@ -86,7 +87,7 @@ function encodeSubjectIfNeeded(subject: string): string {
     const word = `${RFC2047_PREFIX}${base64}${RFC2047_SUFFIX}`
     // Sanity check — should be unreachable given RFC2047_MAX_BYTES_PER_CHUNK's math above.
     if (word.length > RFC2047_MAX_WORD_LEN) {
-      throw new Error(`buildReplyRaw: encoded-word exceeded ${RFC2047_MAX_WORD_LEN} chars`)
+      throw new Error(`rfc2822: encoded-word exceeded ${RFC2047_MAX_WORD_LEN} chars`)
     }
     return word
   })
