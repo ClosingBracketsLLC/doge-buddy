@@ -313,3 +313,24 @@ describe('createMockGmail', () => {
     expect(after.map((l) => l.name)).toContain('DogeBuddy/New')
   })
 })
+
+describe('MockGmail.sendNew + rfc822msgid search', () => {
+  it('stores a SENT message on a NEW thread with the given Message-ID, findable via in:sent rfc822msgid:', async () => {
+    const gmail = createMockGmail({ selfAddress: 'support@dogebuddy.com' })
+    const sent = await gmail.sendNew({
+      to: 'jane@example.com', subject: 'We got your message', messageId: '<form-ack-t1@dogebuddy.com>', bodyText: 'Hi Jane',
+    })
+    expect(sent.threadId).not.toBe('')
+    const meta = await gmail.getMessage(sent.id, { format: 'metadata' })
+    expect(meta.labelIds).toEqual(['SENT'])
+    expect(meta.rfcMessageId).toBe('<form-ack-t1@dogebuddy.com>')
+    expect(meta.inReplyTo).toBeNull()
+    expect(meta.threadId).toBe(sent.threadId)
+
+    const found = await gmail.listMessages({ q: 'in:sent rfc822msgid:<form-ack-t1@dogebuddy.com>' })
+    expect(found.ids).toEqual([{ id: sent.id, threadId: sent.threadId }])
+    const none = await gmail.listMessages({ q: 'in:sent rfc822msgid:<nope@dogebuddy.com>' })
+    expect(none.ids).toEqual([])
+    expect(gmail.sentMessages().map((m) => m.id)).toContain(sent.id)
+  })
+})

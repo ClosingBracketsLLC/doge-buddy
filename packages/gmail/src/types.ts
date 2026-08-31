@@ -62,4 +62,12 @@ export interface GmailClient {
     bodyText: string
     extraHeaders?: Record<string, string>
   }): Promise<{ id: string; threadId: string }>
+  /** A NEW-thread send (the contact-form ack). Like sendReply, never retried by the client. */
+  sendNew(r: {
+    to: string
+    subject: string
+    messageId: string
+    bodyText: string
+    extraHeaders?: Record<string, string>
+  }): Promise<{ id: string; threadId: string }>
 }

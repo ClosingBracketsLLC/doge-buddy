@@ -714,4 +714,30 @@ describe('createGmailClient', () => {
       expect(text.includes('PRIVATE KEY'), `${f} contains key material`).toBe(false)
     }
   })
+
+  it('sendNew: POSTs { raw } WITHOUT threadId to /messages/send, returns { id, threadId }, and is attempted exactly once on a 503', async () => {
+    let calls = 0
+    const fetchFn = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      calls++
+      expect(String(url)).toBe('https://gmail.googleapis.com/gmail/v1/users/me/messages/send')
+      const body = JSON.parse(String(init?.body))
+      expect(body).not.toHaveProperty('threadId')
+      const text = Buffer.from(body.raw, 'base64url').toString()
+      expect(text).toContain(`Message-ID: <form-ack-t${calls}@dogebuddy.com>\r\n`)
+      expect(text).not.toContain('In-Reply-To')
+      return calls === 1
+        ? new Response(JSON.stringify({ id: 'sent-1', threadId: 'thread-new-1' }), { status: 200 })
+        : new Response(JSON.stringify({ error: { code: 503, message: 'x', errors: [{ reason: 'backendError' }] } }), { status: 503 })
+    }) as unknown as typeof fetch
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    await expect(
+      client.sendNew({ to: 'jane@example.com', subject: 'We got your message', messageId: '<form-ack-t1@dogebuddy.com>', bodyText: 'Hi' }),
+    ).resolves.toEqual({ id: 'sent-1', threadId: 'thread-new-1' })
+
+    await expect(
+      client.sendNew({ to: 'jane@example.com', subject: 'x', messageId: '<form-ack-t2@dogebuddy.com>', bodyText: 'Hi' }),
+    ).rejects.toMatchObject({ name: 'GmailApiError', status: 503 })
+    expect(calls).toBe(2) // one per call — no retry on the send endpoint
+  })
 })

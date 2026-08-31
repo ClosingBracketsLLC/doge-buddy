@@ -3,7 +3,7 @@ import { PROPOSAL_MARKER_HEADER, type GmailClient, type HistoryRecord, type Norm
 import { GmailApiError, GmailRateLimitError, HistoryExpiredError, MessageGoneError } from './errors.ts'
 import { parseAddrSpecs, parseFirstAddrSpec } from './address.ts'
 import { extractBodyText } from './body.ts'
-import { buildReplyRaw } from './rfc2822.ts'
+import { buildNewRaw, buildReplyRaw } from './rfc2822.ts'
 
 const BASE_URL = 'https://gmail.googleapis.com/gmail/v1/users/me'
 
@@ -363,6 +363,19 @@ export function createGmailClient(opts: CreateGmailClientOptions): GmailClient {
         threadId: string
       }
 
+      return { id: result.id, threadId: result.threadId }
+    },
+
+    async sendNew(r) {
+      const raw = buildNewRaw({
+        from: fromAddress,
+        to: r.to,
+        subject: r.subject,
+        messageId: r.messageId,
+        bodyText: r.bodyText,
+        extraHeaders: r.extraHeaders,
+      })
+      const result = (await request('POST', '/messages/send', [], 'send', { raw })) as { id: string; threadId: string }
       return { id: result.id, threadId: result.threadId }
     },
   }

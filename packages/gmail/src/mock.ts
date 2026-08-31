@@ -1,7 +1,7 @@
 import { PROPOSAL_MARKER_HEADER, type GmailClient, type HistoryRecord, type NormalizedMessage } from './types.ts'
 import { GmailApiError, HistoryExpiredError, MessageGoneError } from './errors.ts'
 import { parseAddrSpecs, parseFirstAddrSpec } from './address.ts'
-import { buildReplyRaw } from './rfc2822.ts'
+import { buildNewRaw, buildReplyRaw } from './rfc2822.ts'
 
 export interface MockGmailOptions {
   selfAddress?: string
@@ -158,6 +158,7 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
     references?: string | null
     authenticationResults?: string | null
     dogeBuddyProposalId?: string | null
+    rfcMessageId?: string
   }): StoredMessage {
     const id = nextMessageId()
     const stored: StoredMessage = {
@@ -171,7 +172,7 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
       deliveredTo: normalizeAddrList(input.deliveredTo ?? []),
       subject: input.subject ?? null,
       bodyText: input.bodyText,
-      rfcMessageId: `<${id}@mock.gmail>`,
+      rfcMessageId: input.rfcMessageId ?? `<${id}@mock.gmail>`,
       inReplyTo: input.inReplyTo ?? null,
       references: input.references ?? null,
       authenticationResults: input.authenticationResults ?? null,
@@ -242,6 +243,8 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
       maybeThrowPending('listMessages')
       const target = q.q ? extractResyncTarget(q.q) : null
       const includeSpamTrash = q.includeSpamTrash ?? false
+      const rfcId = q.q?.match(/rfc822msgid:(<[^>\s]+>)/)?.[1] ?? null
+      const sentOnly = /(?:^|\s)in:sent(?:\s|$)/.test(q.q ?? '')
 
       const ids: { id: string; threadId: string }[] = []
       for (const msg of messages.values()) {
@@ -250,6 +253,8 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
         if (target && !(msg.to.includes(target) || msg.cc.includes(target) || msg.deliveredTo.includes(target))) {
           continue
         }
+        if (rfcId && msg.rfcMessageId !== rfcId) continue
+        if (sentOnly && !msg.labelIds.includes('SENT')) continue
         ids.push({ id: msg.id, threadId: msg.threadId })
       }
       return { ids, nextPageToken: undefined }
@@ -319,6 +324,26 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
         // Same round-trip the real Gmail does: a header stamped on the way out comes back on the
         // way in. Without this the mock could never exercise `apply-support-reply.ts`'s re-entry
         // recovery, which reads the marker back off the thread.
+        dogeBuddyProposalId: r.extraHeaders?.[PROPOSAL_MARKER_HEADER] ?? null,
+      })
+      sentRawMessages.push({ id: msg.id, threadId: msg.threadId, raw })
+      pushHistory([{ id: msg.id, threadId: msg.threadId }])
+      return { id: msg.id, threadId: msg.threadId }
+    },
+
+    async sendNew(r) {
+      maybeThrowPending('sendNew')
+      const raw = buildNewRaw({
+        from: selfAddress, to: r.to, subject: r.subject, messageId: r.messageId, bodyText: r.bodyText, extraHeaders: r.extraHeaders,
+      })
+      const msg = storeMessage({
+        threadId: nextThreadId(),
+        labelIds: ['SENT'],
+        fromRaw: selfAddress,
+        to: [r.to],
+        subject: r.subject,
+        bodyText: r.bodyText,
+        rfcMessageId: r.messageId,
         dogeBuddyProposalId: r.extraHeaders?.[PROPOSAL_MARKER_HEADER] ?? null,
       })
       sentRawMessages.push({ id: msg.id, threadId: msg.threadId, raw })

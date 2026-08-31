@@ -343,3 +343,42 @@ describe('buildReplyRaw', () => {
     expect(bccLines).toHaveLength(0)
   })
 })
+
+import { buildNewRaw } from '../src/rfc2822.ts'
+
+describe('buildNewRaw', () => {
+  const base = {
+    from: 'support@dogebuddy.com',
+    to: 'jane@example.com',
+    subject: 'We got your message — Doge Buddy Support',
+    messageId: '<form-ack-abc@dogebuddy.com>',
+    bodyText: 'Hi Jane,\n\nThanks.',
+  }
+  const decode = (raw: string) => Buffer.from(raw, 'base64url').toString('utf8')
+
+  it('emits From/To/Subject/Message-ID and NO In-Reply-To/References, no Re: prefix', () => {
+    const text = decode(buildNewRaw(base))
+    const headers = text.split('\r\n\r\n')[0]!
+    expect(headers).toContain('From: support@dogebuddy.com\r\n')
+    expect(headers).toContain('To: jane@example.com\r\n')
+    expect(headers).toContain('Message-ID: <form-ack-abc@dogebuddy.com>\r\n')
+    expect(headers).not.toContain('In-Reply-To')
+    expect(headers).not.toContain('References')
+    expect(headers).not.toContain('Subject: Re:')
+    // Non-ASCII subject (the em dash) is RFC 2047 encoded like buildReplyRaw does.
+    expect(headers).toMatch(/Subject: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=/)
+    expect(headers).toContain('Content-Transfer-Encoding: quoted-printable')
+    expect(text.endsWith('Thanks.')).toBe(true)
+  })
+
+  it('rejects a Message-ID that is not <local@domain>', () => {
+    expect(() => buildNewRaw({ ...base, messageId: 'form-ack-abc@dogebuddy.com' })).toThrow(/Message-ID/)
+    expect(() => buildNewRaw({ ...base, messageId: '<a b@c>' })).toThrow(/Message-ID/)
+  })
+
+  it('passes extraHeaders through with the same name validation as buildReplyRaw', () => {
+    const text = decode(buildNewRaw({ ...base, extraHeaders: { 'X-DogeBuddy-Form': 'ticket-1' } }))
+    expect(text).toContain('X-DogeBuddy-Form: ticket-1\r\n')
+    expect(() => buildNewRaw({ ...base, extraHeaders: { 'Bad Name': 'x' } })).toThrow(/invalid extra header name/)
+  })
+})

@@ -215,15 +215,53 @@ export function buildReplyRaw(input: BuildReplyRawInput): string {
     }
   }
 
+  return assembleRaw(headerLines, bodyText)
+}
+
+export interface BuildNewRawInput {
+  from: string
+  to: string
+  subject: string
+  /** RFC 5322 `<local@domain>` — supplied by the caller so a retried send can be FOUND
+   * (`rfc822msgid:` search) instead of duplicated. */
+  messageId: string
+  bodyText: string
+  extraHeaders?: Record<string, string>
+}
+
+const MESSAGE_ID_RE = /^<[^<>\s@]+@[^<>\s@]+>$/
+
+/** Shared tail of both builders: CRLF headers + blank line + quoted-printable body → base64url. */
+function assembleRaw(headerLines: string[], bodyText: string): string {
   const headers = headerLines.join('\r\n')
-
-  // Full message: headers + blank line separator + quoted-printable body
-  // Blank line separator is CRLF\r\n (two CRLFs)
   const fullMessage = `${headers}\r\n\r\n${encodeQuotedPrintable(bodyText)}`
-
-  // Encode to base64url (no padding, using - and _ instead of + and /)
   const base64 = Buffer.from(fullMessage, 'utf-8').toString('base64')
-  const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+}
 
-  return base64url
+/**
+ * A NEW-thread message (no In-Reply-To/References, no `Re:`) with an explicit Message-ID — the
+ * contact-form acknowledgement. Same sanitizing/encoding as `buildReplyRaw`.
+ */
+export function buildNewRaw(input: BuildNewRawInput): string {
+  const { from, to, subject, messageId, bodyText, extraHeaders } = input
+  if (!MESSAGE_ID_RE.test(messageId)) {
+    throw new Error(`buildNewRaw: Message-ID must be <local@domain>, got "${messageId}"`)
+  }
+  const headerLines = [
+    `From: ${sanitizeHeaderField(from)}`,
+    `To: ${sanitizeHeaderField(to)}`,
+    `Subject: ${encodeSubjectIfNeeded(sanitizeHeaderField(subject))}`,
+    `Message-ID: ${messageId}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: quoted-printable',
+  ]
+  if (extraHeaders) {
+    for (const [name, value] of Object.entries(extraHeaders)) {
+      validateExtraHeaderName(name)
+      headerLines.push(`${name}: ${sanitizeHeaderField(value)}`)
+    }
+  }
+  return assembleRaw(headerLines, bodyText)
 }
