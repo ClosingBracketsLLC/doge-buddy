@@ -1,21 +1,44 @@
 import { auditLog, supportMessages, supportTickets, type createDb } from '@doge-buddy/db'
 import type { GmailClient } from '@doge-buddy/gmail'
-import { and, eq, like, lt } from 'drizzle-orm'
+import { and, asc, eq, like, lt } from 'drizzle-orm'
 import type PgBoss from 'pg-boss'
 import type { SendOpts } from '../fulfillment/types.ts'
-import { formPlaceholderThreadId, isFormPlaceholder } from '../support/form-ids.ts'
+import {
+  formPlaceholderThreadId,
+  formSendingSentinel,
+  formThreadIdLikePattern,
+  isFormPlaceholder,
+} from '../support/form-ids.ts'
 import type { Alert } from '../support/ingest.ts'
+import { validateReplyBody } from '../support/validator.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type SendFn = (name: string, data: object, opts?: SendOpts) => Promise<void>
 
 export const FORM_ACK_QUEUE = 'support.form-ack'
+/**
+ * Retry/expiry policy for the ack (final review C1c + I4).
+ *
+ * `expireInSeconds: 600` — the OLD 120s was below a plausible Gmail send + search round trip, so
+ * pg-boss could expire an invocation that was still running and hand the same ticket to a second
+ * worker mid-send. 600s is the same ceiling `support.agent-run` and `proposal.apply` use.
+ *
+ * `retryDelay: 20` with `retryLimit: 5` + `retryBackoff` — the ack chain must finish INSIDE the
+ * reply worker's own chain, because `apply-support-reply.ts` retries while a form ticket still
+ * sits on its placeholder. `PROPOSAL_RETRY_OPTS` (proposals/submit.ts) is 30s × 5 with backoff
+ * ≈ 15.5 min; at 20s × 5 with backoff the ack chain is ≈ 10 min, so a slow-but-eventually-
+ * successful ack no longer dead-letters an approved reply that was only waiting for it. Any
+ * change to `PROPOSAL_RETRY_OPTS` must keep that ordering (ack budget < apply budget).
+ */
 export const FORM_ACK_SEND_OPTS = (ticketId: string): SendOpts => ({
-  singletonKey: ticketId, retryLimit: 5, retryDelay: 60, retryBackoff: true, expireInSeconds: 120,
+  singletonKey: ticketId, retryLimit: 5, retryDelay: 20, retryBackoff: true, expireInSeconds: 600,
 })
 export const FORM_ACK_SUBJECT = 'We got your message — Doge Buddy Support'
 export const FORM_ACK_SENT_ACTION = 'support.form_ack_sent'
 export const FORM_ACK_SKIPPED_ACTION = 'support.form_ack_skipped'
+/** The composed ack failed `validateReplyBody` (only reachable through the customer-supplied
+ * greeting name) and the nameless copy was sent instead — see `composeAckBody`. */
+export const FORM_ACK_BODY_SCREENED_ACTION = 'support.form_ack_body_screened'
 /** A form ticket still on its placeholder this long after creation is re-enqueued by the poll. */
 export const FORM_ACK_SWEEP_AFTER_MS = 2 * 60_000
 const SWEEP_LIMIT = 20
@@ -35,11 +58,33 @@ export function formAckBody(name: string): string {
   )
 }
 
+/** Greeting-name whitelist: letters, combining marks, digits, apostrophe, hyphen, period, space. */
+const GREETING_NAME_RE = /^[\p{L}\p{M}\p{Nd}'\-. ]+$/u
+const GREETING_NAME_MAX = 40
+
+/**
+ * Screens the customer-supplied name before it is interpolated into an email THIS SERVICE sends
+ * from `support@` to an address the same anonymous submitter chose (final review C2b).
+ *
+ * `name` is up to 100 attacker-controlled characters. Reflected unchanged into the greeting it
+ * becomes a free line of support@-signed copy — "Hi there — your refund of $89 has been approved,
+ * see" or "Hi there, verify at http://evil.example/x," — i.e. a phishing lure with our From: on
+ * it. So: first line only, a conservative character class, at most 40 chars, and `'there'` for
+ * anything else. Rejecting (rather than truncating) an over-long or off-class name is deliberate —
+ * a half-cut name reads worse than the neutral greeting, and no legitimate greeting needs `:`,
+ * `/`, `$`, `—` or a digit run.
+ */
+export function greetingName(raw: string | null | undefined): string {
+  const first = (raw ?? '').split('\n')[0]?.trim() ?? ''
+  if (first.length === 0 || first.length > GREETING_NAME_MAX) return 'there'
+  if (!GREETING_NAME_RE.test(first)) return 'there'
+  return first
+}
+
 /** The form body starts with `Name: <name>` (http/contact.ts's buildFormBody). */
 export function nameFromFormBody(bodyText: string | null): string {
   const m = bodyText?.match(/^Name: (.+)$/m)
-  const name = m?.[1]?.trim()
-  return name && name.length > 0 ? name : 'there'
+  return greetingName(m?.[1])
 }
 
 export interface FormAckDeps {
@@ -51,11 +96,59 @@ export interface FormAckDeps {
 }
 
 /**
+ * Postgres unique-violation (23505). drizzle 0.44 wraps a driver error in a `DrizzleQueryError`
+ * that carries the original `pg` error as `cause`, so the chain is walked rather than reading
+ * `err.code` off the top-level throw.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  let e: unknown = err
+  for (let depth = 0; e != null && depth < 5; depth++) {
+    if (typeof e === 'object' && (e as { code?: unknown }).code === '23505') return true
+    e = (e as { cause?: unknown }).cause
+  }
+  return false
+}
+
+async function auditSkip(deps: FormAckDeps, ticketId: string, reason: string): Promise<void> {
+  await deps.db.insert(auditLog).values({
+    actor: 'system', action: FORM_ACK_SKIPPED_ACTION, entityType: 'support_ticket', entityId: ticketId,
+    detail: { reason },
+  })
+}
+
+/**
+ * Belt-and-braces screen (final review C2c): the ack is fixed copy EXCEPT the greeting, and the
+ * greeting comes from the customer. `greetingName` already reduces it to a conservative class, but
+ * an in-class name ("Your refund has been approved") can still compose a body that trips the same
+ * promised-action screen every agent-written reply must pass. If it does, the nameless copy goes
+ * out instead and the incident is audited — the customer still gets their acknowledgement.
+ */
+async function composeAckBody(deps: FormAckDeps, ticketId: string, inboundBody: string | null): Promise<string> {
+  const body = formAckBody(nameFromFormBody(inboundBody))
+  const screened = await validateReplyBody(deps.db, ticketId, body, { hasRefundInOutput: false, trackingUrl: null })
+  if (screened.ok) return body
+  await deps.db.insert(auditLog).values({
+    actor: 'system', action: FORM_ACK_BODY_SCREENED_ACTION, entityType: 'support_ticket', entityId: ticketId,
+    detail: { reason: screened.code },
+  })
+  return formAckBody('there')
+}
+
+/**
  * Sends the contact-form acknowledgement that CREATES the ticket's Gmail thread (spec §4).
- * Idempotent across a crash between send and DB write: the Message-ID is deterministic, and a
- * prior sent copy found via `rfc822msgid:` is recovered instead of re-sent. The thread swap is a
- * guarded UPDATE (`WHERE gmail_thread_id = placeholder`), so a duplicate worker matching 0 rows
- * writes nothing.
+ *
+ * Exactly-once, in three guards (final review C1):
+ *  1. CLAIM before sending — the plain placeholder is swapped for a `form:<id>:sending:<uuid>`
+ *     sentinel in a guarded UPDATE. A second worker (pg-boss will hand a `created` job to another
+ *     worker behind an `active` one, and an expired invocation can still be running) matches 0
+ *     rows and stops without sending. The sentinel keeps the `form:` prefix, so a process that
+ *     dies mid-send leaves the reply worker's hold and the poll sweep working exactly as before.
+ *  2. RECOVER instead of re-sending — the Message-ID is deterministic, so a prior attempt's sent
+ *     copy is found by `rfc822msgid:` and its thread adopted. This runs BEFORE the claim, which is
+ *     what makes a crash on the sentinel recoverable.
+ *  3. GUARDED SWAP — the thread swap matches any `form:<id>%` value for this ticket and returns
+ *     its rowcount; the outbound message row and the `form_ack_sent` audit row are written ONLY
+ *     when it matched, so a worker that lost the race writes nothing at all.
  */
 export async function executeFormAck(deps: FormAckDeps, ticketId: string): Promise<'sent' | 'recovered' | 'skipped'> {
   if (!deps.gmail) throw new Error('support.form-ack: gmail not configured')
@@ -65,47 +158,99 @@ export async function executeFormAck(deps: FormAckDeps, ticketId: string): Promi
   const [ticket] = await deps.db.select().from(supportTickets).where(eq(supportTickets.id, ticketId))
   if (!ticket) throw new Error(`support.form-ack: ticket ${ticketId} not found`)
   if (!isFormPlaceholder(ticket.gmailThreadId)) {
-    await deps.db.insert(auditLog).values({ actor: 'system', action: FORM_ACK_SKIPPED_ACTION, entityType: 'support_ticket', entityId: ticketId, detail: { reason: 'already_acked' } })
+    await auditSkip(deps, ticketId, 'already_acked')
     return 'skipped'
   }
   if (!ticket.customerEmail) throw new Error(`support.form-ack: ticket ${ticketId} has no customer email`)
 
+  // OLDEST inbound (T6-4): the form submission itself is the row whose `Name:` line the greeting
+  // comes from — a customer follow-up would otherwise win on an unordered select.
   const [inbound] = await deps.db
     .select({ bodyText: supportMessages.bodyText })
     .from(supportMessages)
     .where(and(eq(supportMessages.ticketId, ticketId), eq(supportMessages.direction, 'inbound')))
+    .orderBy(asc(supportMessages.sentAt))
     .limit(1)
   const messageId = formAckMessageId(ticketId, deps.supportAddress)
-  const bodyText = formAckBody(nameFromFormBody(inbound?.bodyText ?? null))
+  const bodyText = await composeAckBody(deps, ticketId, inbound?.bodyText ?? null)
 
   let sent: { id: string; threadId: string }
   let recovered = false
+  let rfcMessageId = messageId
   const prior = await gmail.listMessages({ q: `in:sent rfc822msgid:${messageId}` })
   if (prior.ids[0]) {
     sent = prior.ids[0]
     recovered = true
   } else {
-    sent = await gmail.sendNew({ to: ticket.customerEmail, subject: FORM_ACK_SUBJECT, messageId, bodyText })
+    const sentinel = formSendingSentinel(ticketId)
+    const claimed = await deps.db
+      .update(supportTickets)
+      .set({ gmailThreadId: sentinel })
+      .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.gmailThreadId, formPlaceholderThreadId(ticketId))))
+      .returning({ id: supportTickets.id })
+    if (claimed.length === 0) {
+      await auditSkip(deps, ticketId, 'claimed_elsewhere')
+      return 'skipped'
+    }
+    try {
+      sent = await gmail.sendNew({ to: ticket.customerEmail, subject: FORM_ACK_SUBJECT, messageId, bodyText })
+    } catch (err) {
+      // An EXPLICIT send failure means this attempt is over and (unlike a crash) we are still here
+      // to say so: release the claim so the pg-boss retry can try again instead of finding its own
+      // sentinel and skipping for good. A crash never reaches this line, which is exactly the case
+      // the sentinel is meant to survive — there the `rfc822msgid:` recovery above takes over.
+      await deps.db
+        .update(supportTickets)
+        .set({ gmailThreadId: formPlaceholderThreadId(ticketId) })
+        .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.gmailThreadId, sentinel)))
+        .catch(() => {})
+      throw err
+    }
+    // #13: persist the Message-ID Gmail ACTUALLY stamped rather than assuming ours survived — the
+    // whole idempotency chain reads this value back. Ours stays the fallback (and the search key).
+    try {
+      const meta = await gmail.getMessage(sent.id, { format: 'metadata' })
+      rfcMessageId = meta.rfcMessageId ?? messageId
+    } catch {
+      // Metadata is a nicety; a failure here must not re-send an email that already went out.
+    }
   }
 
-  await deps.db.transaction(async (tx) => {
-    await tx
-      .update(supportTickets)
-      .set({ gmailThreadId: sent.threadId })
-      .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.gmailThreadId, formPlaceholderThreadId(ticketId))))
-    await tx
-      .insert(supportMessages)
-      .values({
-        ticketId, gmailMessageId: sent.id, direction: 'outbound', fromEmail: deps.supportAddress,
-        bodyText, rfcMessageId: messageId, authResults: null, sentAt: now(),
+  let outcome: 'sent' | 'recovered' | 'skipped'
+  try {
+    outcome = await deps.db.transaction(async (tx) => {
+      const swapped = await tx
+        .update(supportTickets)
+        .set({ gmailThreadId: sent.threadId })
+        .where(and(eq(supportTickets.id, ticketId), like(supportTickets.gmailThreadId, formThreadIdLikePattern(ticketId))))
+        .returning({ id: supportTickets.id })
+      if (swapped.length === 0) return 'skipped'
+      await tx
+        .insert(supportMessages)
+        .values({
+          ticketId, gmailMessageId: sent.id, direction: 'outbound', fromEmail: deps.supportAddress,
+          bodyText, rfcMessageId, authResults: null, sentAt: now(),
+        })
+        .onConflictDoNothing({ target: supportMessages.gmailMessageId })
+      await tx.insert(auditLog).values({
+        actor: 'system', action: FORM_ACK_SENT_ACTION, entityType: 'support_ticket', entityId: ticketId,
+        detail: { gmailMessageId: sent.id, threadId: sent.threadId, recovered },
       })
-      .onConflictDoNothing({ target: supportMessages.gmailMessageId })
-    await tx.insert(auditLog).values({
-      actor: 'system', action: FORM_ACK_SENT_ACTION, entityType: 'support_ticket', entityId: ticketId,
-      detail: { gmailMessageId: sent.id, threadId: sent.threadId, recovered },
+      return recovered ? 'recovered' : 'sent'
     })
-  })
-  return recovered ? 'recovered' : 'sent'
+  } catch (err) {
+    // I7: `gmail_thread_id` is UNIQUE, so if ingest created a ticket for this very thread inside
+    // the crash window the swap violates the constraint on every retry — an unrecoverable loop.
+    // Page the owner to merge the two tickets by hand and stop the chain instead.
+    if (isUniqueViolation(err)) {
+      await deps.alert('warning', 'support_form_ack_thread_taken', { ticketId, threadId: sent.threadId }).catch(() => {})
+      await auditSkip(deps, ticketId, 'thread_taken')
+      return 'skipped'
+    }
+    throw err
+  }
+  if (outcome === 'skipped') await auditSkip(deps, ticketId, 'swap_lost')
+  return outcome
 }
 
 /** Worker (`boss.work(FORM_ACK_QUEUE, { includeMetadata: true }, …)`): the last retry's failure pages the owner. */
@@ -129,14 +274,15 @@ export function formAckHandler(deps: FormAckDeps): PgBoss.WorkHandler<{ ticketId
   }
 }
 
-/** Poll stage: any form ticket still on its placeholder after FORM_ACK_SWEEP_AFTER_MS gets its ack job (re-)enqueued — `stately` + singletonKey make this idempotent. */
-export async function sweepUnackedFormTickets(deps: { db: Db; enqueue: SendFn; alert: Alert; now?: () => Date }): Promise<{ enqueued: number }> {
+/** Poll stage: any form ticket still on its placeholder after FORM_ACK_SWEEP_AFTER_MS gets its ack job (re-)enqueued — `stately` + singletonKey make this idempotent. Oldest first (T6-2) so the LIMIT can never starve an early ticket behind newer ones. */
+export async function sweepUnackedFormTickets(deps: { db: Db; enqueue: SendFn; now?: () => Date }): Promise<{ enqueued: number }> {
   const now = deps.now ?? (() => new Date())
   const cutoff = new Date(now().getTime() - FORM_ACK_SWEEP_AFTER_MS)
   const rows = await deps.db
     .select({ id: supportTickets.id })
     .from(supportTickets)
     .where(and(eq(supportTickets.source, 'form'), like(supportTickets.gmailThreadId, 'form:%'), lt(supportTickets.createdAt, cutoff)))
+    .orderBy(asc(supportTickets.createdAt))
     .limit(SWEEP_LIMIT)
   for (const { id } of rows) await deps.enqueue(FORM_ACK_QUEUE, { ticketId: id }, FORM_ACK_SEND_OPTS(id))
   return { enqueued: rows.length }

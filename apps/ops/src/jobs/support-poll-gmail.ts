@@ -51,7 +51,7 @@ export interface SupportPollDeps {
   triageFn?: (deps: TriageDeps) => Promise<{ triaged: number; escalatedTicketIds: string[] }>
   escalateFn?: (deps: EscalateDeps) => Promise<{ notified: number }>
   agentSelect?: (deps: AgentSelectDeps) => Promise<{ enqueued: number; orphansEscalated: number; unbackedEscalated: number }>
-  formAckSweep?: (deps: { db: Db; enqueue: SendFn; alert: Alert; now?: () => Date }) => Promise<{ enqueued: number }>
+  formAckSweep?: (deps: { db: Db; enqueue: SendFn; now?: () => Date }) => Promise<{ enqueued: number }>
 }
 
 // Once-per-boot info alerts (spec §2 header) for the two configuration-absent skip paths below.
@@ -187,7 +187,7 @@ export async function executeSupportPoll(deps: SupportPollDeps): Promise<void> {
   // 5th stage (contact-form spec §4): re-enqueue acks for form tickets stuck on their placeholder.
   const sweepFn = deps.formAckSweep ?? sweepUnackedFormTickets
   try {
-    await sweepFn({ db: deps.db, enqueue: deps.enqueue, alert: deps.alert, now })
+    await sweepFn({ db: deps.db, enqueue: deps.enqueue, now })
   } catch (err) {
     firstError = firstError ?? err
   }

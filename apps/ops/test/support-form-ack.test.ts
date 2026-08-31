@@ -1,12 +1,14 @@
 import { auditLog, createDb, supportMessages, supportTickets } from '@doge-buddy/db'
 import { createMockGmail, type GmailClient, type MockGmail } from '@doge-buddy/gmail'
-import { eq, inArray, like } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  FORM_ACK_QUEUE, FORM_ACK_SENT_ACTION, FORM_ACK_SKIPPED_ACTION, FORM_ACK_SUBJECT, FORM_ACK_SWEEP_AFTER_MS,
-  executeFormAck, formAckBody, formAckHandler, formAckMessageId, nameFromFormBody, sweepUnackedFormTickets,
+  FORM_ACK_BODY_SCREENED_ACTION, FORM_ACK_QUEUE, FORM_ACK_SEND_OPTS, FORM_ACK_SENT_ACTION, FORM_ACK_SKIPPED_ACTION,
+  FORM_ACK_SUBJECT, FORM_ACK_SWEEP_AFTER_MS, executeFormAck, formAckBody, formAckHandler, formAckMessageId,
+  greetingName, nameFromFormBody, sweepUnackedFormTickets,
 } from '../src/jobs/support-form-ack.ts'
-import { formPlaceholderThreadId } from '../src/support/form-ids.ts'
+import { PROPOSAL_RETRY_OPTS } from '../src/proposals/submit.ts'
+import { formPlaceholderThreadId, formSendingSentinel } from '../src/support/form-ids.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 const SUPPORT = 'support@dogebuddy.com'
@@ -23,18 +25,19 @@ describe('support.form-ack', () => {
     const rows = await db.select({ id: supportTickets.id }).from(supportTickets).where(eq(supportTickets.customerEmail, EMAIL))
     const ids = rows.map((r) => r.id)
     if (ids.length) { await db.delete(supportMessages).where(inArray(supportMessages.ticketId, ids)); await db.delete(supportTickets).where(inArray(supportTickets.id, ids)) }
-    await db.delete(auditLog).where(inArray(auditLog.action, [FORM_ACK_SENT_ACTION, FORM_ACK_SKIPPED_ACTION]))
+    await db.delete(auditLog).where(inArray(auditLog.action, [FORM_ACK_SENT_ACTION, FORM_ACK_SKIPPED_ACTION, FORM_ACK_BODY_SCREENED_ACTION]))
   })
 
-  async function seedFormTicket(opts: { createdAt?: Date; acked?: boolean } = {}): Promise<string> {
+  async function seedFormTicket(opts: { createdAt?: Date; acked?: boolean; name?: string; threadId?: string } = {}): Promise<string> {
     const [t] = await db.insert(supportTickets).values({
       gmailThreadId: `formack-tmp-${Math.random()}`, customerEmail: EMAIL, subject: 'Contact form: hi', status: 'new', source: 'form',
       ...(opts.createdAt ? { createdAt: opts.createdAt } : {}),
     }).returning({ id: supportTickets.id })
-    await db.update(supportTickets).set({ gmailThreadId: opts.acked ? 'real-thread-1' : formPlaceholderThreadId(t!.id) }).where(eq(supportTickets.id, t!.id))
+    const threadId = opts.threadId ?? (opts.acked ? 'real-thread-1' : formPlaceholderThreadId(t!.id))
+    await db.update(supportTickets).set({ gmailThreadId: threadId }).where(eq(supportTickets.id, t!.id))
     await db.insert(supportMessages).values({
       ticketId: t!.id, gmailMessageId: `form:${t!.id}`, direction: 'inbound', fromEmail: EMAIL,
-      bodyText: 'Name: Rob\nOrder number (claimed): —\n\nhi there friend', sentAt: NOW,
+      bodyText: `Name: ${opts.name ?? 'Rob'}\nOrder number (claimed): —\n\nhi there friend`, sentAt: NOW,
     })
     return t!.id
   }
@@ -85,12 +88,15 @@ describe('support.form-ack', () => {
     expect(out!.gmailMessageId).toBe(prior.id)
   })
 
-  it('a failed send throws (pg-boss retries); nothing recorded', async () => {
+  it('a failed send throws (pg-boss retries); nothing recorded and the claim is RELEASED so the retry can re-send', async () => {
     const id = await seedFormTicket()
     gmail.failNext('sendNew', new Error('503'))
     await expect(executeFormAck(deps(), id)).rejects.toThrow('503')
     const [t] = await db.select().from(supportTickets).where(eq(supportTickets.id, id))
     expect(t!.gmailThreadId).toBe(formPlaceholderThreadId(id))
+    // and the retry really does go through
+    await expect(executeFormAck(deps(), id)).resolves.toBe('sent')
+    expect(gmail.sentMessages()).toHaveLength(1)
   })
 
   it('handler: on the FINAL retry a failure is alerted as support_form_ack_failed and rethrown', async () => {
@@ -111,7 +117,165 @@ describe('support.form-ack', () => {
     await seedFormTicket({ createdAt: NOW })
     await seedFormTicket({ createdAt: new Date(NOW.getTime() - 10 * 60_000), acked: true })
     const enqueue = vi.fn(async () => {})
-    await expect(sweepUnackedFormTickets({ db, enqueue, alert: alert as never, now: () => NOW })).resolves.toEqual({ enqueued: 1 })
+    await expect(sweepUnackedFormTickets({ db, enqueue, now: () => NOW })).resolves.toEqual({ enqueued: 1 })
     expect(enqueue).toHaveBeenCalledWith(FORM_ACK_QUEUE, { ticketId: stale }, expect.objectContaining({ singletonKey: stale }))
+  })
+
+  // -- C1: exactly-once across concurrent workers and crashes --
+
+  it("a concurrent worker that finds the sentinel returns 'skipped' and sends nothing", async () => {
+    const id = await seedFormTicket()
+    // Worker A has claimed the ticket and is inside gmail.sendNew right now.
+    await db.update(supportTickets).set({ gmailThreadId: formSendingSentinel(id) }).where(eq(supportTickets.id, id))
+    await expect(executeFormAck(deps(), id)).resolves.toBe('skipped')
+    expect(gmail.sentMessages()).toHaveLength(0)
+    const skipped = await db.select().from(auditLog).where(eq(auditLog.action, FORM_ACK_SKIPPED_ACTION))
+    expect(skipped).toHaveLength(1)
+    expect(skipped[0]!.detail).toMatchObject({ reason: 'claimed_elsewhere' })
+    const msgs = await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))
+    expect(msgs.filter((m) => m.direction === 'outbound')).toHaveLength(0)
+  })
+
+  it('the send CLAIMS the ticket first: the sentinel is still a form: placeholder, so the reply worker keeps holding', async () => {
+    const id = await seedFormTicket()
+    let seenMidSend: string | undefined
+    const claimWatcher = {
+      ...gmail,
+      sendNew: async (r: Parameters<MockGmail['sendNew']>[0]) => {
+        const [mid] = await db.select().from(supportTickets).where(eq(supportTickets.id, id))
+        seenMidSend = mid!.gmailThreadId
+        return gmail.sendNew(r)
+      },
+    }
+    await expect(executeFormAck({ ...deps(), gmail: claimWatcher as unknown as GmailClient }, id)).resolves.toBe('sent')
+    expect(seenMidSend).toMatch(new RegExp(`^form:${id}:sending:`))
+  })
+
+  it('crash recovery still works with the sentinel in place (died between send and DB write)', async () => {
+    const id = await seedFormTicket()
+    const prior = await gmail.sendNew({ to: EMAIL, subject: FORM_ACK_SUBJECT, messageId: formAckMessageId(id, SUPPORT), bodyText: 'x' })
+    await db.update(supportTickets).set({ gmailThreadId: formSendingSentinel(id) }).where(eq(supportTickets.id, id))
+    await expect(executeFormAck(deps(), id)).resolves.toBe('recovered')
+    expect(gmail.sentMessages()).toHaveLength(1)
+    const [t] = await db.select().from(supportTickets).where(eq(supportTickets.id, id))
+    expect(t!.gmailThreadId).toBe(prior.threadId)
+  })
+
+  it('guarded swap loses the race → no outbound row, no form_ack_sent audit row', async () => {
+    const id = await seedFormTicket()
+    // Another worker completes the whole swap while this one is inside gmail.sendNew.
+    const racing = {
+      ...gmail,
+      sendNew: async (r: Parameters<MockGmail['sendNew']>[0]) => {
+        const res = await gmail.sendNew(r)
+        await db.update(supportTickets).set({ gmailThreadId: `raced-${id}` }).where(eq(supportTickets.id, id))
+        return res
+      },
+    }
+    await expect(executeFormAck({ ...deps(), gmail: racing as unknown as GmailClient }, id)).resolves.toBe('skipped')
+    const msgs = await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))
+    expect(msgs.filter((m) => m.direction === 'outbound')).toHaveLength(0)
+    expect(await db.select().from(auditLog).where(eq(auditLog.action, FORM_ACK_SENT_ACTION))).toHaveLength(0)
+    const [t] = await db.select().from(supportTickets).where(eq(supportTickets.id, id))
+    expect(t!.gmailThreadId).toBe(`raced-${id}`)
+  })
+
+  // -- I7: the thread id was taken by an ingest-created ticket inside the crash window --
+
+  it("swap hits a UNIQUE violation → warning alert, 'skipped', no throw (the retry chain stops)", async () => {
+    const id = await seedFormTicket()
+    const prior = await gmail.sendNew({ to: EMAIL, subject: FORM_ACK_SUBJECT, messageId: formAckMessageId(id, SUPPORT), bodyText: 'x' })
+    // Ingest got there first and already owns this thread id.
+    await db.insert(supportTickets).values({ gmailThreadId: prior.threadId, customerEmail: EMAIL, subject: 'from ingest', status: 'new' })
+    await expect(executeFormAck(deps(), id)).resolves.toBe('skipped')
+    expect(alert).toHaveBeenCalledWith('warning', 'support_form_ack_thread_taken', expect.objectContaining({ ticketId: id, threadId: prior.threadId }))
+    const skipped = await db.select().from(auditLog).where(eq(auditLog.action, FORM_ACK_SKIPPED_ACTION))
+    expect(skipped[0]!.detail).toMatchObject({ reason: 'thread_taken' })
+  })
+
+  // -- C2: the customer-supplied name never becomes free copy signed by support@ --
+
+  it('greetingName: keeps real names, rejects everything that could carry a lure', () => {
+    expect(greetingName('Rob')).toBe('Rob')
+    expect(greetingName("María-José O'Neil")).toBe("María-José O'Neil")
+    expect(greetingName('  Rob  ')).toBe('Rob')
+    expect(greetingName('there — your refund of $89 has been approved, see')).toBe('there')
+    expect(greetingName('there, verify at http://evil.example/x')).toBe('there')
+    expect(greetingName('Rob\nOrder number (claimed): #9999')).toBe('Rob')
+    expect(greetingName('Rob​ert')).toBe('there')
+    expect(greetingName('a'.repeat(41))).toBe('there')
+    expect(greetingName('')).toBe('there')
+    expect(greetingName(null)).toBe('there')
+    expect(nameFromFormBody('Name: there, verify at http://evil.example/x\n\nhi')).toBe('there')
+  })
+
+  it.each([
+    'there — your refund of $89 has been approved, see',
+    'there, verify at http://evil.example/x',
+    'Rob​',
+  ])('a hostile name (%s) is not reflected into the ack — it greets "there" and still sends', async (name) => {
+    const id = await seedFormTicket({ name })
+    await expect(executeFormAck(deps(), id)).resolves.toBe('sent')
+    const out = (await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))).find((m) => m.direction === 'outbound')
+    expect(out!.bodyText).toBe(formAckBody('there'))
+    expect(out!.bodyText!.startsWith('Hi there,')).toBe(true)
+    expect(await db.select().from(auditLog).where(eq(auditLog.action, FORM_ACK_SENT_ACTION))).toHaveLength(1)
+  })
+
+  it('an in-class name that still composes a body failing validateReplyBody falls back to the nameless copy + audit', async () => {
+    const id = await seedFormTicket({ name: 'Your refund has been approved' })
+    await expect(executeFormAck(deps(), id)).resolves.toBe('sent')
+    const out = (await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))).find((m) => m.direction === 'outbound')
+    expect(out!.bodyText).toBe(formAckBody('there'))
+    const screened = await db.select().from(auditLog).where(eq(auditLog.action, FORM_ACK_BODY_SCREENED_ACTION))
+    expect(screened).toHaveLength(1)
+    expect(screened[0]!.detail).toMatchObject({ reason: 'promised_action' })
+    const raw = Buffer.from(gmail.sentMessages()[0]!.raw, 'base64url').toString()
+    expect(raw).not.toContain('refund')
+  })
+
+  it('a normal name is kept', async () => {
+    const id = await seedFormTicket({ name: "María-José O'Neil" })
+    await expect(executeFormAck(deps(), id)).resolves.toBe('sent')
+    const out = (await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))).find((m) => m.direction === 'outbound')
+    expect(out!.bodyText).toBe(formAckBody("María-José O'Neil"))
+    expect(await db.select().from(auditLog).where(eq(auditLog.action, FORM_ACK_BODY_SCREENED_ACTION))).toHaveLength(0)
+  })
+
+  // -- #13: store the Message-ID Gmail actually stamped --
+
+  it("persists the SENT message's real rfcMessageId (read back via getMessage metadata)", async () => {
+    const id = await seedFormTicket()
+    await expect(executeFormAck(deps(), id)).resolves.toBe('sent')
+    const sent = gmail.sentMessages()[0]!
+    const meta = await gmail.getMessage(sent.id, { format: 'metadata' })
+    const out = (await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))).find((m) => m.direction === 'outbound')
+    expect(meta.rfcMessageId).not.toBeNull()
+    expect(out!.rfcMessageId).toBe(meta.rfcMessageId)
+  })
+
+  it('a metadata read-back failure falls back to our generated Message-ID (never a re-send)', async () => {
+    const id = await seedFormTicket()
+    gmail.failNext('getMessage', new Error('500'))
+    await expect(executeFormAck(deps(), id)).resolves.toBe('sent')
+    const out = (await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))).find((m) => m.direction === 'outbound')
+    expect(out!.rfcMessageId).toBe(formAckMessageId(id, SUPPORT))
+    expect(gmail.sentMessages()).toHaveLength(1)
+  })
+
+  it('the ack retry budget stays UNDER the reply worker’s apply budget (I4)', () => {
+    const ack = FORM_ACK_SEND_OPTS('t')
+    expect(ack).toMatchObject({ retryLimit: 5, retryDelay: 20, retryBackoff: true, expireInSeconds: 600 })
+    const chain = (delay: number, limit: number) => Array.from({ length: limit }, (_, i) => delay * 2 ** i).reduce((a, b) => a + b, 0)
+    expect(chain(ack.retryDelay!, ack.retryLimit!)).toBeLessThan(chain(PROPOSAL_RETRY_OPTS.retryDelay, PROPOSAL_RETRY_OPTS.retryLimit))
+  })
+
+  it('sweep returns the OLDEST stuck tickets first (T6-2)', async () => {
+    const older = await seedFormTicket({ createdAt: new Date(NOW.getTime() - 60 * 60_000) })
+    const newer = await seedFormTicket({ createdAt: new Date(NOW.getTime() - 30 * 60_000) })
+    const seen: string[] = []
+    const enqueue = vi.fn(async (_name: string, data: object) => { seen.push((data as { ticketId: string }).ticketId) })
+    await sweepUnackedFormTickets({ db, enqueue, now: () => NOW })
+    expect(seen).toEqual([older, newer])
   })
 })
