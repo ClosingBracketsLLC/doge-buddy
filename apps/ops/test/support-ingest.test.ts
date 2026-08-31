@@ -899,6 +899,38 @@ describe('runIngest', () => {
       if (newIds.length > 0) await db.delete(auditLog).where(inArray(auditLog.id, newIds))
     }
   })
+
+  // Task 3 regression guard: the contact-form path (Task 5) creates its own OUTBOUND ack row
+  // directly (never through Gmail), so the References fallback must be able to attach a customer's
+  // Gmail reply to that ack regardless of direction — and the guarded reopen (resolved/waiting_on_
+  // customer only) means a `triaged` ticket stays `triaged`, it just gets its last_inbound_at bumped.
+  it('a customer reply whose In-Reply-To names an OUTBOUND message of ours (the form ack) attaches to that ticket even under a brand-new Gmail thread id', async () => {
+    await seedSyncState()
+    const [ticket] = await db.insert(supportTickets).values({
+      gmailThreadId: 'mock-ack-thread-1', customerEmail: 'jane@example.com', subject: 'Contact form: hello', status: 'triaged', source: 'form',
+    }).returning({ id: supportTickets.id })
+    await db.insert(supportMessages).values({
+      ticketId: ticket!.id, gmailMessageId: 'ack-sent-1', direction: 'outbound', fromEmail: SUPPORT,
+      // Fixed, well before MockGmail's internalDate baseline (Nov 2023) rather than `new Date()` —
+      // messagesOfTicket orders by sentAt ascending, and the ack must sort first regardless of the
+      // real wall clock at test time (which is always later than the mock's fixed baseline).
+      bodyText: 'Thanks', rfcMessageId: '<form-ack-x@dogebuddy.com>', sentAt: new Date('2020-01-01T00:00:00.000Z'),
+    })
+    const before = (await ticketByThread('mock-ack-thread-1'))!
+    gmail.receiveInbound({
+      from: 'jane@example.com', to: [SUPPORT], subject: 'Re: We got your message', bodyText: 'here is more',
+      inReplyTo: '<form-ack-x@dogebuddy.com>', references: '<form-ack-x@dogebuddy.com>',
+    })
+
+    await runIngest(deps)
+
+    const msgs = await messagesOfTicket(ticket!.id)
+    expect(msgs.map((m) => m.direction)).toEqual(['outbound', 'inbound'])
+    const after = (await ticketByThread('mock-ack-thread-1'))!
+    // Reopen only covers resolved/waiting_on_customer, so a `triaged` ticket does NOT flip to `new`.
+    expect(after.status).toBe('triaged')
+    expect(after.lastInboundAt!.getTime()).toBeGreaterThan(before.lastInboundAt?.getTime() ?? -Infinity)
+  })
 })
 
 describe('tripwireHit', () => {

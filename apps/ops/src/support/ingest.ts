@@ -14,7 +14,7 @@ type Db = ReturnType<typeof createDb>['db']
 /** The type of the callback's `tx` parameter inside `db.transaction(async (tx) => {...})` — the
  * helpers below (`findTicketByThread`, `createTicket`, `findFloodFoldTarget`) run under either a
  * plain `Db` (nothing to be atomic with) or this transaction-scoped handle (IMPORTANT 3). */
-type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
+export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
 type DbOrTx = Db | Tx
 export type Alert = (
   severity: 'info' | 'warning' | 'critical',
@@ -270,6 +270,78 @@ interface MessageOutcome {
   tripwireKeyword: string | null
 }
 
+export interface InboundBookkeepingInput {
+  ticketId: string
+  subject: string | null
+  bodyText: string | null
+  sentAt: Date
+  /** Whether this message sat in Gmail's SPAM folder (always false for contact-form messages). */
+  gmailSpam: boolean
+}
+
+/**
+ * Everything a ticket must reflect once an INBOUND message row has been inserted for it, in the
+ * caller's transaction: `last_inbound_at` (GREATEST — history can hand us an older message after a
+ * newer one) with `gmail_spam` moved in step (CASE on the pre-update value), the guarded reopen
+ * of a `resolved`/`waiting_on_customer` ticket (budgets + redraft cycle reset), and the code
+ * tripwire. Shared by Gmail ingest and the contact-form endpoint (spec 2026-08-31 §2 step 5) so the
+ * two inbound paths cannot drift. Returns the tripwire keyword that flipped the ticket, else null.
+ */
+export async function recordInboundOnTicket(tx: Tx, input: InboundBookkeepingInput): Promise<string | null> {
+  // GREATEST, not assignment: history can hand us an older message after a newer one, and the
+  // ticket's "latest customer contact" must never move backwards. (GREATEST ignores NULLs.)
+  // `gmail_spam` moves in step: it describes the message that WINS last_inbound_at, so it only
+  // takes this message's Gmail-folder fact when this message is that latest one. Both columns
+  // are set in the ONE statement so the CASE reads the row's pre-update last_inbound_at.
+  const inboundAt = input.sentAt.toISOString()
+  await tx
+    .update(supportTickets)
+    .set({
+      lastInboundAt: sql`greatest(${supportTickets.lastInboundAt}, ${inboundAt}::timestamptz)`,
+      gmailSpam: sql`case
+        when ${inboundAt}::timestamptz >= coalesce(${supportTickets.lastInboundAt}, '-infinity'::timestamptz)
+        then ${input.gmailSpam}
+        else ${supportTickets.gmailSpam}
+      end`,
+    })
+    .where(eq(supportTickets.id, input.ticketId))
+
+  // Guarded reopen — an `escalated` ticket is the owner's and stays escalated. Runs BEFORE the
+  // tripwire so a reopened ticket with escalation-class content still ends up escalated.
+  // The triage AND agent failure budgets reset with the reopen (spec §3): a new conversation
+  // gets its own attempts rather than inheriting a stale count from the last one.
+  await tx
+    .update(supportTickets)
+    // redraft-cycle clear (see support/redraft.ts): defense-in-depth. Both source states
+    // (`resolved`/`waiting_on_customer`) already had these columns cleared on entry, so this is
+    // redundant today — but including it makes the "a `new` ticket never carries a stale redraft
+    // cycle" invariant self-contained here rather than relying on transitivity through every
+    // upstream writer that parked the ticket.
+    .set({ status: 'new', triageFailureCount: 0, agentFailureCount: 0, ...clearRedraftCycle() })
+    .where(and(eq(supportTickets.id, input.ticketId), inArray(supportTickets.status, ['resolved', 'waiting_on_customer'])))
+
+  // Step 6: the code tripwire.
+  const keyword = tripwireHit(input.subject, input.bodyText)
+  if (!keyword) return null
+  // CRITICAL 1: every UPDATE that transitions a ticket INTO 'escalated' must clear
+  // escalation_notified_at, or a ticket that was already escalated+notified once, then
+  // resolved, then re-escalated by a fresh tripwire hit stays permanently invisible to
+  // notifyPendingEscalations' `escalation_notified_at IS NULL` selection — the owner is never
+  // paged for the reopened case. The admin Escalate POST is the one exception (routes.ts).
+  const escalated = await tx
+    .update(supportTickets)
+    // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
+    .set({
+      status: 'escalated',
+      escalationReason: `tripwire: ${keyword}`,
+      escalationNotifiedAt: null,
+      ...clearRedraftCycle(),
+    })
+    .where(and(eq(supportTickets.id, input.ticketId), ne(supportTickets.status, 'escalated')))
+    .returning({ id: supportTickets.id })
+  return escalated.length > 0 ? keyword : null
+}
+
 /**
  * Steps 3–7 for a single message id. Idempotent and side-effect-safe on re-seen messages, so the
  * resync path can reuse it verbatim.
@@ -349,68 +421,14 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
     if (!inserted) return { ticketId: ticket.id, inserted: false, direction, folded, tripwireKeyword: null }
     if (direction === 'outbound') return { ticketId: ticket.id, inserted: true, direction, folded, tripwireKeyword: null }
 
-    // GREATEST, not assignment: history can hand us an older message after a newer one, and the
-    // ticket's "latest customer contact" must never move backwards. (GREATEST ignores NULLs.)
-    // `gmail_spam` moves in step: it describes the message that WINS last_inbound_at, so it only
-    // takes this message's Gmail-folder fact when this message is that latest one. Both columns
-    // are set in the ONE statement so the CASE reads the row's pre-update last_inbound_at.
-    const inboundAt = full.internalDate.toISOString()
-    await tx
-      .update(supportTickets)
-      .set({
-        lastInboundAt: sql`greatest(${supportTickets.lastInboundAt}, ${inboundAt}::timestamptz)`,
-        gmailSpam: sql`case
-          when ${inboundAt}::timestamptz >= coalesce(${supportTickets.lastInboundAt}, '-infinity'::timestamptz)
-          then ${full.labelIds.includes('SPAM')}
-          else ${supportTickets.gmailSpam}
-        end`,
-      })
-      .where(eq(supportTickets.id, ticket.id))
-
-    // Guarded reopen — an `escalated` ticket is the owner's and stays escalated. Runs BEFORE the
-    // tripwire so a reopened ticket with escalation-class content still ends up escalated.
-    // The triage AND agent failure budgets reset with the reopen (spec §3): a new conversation
-    // gets its own attempts rather than inheriting a stale count from the last one.
-    await tx
-      .update(supportTickets)
-      // redraft-cycle clear (see support/redraft.ts): defense-in-depth. Both source states
-      // (`resolved`/`waiting_on_customer`) already had these columns cleared on entry, so this is
-      // redundant today — but including it makes the "a `new` ticket never carries a stale redraft
-      // cycle" invariant self-contained here rather than relying on transitivity through every
-      // upstream writer that parked the ticket.
-      .set({ status: 'new', triageFailureCount: 0, agentFailureCount: 0, ...clearRedraftCycle() })
-      .where(and(eq(supportTickets.id, ticket.id), inArray(supportTickets.status, ['resolved', 'waiting_on_customer'])))
-
-    // Step 6: the code tripwire.
-    const keyword = tripwireHit(full.subject, full.bodyText)
-    let tripwireFlipped = false
-    if (keyword) {
-      // CRITICAL 1: every UPDATE that transitions a ticket INTO 'escalated' must clear
-      // escalation_notified_at, or a ticket that was already escalated+notified once, then
-      // resolved, then re-escalated by a fresh tripwire hit stays permanently invisible to
-      // notifyPendingEscalations' `escalation_notified_at IS NULL` selection — the owner is never
-      // paged for the reopened case. The admin Escalate POST is the one exception (routes.ts).
-      const escalated = await tx
-        .update(supportTickets)
-        // redraft-cycle clear (see support/redraft.ts) — keep beside escalationNotifiedAt.
-        .set({
-          status: 'escalated',
-          escalationReason: `tripwire: ${keyword}`,
-          escalationNotifiedAt: null,
-          ...clearRedraftCycle(),
-        })
-        .where(and(eq(supportTickets.id, ticket.id), ne(supportTickets.status, 'escalated')))
-        .returning({ id: supportTickets.id })
-      tripwireFlipped = escalated.length > 0
-    }
-
-    const outcome: MessageOutcome = {
+    const tripwireKeyword = await recordInboundOnTicket(tx, {
       ticketId: ticket.id,
-      inserted: true,
-      direction,
-      folded,
-      tripwireKeyword: tripwireFlipped ? keyword : null,
-    }
+      subject: full.subject,
+      bodyText: full.bodyText,
+      sentAt: full.internalDate,
+      gmailSpam: full.labelIds.includes('SPAM'),
+    })
+    const outcome: MessageOutcome = { ticketId: ticket.id, inserted: true, direction, folded, tripwireKeyword }
     return outcome
   })
 
@@ -490,7 +508,7 @@ async function findTicketByThread(db: DbOrTx, threadId: string): Promise<{ id: s
  * Runs inside `ingestMessageId`'s transaction (IMPORTANT 3), so it takes `tx` and the already-read
  * `now` directly rather than pulling them off `ctx`.
  */
-async function findFloodFoldTarget(tx: Tx, now: Date, customerEmail: string | null): Promise<{ id: string } | null> {
+export async function findFloodFoldTarget(tx: Tx, now: Date, customerEmail: string | null): Promise<{ id: string } | null> {
   if (!customerEmail) return null
 
   const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
