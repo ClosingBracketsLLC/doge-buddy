@@ -1,4 +1,4 @@
-import { orders, proposals, supportMessages, type createDb } from '@doge-buddy/db'
+import { orders, proposals, supportMessages, supportTickets, type createDb } from '@doge-buddy/db'
 import { and, eq, inArray, ne, sql } from 'drizzle-orm'
 import type { SupportOutput } from '../agents/support-output-schema.ts'
 
@@ -558,6 +558,25 @@ export async function validateRefundIntent(
     .limit(1)
 
   if (!latestInbound || !dmarcPasses(latestInbound.authResults)) {
+    // Same failure, honest reason (final review I8). A contact-form ticket's first inbound is the
+    // web submission — there is no `Authentication-Results` header to parse, so `authResults` is
+    // NULL and the money gate correctly refuses. Reporting "not dmarc=pass authenticated" for it
+    // reads like a FORGED sender rather than "this customer has simply never emailed us yet", and
+    // sent the owner hunting a spoofing incident that isn't there. No behaviour change: this is
+    // still `refund_sender_unauthenticated`, still a hard refusal.
+    if (latestInbound && latestInbound.authResults === null) {
+      const [t] = await db
+        .select({ source: supportTickets.source })
+        .from(supportTickets)
+        .where(eq(supportTickets.id, ticket.id))
+        .limit(1)
+      if (t?.source === 'form') {
+        return fail(
+          'refund_sender_unauthenticated',
+          'contact-form ticket: no authenticated sender until the customer replies by email',
+        )
+      }
+    }
     return fail('refund_sender_unauthenticated', 'latest inbound message is not dmarc=pass authenticated')
   }
 

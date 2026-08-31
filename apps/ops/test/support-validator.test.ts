@@ -37,13 +37,14 @@ describe('support validator', () => {
     return row!.id
   }
 
-  async function seedTicket(opts: { customerEmail?: string | null; orderId?: string | null } = {}): Promise<string> {
+  async function seedTicket(opts: { customerEmail?: string | null; orderId?: string | null; source?: 'email' | 'form' } = {}): Promise<string> {
     const [row] = await db
       .insert(supportTickets)
       .values({
         gmailThreadId: `${TICKET_PREFIX}${uid()}`,
         customerEmail: opts.customerEmail ?? 'customer@example.com',
         orderId: opts.orderId ?? null,
+        ...(opts.source ? { source: opts.source } : {}),
       })
       .returning({ id: supportTickets.id })
     return row!.id
@@ -781,6 +782,33 @@ describe('support validator', () => {
         { amountCents: 500, openCjDispute: false },
       )
       expect(result).toEqual({ ok: false, code: 'refund_sender_unauthenticated', detail: expect.any(String) })
+    })
+
+    // Final review I8 — same refusal, honest reason. A contact-form ticket's first inbound is a web
+    // submission with no Authentication-Results header at all, so "not dmarc=pass authenticated"
+    // read like a FORGED sender instead of "this customer has never emailed us yet".
+    it("a source='form' ticket whose only inbound has NULL auth_results gets the contact-form reason (still a refusal)", async () => {
+      const orderId = await seedOrder(2000)
+      const ticketId = await seedTicket({ orderId, source: 'form' })
+      await seedInboundMessage(ticketId, { authResults: null })
+      const result = await validateRefundIntent(db, { id: ticketId, orderId }, { amountCents: 500, openCjDispute: false })
+      expect(result).toEqual({
+        ok: false,
+        code: 'refund_sender_unauthenticated',
+        detail: 'contact-form ticket: no authenticated sender until the customer replies by email',
+      })
+    })
+
+    it("a source='form' ticket whose latest inbound DOES carry a header keeps the generic reason (a real dmarc failure is not a form artefact)", async () => {
+      const orderId = await seedOrder(2000)
+      const ticketId = await seedTicket({ orderId, source: 'form' })
+      await seedInboundMessage(ticketId, { authResults: 'dkim=pass; dmarc=fail (p=REJECT)' })
+      const result = await validateRefundIntent(db, { id: ticketId, orderId }, { amountCents: 500, openCjDispute: false })
+      expect(result).toEqual({
+        ok: false,
+        code: 'refund_sender_unauthenticated',
+        detail: 'latest inbound message is not dmarc=pass authenticated',
+      })
     })
 
     it('fails refund_sender_unauthenticated when the latest inbound message auth_results does not contain dmarc=pass', async () => {

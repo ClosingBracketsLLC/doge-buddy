@@ -7,7 +7,8 @@ import {
   type HistoryRecord,
   type NormalizedMessage,
 } from '@doge-buddy/gmail'
-import { and, count, desc, eq, gte, inArray, lt, ne, sql } from 'drizzle-orm'
+import { and, count, desc, eq, gte, inArray, like, lt, ne, not, sql } from 'drizzle-orm'
+import { FORM_ID_PREFIX } from './form-ids.ts'
 import { clearRedraftCycle } from './redraft.ts'
 
 type Db = ReturnType<typeof createDb>['db']
@@ -222,9 +223,14 @@ async function runResync(ctx: IngestContext, now: () => Date): Promise<void> {
     pageToken = page.nextPageToken
   } while (pageToken)
 
+  // Contact-form tickets sit on a `form:<id>` placeholder (or its `:sending:` claim sentinel)
+  // until their ack job creates a real Gmail thread — handing one of those to `getThread` is a
+  // guaranteed 404 that would land the ticket in `support_resync_thread_failed` on every resync
+  // and page the owner about a thread that does not exist yet (final review I3).
   const ticketThreads = await deps.db
     .selectDistinct({ gmailThreadId: supportTickets.gmailThreadId })
     .from(supportTickets)
+    .where(not(like(supportTickets.gmailThreadId, `${FORM_ID_PREFIX}%`)))
   const skippedThreads: { threadId: string; error: unknown }[] = []
   for (const { gmailThreadId } of ticketThreads) {
     let thread: { messages: { id: string }[] }

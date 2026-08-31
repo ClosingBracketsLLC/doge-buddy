@@ -776,6 +776,41 @@ describe('runIngest', () => {
     expect(alert.mock.calls[0]![2]).toMatchObject({ threadIds: [first.threadId] })
   })
 
+  // Final review I3 — a contact-form ticket sits on a `form:<id>` placeholder until its ack job
+  // creates a real Gmail thread. Handing that to getThread is a guaranteed 404 that would page the
+  // owner with support_resync_thread_failed on every single resync.
+  it("a form ticket's placeholder thread id is never handed to getThread during a resync", async () => {
+    await seedSyncState()
+    gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+
+    const [formTicket] = await db
+      .insert(supportTickets)
+      .values({ gmailThreadId: 'placeholder-tmp', customerEmail: 'form-resync@example.com', subject: 'Contact form: hi', status: 'new', source: 'form' })
+      .returning({ id: supportTickets.id })
+    await db.update(supportTickets).set({ gmailThreadId: `form:${formTicket!.id}` }).where(eq(supportTickets.id, formTicket!.id))
+
+    try {
+      gmail.expireHistory()
+      const asked: string[] = []
+      const realGetThread = gmail.getThread.bind(gmail)
+      vi.spyOn(gmail, 'getThread').mockImplementation(async (threadId) => {
+        asked.push(threadId)
+        return realGetThread(threadId)
+      })
+
+      await runIngest(deps)
+
+      expect(asked.length).toBeGreaterThan(0)
+      expect(asked).not.toContain(`form:${formTicket!.id}`)
+      expect(asked.some((t) => t.startsWith('form:'))).toBe(false)
+      expect(alert.mock.calls.filter((c) => c[1] === 'support_resync_thread_failed')).toHaveLength(0)
+    } finally {
+      await db.delete(supportMessages).where(eq(supportMessages.ticketId, formTicket!.id))
+      await db.delete(supportTickets).where(eq(supportTickets.id, formTicket!.id))
+    }
+  })
+
   // Task 4 — auth_results capture (spec: Task 1's authenticationResults on the normalized full
   // message flows through to the stored message row).
   it('captures Authentication-Results from the inbound message onto support_messages.auth_results', async () => {

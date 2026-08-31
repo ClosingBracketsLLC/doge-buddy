@@ -38,6 +38,14 @@ Attachments (damage photos still come by reply email — the ack tells the custo
 fallback (Turnstile itself needs JS); storing IPs beyond the single `siteverify` call; any change to
 the agent, validator, triage verdicts, or the refund path; a customer-account-gated form.
 
+Form tickets cannot carry a refund proposal until the customer has replied by email: the money
+gate is `dmarcPasses(latest inbound.auth_results)` and a web submission has no
+`Authentication-Results` header to pass it (`auth_results` is NULL by construction, §2.5). This is
+the safe direction and it is deliberate — the validator says so explicitly rather than reporting a
+generic authentication failure (`refund_sender_unauthenticated` / "contact-form ticket: no
+authenticated sender until the customer replies by email"), so the reason never reads like a
+spoofing incident. Everything else (reply, escalate, no_action) works unchanged on a form ticket.
+
 ## 1. Storefront — `/contact` (Hydrogen / Oxygen)
 
 - **Route** `apps/storefront/app/routes/contact.tsx`: loader exposes `{ siteKey, enabled }`
