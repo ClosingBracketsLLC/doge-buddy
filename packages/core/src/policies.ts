@@ -69,7 +69,7 @@ export const POLICY_COPY: PolicyCopy[] = [
           'Google Workspace (support email)',
           'Anthropic (AI assistance for product curation and support drafting; support messages may be processed to draft replies)',
           "We don't sell your data.",
-          'Email support@ (email address coming soon — see contact page) to access or delete your data.',
+          'Use the contact form at /contact to access or delete your data.',
         ],
       },
     ],

@@ -15,6 +15,7 @@ const POLICY_LINKS: Array<{to: string; title: string}> = [
   {to: '/policies/returns', title: 'Returns'},
   {to: '/policies/privacy', title: 'Privacy'},
   {to: '/policies/terms', title: 'Terms'},
+  {to: '/contact', title: 'Contact'},
 ];
 
 // footer/header/publicStoreDomain are unused: the skeleton's footer-menu
