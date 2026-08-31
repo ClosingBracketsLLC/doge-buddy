@@ -8,7 +8,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ## Launch runway — everything left, in order (2026-08-31)
 
-Read top to bottom. **A** is this week's housekeeping, **B** is launch prep you can do in any order, **C** is launch day. Nothing code-side is pending; every item is a click-path for you, and "→ Claude" marks where I take over. The detailed items further down stay as reference.
+**Storefront/catalog work is a separate list — `docs/LAUNCH-BACKLOG.md` (audited 2026-08-31: nav categories 404, two products, bare product pages).** Read top to bottom. **A** is this week's housekeeping, **B** is launch prep you can do in any order, **C** is launch day. Nothing code-side is pending; every item is a click-path for you, and "→ Claude" marks where I take over. The detailed items further down stay as reference.
 
 **A. Housekeeping (≈30 min total)**
 1. [x] **Push the last commit** — from `~/Desktop/code/ClosingBrackets/doge-buddy`: `git push origin main` (no migration; it's the hedged `/contact` success copy + the walk write-ups; Oxygen redeploys the storefront).
