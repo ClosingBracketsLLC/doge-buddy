@@ -1,8 +1,16 @@
 import { auditLog, createDb, supportMessages, supportTickets } from '@doge-buddy/db'
-import { and, eq, inArray, like } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildServer } from '../src/server.ts'
-import { CONTACT_MAX_PER_DAY, FORM_CAPPED_ACTION, FORM_HONEYPOT_ACTION, FORM_SUBMISSION_ACTION, type ContactRouteDeps } from '../src/http/contact.ts'
+import {
+  CONTACT_MAX_PER_DAY,
+  FORM_CAPPED_ACTION,
+  FORM_FLOOD_ALERT_ACTION,
+  FORM_HONEYPOT_ACTION,
+  FORM_SUBMISSION_ACTION,
+  HONEYPOT_AUDIT_MAX_PER_DAY,
+  type ContactRouteDeps,
+} from '../src/http/contact.ts'
 import { FORM_ACK_QUEUE } from '../src/jobs/support-form-ack.ts'
 import { MAX_TICKETS_PER_SENDER_PER_DAY } from '../src/support/ingest.ts'
 
@@ -38,7 +46,7 @@ describe('POST /public/contact', () => {
       await db.delete(supportMessages).where(inArray(supportMessages.ticketId, ids))
       await db.delete(supportTickets).where(inArray(supportTickets.id, ids))
     }
-    await db.delete(auditLog).where(inArray(auditLog.action, [FORM_SUBMISSION_ACTION, FORM_HONEYPOT_ACTION, FORM_CAPPED_ACTION]))
+    await db.delete(auditLog).where(inArray(auditLog.action, [FORM_SUBMISSION_ACTION, FORM_HONEYPOT_ACTION, FORM_CAPPED_ACTION, FORM_FLOOD_ALERT_ACTION]))
   })
 
   function app(overrides: Partial<ContactRouteDeps> = {}) {
@@ -87,6 +95,30 @@ describe('POST /public/contact', () => {
     expect(enqueue).not.toHaveBeenCalled()
   })
 
+  it('honeypot audit rows are capped per UTC day: past the ceiling the response stays 200 but no new row is written', async () => {
+    await db.insert(auditLog).values(
+      Array.from({ length: HONEYPOT_AUDIT_MAX_PER_DAY }, () => ({ actor: 'system', action: FORM_HONEYPOT_ACTION, detail: {}, createdAt: FIXED_NOW })),
+    )
+    const res = await post(app(), valid({ honeypot: 'http://spam' }))
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+    expect(await db.select().from(auditLog).where(eq(auditLog.action, FORM_HONEYPOT_ACTION))).toHaveLength(HONEYPOT_AUDIT_MAX_PER_DAY)
+  })
+
+  it('orderNumber is optional: a payload without the key at all still succeeds', async () => {
+    const { orderNumber: _omit, ...withoutOrderNumber } = valid()
+    const res = await post(app(), withoutOrderNumber)
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+  })
+
+  it('orderNumber whitespace-only counts as absent: 200, subject falls back to the message snippet', async () => {
+    const res = await post(app(), valid({ orderNumber: '   ' }))
+    expect(res.statusCode).toBe(200)
+    const [ticket] = await db.select().from(supportTickets).where(eq(supportTickets.customerEmail, EMAIL))
+    expect(ticket!.subject).toBe(`Contact form: ${valid().message}`)
+  })
+
   it('validation: bad email, short message, long name, bad order number → 400 with per-field messages; nothing stored', async () => {
     const res = await post(app(), valid({ email: 'nope', message: 'short', name: 'x'.repeat(101), orderNumber: 'not an order' }))
     expect(res.statusCode).toBe(400)
@@ -130,6 +162,15 @@ describe('POST /public/contact', () => {
     expect(msgCounts.reduce((a, b) => a + b, 0)).toBe(MAX_TICKETS_PER_SENDER_PER_DAY + 1)
     expect(enqueue).not.toHaveBeenCalled()
     expect(alert).toHaveBeenCalledWith('warning', 'support_sender_flood', expect.objectContaining({ customerEmail: EMAIL }))
+
+    // A second folded submission from the SAME sender on the SAME UTC day must not page the owner
+    // again — ingest.ts's own per-poll dedup exists for the identical reason ("pages the owner
+    // once, not 50 times"); this is that same guarantee across separate HTTP requests. Two folds
+    // in a row → `support_sender_flood` fires exactly once total.
+    const secondFold = await post(server, valid({ message: 'yet another message from me' }))
+    expect(secondFold.statusCode).toBe(200)
+    const floodAlertCalls = alert.mock.calls.filter(([, kind]) => kind === 'support_sender_flood')
+    expect(floodAlertCalls).toHaveLength(1)
   })
 
   it('tripwire: a keyword in the message escalates the ticket with escalation_notified_at null', async () => {
@@ -146,6 +187,27 @@ describe('POST /public/contact', () => {
     expect(res.statusCode).toBe(200)
     expect(await db.select().from(supportTickets).where(eq(supportTickets.customerEmail, EMAIL))).toHaveLength(1)
     expect(alert).toHaveBeenCalledWith('warning', 'support_form_ack_enqueue_failed', expect.any(Object))
+  })
+
+  it('an unhandled error (e.g. a DB failure) is contained by a plugin-scoped error handler: 500 {ok:false,error:"internal"}, no internals leaked', async () => {
+    const boom = new Error('connect ECONNREFUSED 127.0.0.1:5433')
+    const originalTransaction = db.transaction
+    // Mutate the real db instance's `transaction` method in place (rather than spreading a copy —
+    // drizzle's other methods rely on internal state a plain-object spread doesn't carry) so every
+    // other query still works right up to the point the handler calls `db.transaction(...)`.
+    ;(db as unknown as { transaction: unknown }).transaction = () => {
+      throw boom
+    }
+    try {
+      const res = await post(app(), valid())
+      expect(res.statusCode).toBe(500)
+      expect(res.json()).toEqual({ ok: false, error: 'internal' })
+      expect(res.body).not.toContain('ECONNREFUSED')
+      expect(res.body).not.toContain('127.0.0.1')
+      expect(await db.select().from(supportTickets).where(eq(supportTickets.customerEmail, EMAIL))).toEqual([])
+    } finally {
+      ;(db as unknown as { transaction: unknown }).transaction = originalTransaction
+    }
   })
 
   it('rejects non-JSON and oversized bodies without touching the DB', async () => {
