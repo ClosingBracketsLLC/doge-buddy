@@ -9,7 +9,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 ## Now / this week
 
 - [x] ~~Tap APPROVE on a proposal on your phone.~~ **Done (2026-08-25) — and it closed BOTH open live tiers.** You approved the *Low Noise Pet Hair Clipper* **from the admin dashboard** (Telegram login-link → `/admin/proposals` → approve — exactly Phase 4B's walk) and rejected the *Plush Round Dog Bed* via the Telegram link. The apply worker created ACTIVE Shopify product `gid://shopify/Product/8949329592408` ($54.99, SKU `CJJJCWGY01635-Style D`) with its CJ fulfillment mapping 6 seconds after the tap. **Phase 5 is closed on every tier.**
-- [ ] 🔴 **`git push origin main`** — carries the **cross-thread reply fix** (a reply Gmail files under a new thread id now attaches to its ticket via `In-Reply-To`/`References` instead of opening a duplicate — found live when your Outlook reply on the spam-foldered "Return request" thread became a 3rd ticket and tripped repeat-complainant) plus docs. The refund-input fix is already deployed. Push, then Claude merges the duplicate ticket into the original and re-arms it for the refund walk.
+- [ ] 🔴 **`git push origin main`** — carries the **`@idempotent` placement fix** (Shopify requires the directive on `refundCreate`/`inventorySetQuantities` but on the mutation FIELD — ours sat on the operation header, so the first live refund dead-lettered after 5 retries; live-probed both ways, fixed, re-probed accepted) + dead-letter pages now include the GraphQL `errors[]` + the Tier-2 helper scripts. After the redeploy Claude re-seeds the refund and you tap Approve once more. *(Earlier in this item: the cross-thread reply fix)* (a reply Gmail files under a new thread id now attaches to its ticket via `In-Reply-To`/`References` instead of opening a duplicate — found live when your Outlook reply on the spam-foldered "Return request" thread became a 3rd ticket and tripped repeat-complainant) plus docs. The refund-input fix is already deployed. Push, then Claude merges the duplicate ticket into the original and re-arms it for the refund walk.
 - [ ] 🟡 **Rotate the Railway Postgres password AGAIN before launch** (Settings on the Postgres service → regenerate) — the fresh URL was pasted into chat once on 2026-08-30 for the Tier-2 DB verifications. Same drill as 2026-08-27: after regenerating, check whether the ops service's `DATABASE_URL` is the reference `${{Postgres.DATABASE_URL}}` or a stale pasted literal (the literal is what broke ops last time), and remember Railway stages variable edits behind the easy-to-miss Apply banner + a manual redeploy. No rush today; required before real customer data flows.
 - [ ] ⚪ **Publish the storefront — a LAUNCH-DAY switch, deliberately OFF.** `dogebuddy.com` now
   targets the Hydrogen storefront on Oxygen (done 2026-08-30), and Robert keeps it
@@ -169,6 +169,17 @@ Claude drives the technical steps with you; only the two ⚪ items need your han
      the crash-window guard, Robert flips the row to `applying` (`UPDATE proposals SET
      status='applying', applied_at=NULL WHERE id='114cbe79-…'`) and Claude redelivers once more →
      the note pre-check must land on `applied` with NO second payout.
+  **Walk #2, three approvals in (2026-08-30 ~17:00 PT):** (1) seeded proposal `114cbe79` — Robert
+     REJECTED it reflexively (no reason → terminal). (2) `1cd6489c` on the escalated ticket —
+     approved, and the executor refused with `ticket no longer accepting refund`: **a refund only
+     pays out while its ticket is `awaiting_approval`/`waiting_on_customer`** — a late tap on an
+     escalated ticket must not move money. Correct; live PASS of that guard. (3) `c84e3665` on the
+     `waiting_on_customer` shipping ticket — approved, reached Shopify, and **dead-lettered after
+     5 retries: the `@idempotent` directive was on the operation header, which the live API rejects
+     (it must be on the mutation field, and it IS required)**. Fixed on local main, re-probed
+     accepted (userError "Order does not exist" on a fake id — document valid, no money moved).
+     Next: push → redeploy → re-seed on the shipping ticket → Approve → one refund → read-back →
+     redeliver → crash-window re-entry.
   2. **Bogus-gateway refund, delivered twice.** Place a test order through the test payment gateway
      → let the agent draft a refund → approve it → deliver the apply job a second time → **exactly
      one refund** in the Shopify admin (Shopify's idempotency key covers the fast duplicate; the
