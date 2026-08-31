@@ -438,6 +438,34 @@ describe('runIngest', () => {
     const ticket = await ticketByThread(spam.threadId)
     expect(ticket).toBeDefined()
     expect(ticket!.status).toBe('new')
+    // The Gmail-folder fact rides on the ticket for triage's pre-LLM spam short-circuit.
+    expect(ticket!.gmailSpam).toBe(true)
+
+    // A follow-up that lands in the INBOX flips it back — the LATEST inbound wins.
+    gmail.receiveInbound({
+      from: 'bulk@example.com', to: [SUPPORT], subject: 'Re: WIN NOW', bodyText: 'a real person here', threadId: spam.threadId,
+    })
+    await runIngest(deps)
+    expect((await ticketByThread(spam.threadId))!.gmailSpam).toBe(false)
+  })
+
+  it('gmail_spam follows last_inbound_at, not arrival order: an OLDER spam-foldered message handed over late never overrides the newer inbox one', async () => {
+    await seedSyncState()
+    const first = gmail.receiveInbound({ from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'body' })
+    await runIngest(deps)
+    expect((await ticketByThread(first.threadId))!.gmailSpam).toBe(false)
+
+    // Simulate history delivering an older, spam-foldered message on the same thread after the
+    // newer one is already in: MockGmail stamps increasing internalDates, so rewind this one.
+    const late = gmail.receiveInbound({
+      from: 'jane@example.com', to: [SUPPORT], subject: 'Hi', bodyText: 'older', threadId: first.threadId, labelIds: ['SPAM'],
+    })
+    gmail.backdate(late.id, new Date((await gmail.getMessage(first.id, { format: 'metadata' })).internalDate.getTime() - 60_000))
+    await runIngest(deps)
+
+    const ticket = await ticketByThread(first.threadId)
+    expect(ticket!.gmailSpam).toBe(false)
+    expect(ticket!.lastInboundAt).toEqual((await gmail.getMessage(first.id, { format: 'metadata' })).internalDate)
   })
 
   // 8

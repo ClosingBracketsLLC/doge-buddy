@@ -1,4 +1,4 @@
-import { auditLog, createDb, orders, supportMessages, supportTickets } from '@doge-buddy/db'
+import { auditLog, createDb, orders, settings, supportMessages, supportTickets } from '@doge-buddy/db'
 import { createMockGmail, type MockGmail } from '@doge-buddy/gmail'
 import { eq, inArray, like } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,11 +14,14 @@ import {
   type TriageVerdict,
 } from '../src/support/triage.ts'
 import { SPAM_LABEL } from '../src/support/ingest.ts'
+import { createSettings } from '../src/settings.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
 const TRIAGE_ACTION = 'support.triage'
 const TRIAGE_CAPPED_ACTION = 'support.triage_capped'
+const TRIAGE_SPAM_SHORTCIRCUIT_ACTION = 'support.triage_spam_shortcircuit'
+const SHORTCIRCUIT_SETTING = 'support.spam_shortcircuit.always'
 /** Any instant works; a fixed one keeps `last_triaged_at` and the UTC-day windows assertable. */
 const FIXED_NOW = new Date('2024-06-15T12:00:00.000Z')
 const INBOUND_AT = new Date('2024-06-15T11:00:00.000Z')
@@ -65,7 +68,11 @@ describe('runTriage', () => {
       await db.delete(supportTickets).where(inArray(supportTickets.id, ticketIds))
     }
     await db.delete(orders).where(like(orders.shopifyOrderGid, 'triage-order-%'))
-    await db.delete(auditLog).where(inArray(auditLog.action, [TRIAGE_ACTION, TRIAGE_CAPPED_ACTION]))
+    await db
+      .delete(auditLog)
+      .where(inArray(auditLog.action, [TRIAGE_ACTION, TRIAGE_CAPPED_ACTION, TRIAGE_SPAM_SHORTCIRCUIT_ACTION]))
+    // Settings hygiene (same idiom as admin-settings.test.ts): `settings` is a shared table.
+    await db.delete(settings).where(eq(settings.key, SHORTCIRCUIT_SETTING))
     vi.unstubAllGlobals()
   })
 
@@ -82,6 +89,8 @@ describe('runTriage', () => {
     triageFailureCount?: number
     isSpam?: boolean | null
     escalationReason?: string | null
+    gmailSpam?: boolean
+    orderId?: string | null
   } = {}): Promise<string> {
     const [row] = await db
       .insert(supportTickets)
@@ -95,6 +104,8 @@ describe('runTriage', () => {
         triageFailureCount: opts.triageFailureCount ?? 0,
         isSpam: opts.isSpam ?? null,
         escalationReason: opts.escalationReason ?? null,
+        gmailSpam: opts.gmailSpam ?? false,
+        orderId: opts.orderId ?? null,
       })
       .returning({ id: supportTickets.id })
     return row!.id
@@ -344,6 +355,131 @@ describe('runTriage', () => {
     expect(again.triaged).toBe(0)
     expect(alert).toHaveBeenCalledTimes(1)
     expect(await auditRows(TRIAGE_CAPPED_ACTION)).toHaveLength(1)
+  })
+
+  // Pre-publish anti-spam hardening: the pre-triage spam short-circuit. A "spam candidate" is a
+  // ticket whose LATEST inbound sat in Gmail's own SPAM folder (`gmail_spam`, kept by ingest) from
+  // a sender with no order on file — no linked order AND no `orders` row under that email.
+  // Tripwired tickets are `escalated` and never selected at all, so "no tripwire" is implicit.
+  describe('spam short-circuit', () => {
+    it('orders spam candidates BEHIND real mail so a flood never delays a real ticket, but still gives them a model verdict while the cap has room (default mode)', async () => {
+      // The candidate is the OLDER contact — oldest-first would normally put it first.
+      const candidate = await seedTicket({
+        customerEmail: 'bulk@example.com',
+        subject: 'WIN NOW',
+        gmailSpam: true,
+        lastInboundAt: new Date(INBOUND_AT.getTime() - 60_000),
+      })
+      const real = await seedTicket({ customerEmail: 'jane@example.com', subject: 'Where is my order?' })
+      const seen: string[] = []
+      const call = vi.fn<TriageCall>(async (input) => {
+        seen.push(input.subject ?? '')
+        return verdict({ is_spam: input.subject === 'WIN NOW', category: 'other' })
+      })
+
+      const result = await runTriage(makeDeps(call))
+
+      expect(result).toEqual({ triaged: 2, escalatedTicketIds: [] })
+      expect(seen).toEqual(['Where is my order?', 'WIN NOW'])
+      expect((await ticketById(real))!.status).toBe('triaged')
+      expect((await ticketById(candidate))!.status).toBe('resolved')
+      // Both went through the model: two spend rows, no short-circuit row.
+      expect(await auditRows(TRIAGE_ACTION)).toHaveLength(2)
+      expect(await auditRows(TRIAGE_SPAM_SHORTCIRCUIT_ACTION)).toHaveLength(0)
+    })
+
+    it('at the daily cap: a spam candidate is resolved + labeled WITHOUT a model call and without spending the cap, while a real ticket still waits for the next UTC day (one capped warning)', async () => {
+      const received = gmail.receiveInbound({
+        from: 'bulk@example.com',
+        to: ['support@dogebuddy.com'],
+        subject: 'WIN NOW',
+        bodyText: 'buy now',
+        labelIds: ['SPAM'],
+      })
+      const candidate = await seedTicket({ customerEmail: 'bulk@example.com', subject: 'WIN NOW', gmailSpam: true })
+      await seedMessage(candidate, { bodyText: 'buy now', gmailMessageId: received.id })
+      const real = await seedTicket({ customerEmail: 'jane@example.com' })
+      await db.insert(auditLog).values(
+        Array.from({ length: TRIAGE_MAX_CALLS_PER_DAY }, () => ({
+          actor: 'system',
+          action: TRIAGE_ACTION,
+          detail: {},
+          createdAt: FIXED_NOW,
+        })),
+      )
+      const call = vi.fn<TriageCall>(async () => verdict())
+
+      const result = await runTriage(makeDeps(call))
+
+      expect(call).not.toHaveBeenCalled()
+      expect(result).toEqual({ triaged: 1, escalatedTicketIds: [] })
+      const spam = await ticketById(candidate)
+      expect(spam!.status).toBe('resolved')
+      expect(spam!.isSpam).toBe(true)
+      expect(spam!.escalationReason).toBeNull()
+      expect(spam!.lastTriagedAt).toEqual(FIXED_NOW)
+      expect((await ticketById(real))!.status).toBe('new')
+
+      // Spend: not one more triage row; exactly one short-circuit audit row naming the ticket.
+      expect(await auditRows(TRIAGE_ACTION)).toHaveLength(TRIAGE_MAX_CALLS_PER_DAY)
+      const shortCircuits = await auditRows(TRIAGE_SPAM_SHORTCIRCUIT_ACTION)
+      expect(shortCircuits).toHaveLength(1)
+      expect(shortCircuits[0]!.entityId).toBe(candidate)
+      expect(shortCircuits[0]!.detail).toMatchObject({ mode: 'at_cap' })
+
+      const spamLabelId = (await gmail.listLabels()).find((l) => l.name === SPAM_LABEL)?.id
+      expect(spamLabelId).toBeDefined()
+      expect(gmail.labelsOf(received.id)).toContain(spamLabelId)
+
+      // The real ticket left waiting still earns the day's capped warning — exactly once.
+      expect(alert).toHaveBeenCalledTimes(1)
+      expect(alert).toHaveBeenCalledWith('warning', 'support_triage_capped', expect.any(Object))
+    })
+
+    it('`support.spam_shortcircuit.always` = true skips the model for every candidate even with cap room — but a spam-foldered ticket whose sender has an order (linked, or merely on file under that email) still gets the model', async () => {
+      await createSettings(db).set('support.spam_shortcircuit.always', true)
+      const orderId = await seedOrder({ number: '1001', email: 'Rob@Example.com' }) // case-insensitive match
+      const candidate = await seedTicket({ customerEmail: 'bulk@example.com', subject: 'WIN NOW', gmailSpam: true })
+      const onFile = await seedTicket({ customerEmail: 'rob@example.com', subject: 'Before I order', gmailSpam: true })
+      const linked = await seedTicket({ customerEmail: 'rob@example.com', subject: 'Re: my order', gmailSpam: true, orderId })
+      const inbox = await seedTicket({ customerEmail: 'new@example.com', subject: 'Not spam-foldered' })
+      const seen: string[] = []
+      const call = vi.fn<TriageCall>(async (input) => {
+        seen.push(input.subject ?? '')
+        return verdict()
+      })
+
+      const result = await runTriage(makeDeps(call))
+
+      expect(result).toEqual({ triaged: 4, escalatedTicketIds: [] })
+      expect([...seen].sort()).toEqual(['Before I order', 'Not spam-foldered', 'Re: my order'])
+      const spam = await ticketById(candidate)
+      expect(spam!.status).toBe('resolved')
+      expect(spam!.isSpam).toBe(true)
+      for (const id of [onFile, linked, inbox]) expect((await ticketById(id))!.status).toBe('triaged')
+      expect(await auditRows(TRIAGE_ACTION)).toHaveLength(3)
+      const shortCircuits = await auditRows(TRIAGE_SPAM_SHORTCIRCUIT_ACTION)
+      expect(shortCircuits).toHaveLength(1)
+      expect(shortCircuits[0]!.detail).toMatchObject({ mode: 'always' })
+    })
+
+    it('a short-circuited ticket is excluded from the repeat-complainant tally, exactly like a model-verdict spam ticket', async () => {
+      await createSettings(db).set('support.spam_shortcircuit.always', true)
+      // One earlier non-spam ticket, so the short-circuited one would be the 2nd and the later
+      // ticket the 3rd IF the short-circuited one counted. It must not (same setup as the
+      // model-verdict spam test above).
+      await seedTicket({ status: 'resolved', customerEmail: 'flood@example.com' })
+      const shortCircuited = await seedTicket({ customerEmail: 'flood@example.com', subject: 'WIN NOW', gmailSpam: true })
+      await runTriage(makeDeps(vi.fn<TriageCall>(async () => verdict())))
+      expect((await ticketById(shortCircuited))!.isSpam).toBe(true)
+
+      // 2 non-spam tickets in the window (the short-circuited one excluded) — under the ≥3 rule.
+      const later = await seedTicket({ customerEmail: 'flood@example.com', subject: 'Real question' })
+      const result = await runTriage(makeDeps(vi.fn<TriageCall>(async () => verdict())))
+
+      expect(result.escalatedTicketIds).toEqual([])
+      expect((await ticketById(later))!.status).toBe('triaged')
+    })
   })
 
   // IMPORTANT 4b regression: a poll must not be able to run indefinitely if the model is slow —

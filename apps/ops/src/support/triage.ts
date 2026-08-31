@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { auditLog, orders, supportMessages, supportTickets, type createDb } from '@doge-buddy/db'
 import type { GmailClient } from '@doge-buddy/gmail'
 import { and, asc, count, desc, eq, gte, or, sql } from 'drizzle-orm'
+import { createSettings, type Settings } from '../settings.ts'
 import { applyLabel, createLabelCache, SPAM_LABEL, type Alert } from './ingest.ts'
 import { clearRedraftCycle } from './redraft.ts'
 
@@ -31,6 +32,8 @@ const BODY_MAX_CHARS = 2000
 const TRIAGE_ACTION = 'support.triage'
 /** Guards the once-per-UTC-day cap warning, mirroring escalate.ts's cap-warning pattern. */
 const TRIAGE_CAPPED_ACTION = 'support.triage_capped'
+/** One row per pre-LLM spam short-circuit — the flood path that never reaches the model. */
+const TRIAGE_SPAM_SHORTCIRCUIT_ACTION = 'support.triage_spam_shortcircuit'
 
 export interface TriageVerdict {
   category:
@@ -62,6 +65,8 @@ export interface TriageDeps {
   gmail: GmailClient
   alert: Alert
   now?: () => Date
+  /** Reads `support.spam_shortcircuit.always`; defaults to a fresh accessor over `db`. */
+  settings?: Settings
 }
 
 /** The ticket shape triage selects and then guards its write against. */
@@ -72,7 +77,23 @@ interface SelectedTicket {
   customerEmail: string | null
   subject: string | null
   triageFailureCount: number
+  /** See SPAM_CANDIDATE: Gmail-spam-foldered, no order on file — eligible for the pre-LLM path. */
+  spamCandidate: boolean
 }
+
+/**
+ * Pre-publish anti-spam hardening: the tickets that may be resolved as spam WITHOUT a model call.
+ * The latest inbound sat in Gmail's own SPAM folder (ingest keeps `gmail_spam` in step with
+ * `last_inbound_at`), no order is linked, and no `orders` row exists under the sender's email —
+ * a real customer, spam-foldered or not, always reaches the model. Tripwired tickets are
+ * `escalated` and never selected, so "no tripwire hit" is implicit in the selection's WHERE.
+ * Evaluated in SQL so it can ALSO drive the selection's ORDER BY: candidates sort behind real mail.
+ */
+const SPAM_CANDIDATE = sql<boolean>`(
+  ${supportTickets.gmailSpam}
+  and ${supportTickets.orderId} is null
+  and not exists (select 1 from ${orders} where lower(${orders.email}) = lower(${supportTickets.customerEmail}))
+)`
 
 /** Strips a leading `#` and surrounding whitespace — the DB holds BOTH formats (the webhook path
  * stores bare numbers, reconcile stores `#`-prefixed), so both sides normalize before comparing. */
@@ -106,7 +127,8 @@ export async function runTriage(deps: TriageDeps): Promise<{ triaged: number; es
   let triaged = 0
 
   // A follow-up on an already-triaged ticket must be re-triaged: escalation-class content can
-  // arrive on message four. Oldest contact first, capped per cycle to bound the poll's duration.
+  // arrive on message four. Spam candidates sort BEHIND everything else (a flood can never put a
+  // real ticket behind it), then oldest contact first, capped per cycle to bound the poll's duration.
   const selected: SelectedTicket[] = await deps.db
     .select({
       id: supportTickets.id,
@@ -114,6 +136,7 @@ export async function runTriage(deps: TriageDeps): Promise<{ triaged: number; es
       customerEmail: supportTickets.customerEmail,
       subject: supportTickets.subject,
       triageFailureCount: supportTickets.triageFailureCount,
+      spamCandidate: SPAM_CANDIDATE.mapWith(Boolean),
     })
     .from(supportTickets)
     .where(
@@ -125,10 +148,18 @@ export async function runTriage(deps: TriageDeps): Promise<{ triaged: number; es
         ),
       ),
     )
-    .orderBy(asc(supportTickets.lastInboundAt))
+    .orderBy(asc(SPAM_CANDIDATE), asc(supportTickets.lastInboundAt))
     .limit(TRIAGE_MAX_PER_CYCLE)
 
   if (selected.length === 0) return { triaged, escalatedTicketIds }
+
+  // Default (false): candidates still get a Haiku verdict while the day's budget has room and only
+  // skip the model once the cap is reached. True: they never reach the model. Either way real mail
+  // is ordered first above, which is what actually keeps a flood from starving real tickets.
+  const alwaysShortCircuit = selected.some((t) => t.spamCandidate)
+    ? await (deps.settings ?? createSettings(deps.db)).get('support.spam_shortcircuit.always')
+    : false
+  let warnedCapped = false
 
   const midnight = utcMidnight(now())
   const [spentRow] = await deps.db
@@ -145,11 +176,20 @@ export async function runTriage(deps: TriageDeps): Promise<{ triaged: number; es
     // budget. Whatever's left simply stays selectable next cycle, same as hitting the daily cap.
     if (now().getTime() - cycleStart.getTime() > TRIAGE_CYCLE_DEADLINE_MS) break
 
-    if (callsToday >= TRIAGE_MAX_CALLS_PER_DAY) {
-      // At cap the remaining tickets simply stay selectable for the next UTC day. The §2.6 ingest
-      // tripwire keeps escalation-class mail alerting meanwhile — that is why capping is safe.
-      await warnCapped(deps, midnight, selected.length)
-      break
+    const atCap = callsToday >= TRIAGE_MAX_CALLS_PER_DAY
+    if (ticket.spamCandidate && (atCap || alwaysShortCircuit)) {
+      if (await shortCircuitSpam(deps, labels, ticket, atCap ? 'at_cap' : 'always', now)) triaged += 1
+      continue
+    }
+    if (atCap) {
+      // At cap the remaining REAL tickets simply stay selectable for the next UTC day. `continue`,
+      // not `break`: candidates sort last, and the ones behind this ticket still short-circuit. The
+      // §2.6 ingest tripwire keeps escalation-class mail alerting meanwhile — why capping is safe.
+      if (!warnedCapped) {
+        await warnCapped(deps, midnight, selected.length)
+        warnedCapped = true
+      }
+      continue
     }
 
     // Spend guard: the audit row is written BEFORE the call, so a crash mid-call still counts the
@@ -377,6 +417,49 @@ async function resolveOrderLink(
     .limit(1)
 
   return match ? { orderId: match.id, claimedOrderNumber: null } : { orderId: null, claimedOrderNumber: normalized }
+}
+
+/**
+ * The pre-LLM spam path (SPAM_CANDIDATE): resolved as spam with no model call and no spend-guard
+ * row, so it never touches the daily cap. `mode` records WHY the model was skipped — `at_cap`
+ * (the default behaviour: only once the day's budget is spent) or `always` (the
+ * `support.spam_shortcircuit.always` setting). Same guarded write and DogeBuddy/Spam label as a
+ * model-verdict spam resolve; category `other` and no sentiment, since nothing judged the text.
+ * Returns whether the guarded write matched (false = the owner moved the ticket meanwhile).
+ */
+async function shortCircuitSpam(
+  deps: TriageDeps,
+  labels: ReturnType<typeof createLabelCache>,
+  ticket: SelectedTicket,
+  mode: 'at_cap' | 'always',
+  now: () => Date,
+): Promise<boolean> {
+  const written = await deps.db
+    .update(supportTickets)
+    .set({
+      status: 'resolved',
+      isSpam: true,
+      category: 'other',
+      sentiment: null,
+      escalationReason: null,
+      lastTriagedAt: now(),
+      triageFailureCount: 0,
+      // redraft-cycle clear (see support/redraft.ts): a resolve exit, same as the verdict path.
+      ...clearRedraftCycle(),
+    })
+    .where(and(eq(supportTickets.id, ticket.id), eq(supportTickets.status, ticket.status)))
+    .returning({ id: supportTickets.id })
+  if (written.length === 0) return false
+
+  await deps.db.insert(auditLog).values({
+    actor: 'system',
+    action: TRIAGE_SPAM_SHORTCIRCUIT_ACTION,
+    entityType: 'support_ticket',
+    entityId: ticket.id,
+    detail: { mode, reason: 'gmail_spam_no_order' },
+  })
+  await labelSpam(deps, labels, ticket.id)
+  return true
 }
 
 /** Label failures are warning alerts, never a failed cycle (the ticket is already resolved). */

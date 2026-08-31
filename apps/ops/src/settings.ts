@@ -32,6 +32,15 @@ export const SETTINGS_DEFAULTS = {
   'scoring.fail_cooldown_days': 7,
   'scoring.max_fail_attempts': 3,
   'support.agent_guidance': '',
+  // Pre-triage spam short-circuit (pre-publish anti-spam hardening). A ticket whose latest inbound
+  // sat in Gmail's SPAM folder, from a sender with no order on file and no tripwire hit, is always
+  // triaged AFTER real mail; with this false (default) it still gets a Haiku verdict while the
+  // daily cap has room and is only resolved WITHOUT a model call once the cap is reached — so a
+  // flood can never starve real tickets, but a legit pre-purchase question Gmail happened to
+  // spam-folder (seen live with Outlook senders on the new domain) still reaches the model. True
+  // skips the model for every such ticket, unconditionally: zero spend, at the cost of that
+  // false-positive class being auto-resolved unseen.
+  'support.spam_shortcircuit.always': false,
 }
 // Deliberately no `as const`/`satisfies` here: either narrows the boolean properties down
 // to their literal default (e.g. `false` instead of `boolean`), which would make `set()`
@@ -48,6 +57,7 @@ type BooleanSettingKey =
   | 'workflow.support.enabled'
   | 'workflow.scoring.enabled'
   | 'scoring.judge_enabled'
+  | 'support.spam_shortcircuit.always'
 type ModeSettingKey =
   | 'workflow.sourcing.mode'
   | 'workflow.support_reply.mode'

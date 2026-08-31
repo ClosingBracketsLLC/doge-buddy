@@ -41,6 +41,9 @@ export interface MockGmail extends GmailClient {
   failNext(method: keyof GmailClient, err: Error): void
   /** Assertion helper: reads labels directly, bypassing the gone-message check. */
   labelsOf(id: string): string[]
+  /** Rewinds a stored message's internalDate — models history handing over an OLDER message after
+   * a newer one on the same thread (MockGmail otherwise stamps strictly increasing dates). */
+  backdate(id: string, internalDate: Date): void
   /** Steers the history-id counter so the next mutation's record id is > the given decimal string. */
   advanceHistoryTo(id: string): void
   /** Inspection helper: every raw RFC 2822 message built by sendReply, oldest first. Decode with
@@ -399,6 +402,12 @@ export function createMockGmail(opts: MockGmailOptions = {}): MockGmail {
       const msg = messages.get(id)
       if (!msg) throw new Error(`MockGmail.labelsOf: unknown message id "${id}"`)
       return [...msg.labelIds]
+    },
+
+    backdate(id, internalDate) {
+      const msg = messages.get(id)
+      if (!msg) throw new Error(`MockGmail.backdate: unknown message id "${id}"`)
+      msg.internalDate = internalDate
     },
 
     advanceHistoryTo(id) {

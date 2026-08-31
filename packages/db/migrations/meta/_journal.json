@@ -57,6 +57,13 @@
       "when": 1788047876487,
       "tag": "0007_confused_ares",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788137855259,
+      "tag": "0008_flat_lionheart",
+      "breakpoints": true
     }
   ]
 }

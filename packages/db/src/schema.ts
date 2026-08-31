@@ -152,6 +152,12 @@ export const supportTickets = pgTable('support_tickets', {
   lastTriagedAt: timestamp('last_triaged_at', { withTimezone: true }),
   triageFailureCount: integer('triage_failure_count').notNull().default(0),
   claimedOrderNumber: text('claimed_order_number'),
+  // Whether the ticket's LATEST inbound message sat in Gmail's own SPAM folder at ingest time
+  // (ingest keeps it in step with last_inbound_at). Read by triage's pre-LLM spam short-circuit:
+  // Gmail-spam + no order on file + no tripwire → deprioritized behind real mail and, at the daily
+  // cap (or always, by setting), resolved as spam without a model call. A follow-up that lands in
+  // the INBOX flips it back to false.
+  gmailSpam: boolean('gmail_spam').notNull().default(false),
   // CRITICAL-1 (binding, referenced across ingest/triage/agent-run/agent-select/run-apply/admin):
   // every UPDATE that transitions a ticket INTO 'escalated' clears this, or a ticket escalated+
   // notified once, then resolved, then re-escalated stays permanently invisible to

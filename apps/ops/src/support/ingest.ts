@@ -351,10 +351,19 @@ async function ingestMessageId(ctx: IngestContext, messageId: string): Promise<v
 
     // GREATEST, not assignment: history can hand us an older message after a newer one, and the
     // ticket's "latest customer contact" must never move backwards. (GREATEST ignores NULLs.)
+    // `gmail_spam` moves in step: it describes the message that WINS last_inbound_at, so it only
+    // takes this message's Gmail-folder fact when this message is that latest one. Both columns
+    // are set in the ONE statement so the CASE reads the row's pre-update last_inbound_at.
+    const inboundAt = full.internalDate.toISOString()
     await tx
       .update(supportTickets)
       .set({
-        lastInboundAt: sql`greatest(${supportTickets.lastInboundAt}, ${full.internalDate.toISOString()}::timestamptz)`,
+        lastInboundAt: sql`greatest(${supportTickets.lastInboundAt}, ${inboundAt}::timestamptz)`,
+        gmailSpam: sql`case
+          when ${inboundAt}::timestamptz >= coalesce(${supportTickets.lastInboundAt}, '-infinity'::timestamptz)
+          then ${full.labelIds.includes('SPAM')}
+          else ${supportTickets.gmailSpam}
+        end`,
       })
       .where(eq(supportTickets.id, ticket.id))
 

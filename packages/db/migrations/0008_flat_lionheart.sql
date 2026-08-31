@@ -1,0 +1,1 @@
+ALTER TABLE "support_tickets" ADD COLUMN "gmail_spam" boolean DEFAULT false NOT NULL;
