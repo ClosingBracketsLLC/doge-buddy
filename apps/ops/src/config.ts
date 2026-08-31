@@ -33,6 +33,7 @@ const EnvSchema = z
     GMAIL_SERVICE_ACCOUNT_KEY: z.string().optional(),
     GMAIL_IMPERSONATE: z.string().optional(),
     SUPPORT_ADDRESS: z.string().optional(),
+    TURNSTILE_SECRET_KEY: z.string().min(1).optional(),
   })
   .superRefine((data, ctx) => {
     const shopifyVars = {
@@ -118,6 +119,7 @@ export interface Config {
   anthropic?: { apiKey: string }
   serpapi?: { apiKey: string }
   gmail?: { saEmail: string; saKey: string; impersonate: string; supportAddress: string }
+  turnstile?: { secretKey: string }
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
@@ -181,6 +183,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
       impersonate: data.GMAIL_IMPERSONATE,
       supportAddress: data.SUPPORT_ADDRESS,
     }
+  }
+
+  if (data.TURNSTILE_SECRET_KEY !== undefined) {
+    config.turnstile = { secretKey: data.TURNSTILE_SECRET_KEY }
   }
 
   return config

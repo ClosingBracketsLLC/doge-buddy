@@ -184,4 +184,11 @@ describe('loadConfig', () => {
     expect(message).toContain('GMAIL_IMPERSONATE')
     expect(message).toContain('SUPPORT_ADDRESS')
   })
+
+  it('TURNSTILE_SECRET_KEY → config.turnstile; absent → undefined', () => {
+    expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' }).turnstile).toBeUndefined()
+    expect(
+      loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', TURNSTILE_SECRET_KEY: '0xsecret' }).turnstile,
+    ).toEqual({ secretKey: '0xsecret' })
+  })
 })
