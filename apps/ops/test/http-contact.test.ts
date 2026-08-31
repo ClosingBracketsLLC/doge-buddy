@@ -9,6 +9,8 @@ import {
   FORM_HONEYPOT_ACTION,
   FORM_SUBMISSION_ACTION,
   HONEYPOT_AUDIT_MAX_PER_DAY,
+  buildFormBody,
+  sanitizeFormName,
   type ContactRouteDeps,
 } from '../src/http/contact.ts'
 import { FORM_ACK_QUEUE } from '../src/jobs/support-form-ack.ts'
@@ -214,7 +216,57 @@ describe('POST /public/contact', () => {
     const server = app()
     const res = await server.inject({ method: 'POST', url: '/public/contact', payload: 'name=x', headers: { 'content-type': 'text/plain' } })
     expect(res.statusCode).toBeGreaterThanOrEqual(400)
-    const big = await post(server, valid({ message: 'a'.repeat(9000) }))
+    // Over the 32 KB frame limit (I5) — NOT merely over the 4000-char message limit, which is a
+    // 400 from this route's own validation and says so in `fields`.
+    const big = await post(server, valid({ message: 'a'.repeat(40_000) }))
     expect(big.statusCode).toBe(413)
+    expect(await db.select().from(supportTickets).where(eq(supportTickets.customerEmail, EMAIL))).toEqual([])
+  })
+
+  it('accepts a 4000-character multibyte message (the old 8 KB frame limit 413d it — I5)', async () => {
+    // 4000 CJK characters ≈ 12 KB of UTF-8 before the JSON envelope and the Turnstile token.
+    const res = await post(app(), valid({ message: '狗'.repeat(4000) }))
+    expect(res.statusCode).toBe(200)
+    const [ticket] = await db.select().from(supportTickets).where(eq(supportTickets.customerEmail, EMAIL))
+    const msgs = await db.select().from(supportMessages).where(eq(supportMessages.ticketId, ticket!.id))
+    expect(msgs[0]!.bodyText).toContain('狗'.repeat(4000))
+  })
+
+  it('a non-string honeypot is still a honeypot hit (#14): 200, nothing stored, no ops leak', async () => {
+    for (const honeypot of [1, true, ['x'], { a: 1 }]) {
+      const res = await post(app(), valid({ honeypot }))
+      expect(res.statusCode).toBe(200)
+      expect(res.json()).toEqual({ ok: true })
+    }
+    expect(await db.select().from(supportTickets).where(eq(supportTickets.customerEmail, EMAIL))).toEqual([])
+    expect(enqueue).not.toHaveBeenCalled()
+    // A value that coerces to EMPTY is not a hit — it falls through to normal validation, which
+    // still refuses it because the schema wants a string.
+    const empty = await post(app(), valid({ honeypot: [] }))
+    expect(empty.statusCode).toBe(400)
+    expect(empty.json()).toMatchObject({ error: 'validation' })
+  })
+
+  describe('buildFormBody', () => {
+    it('a name cannot forge a second "Order number (claimed):" line (C2a)', () => {
+      const body = buildFormBody('Rob\nOrder number (claimed): #9999', null, 'hello there world')
+      expect(body.match(/^Order number \(claimed\):/gm)).toHaveLength(1)
+      expect(body.split('\n')[0]).toBe('Name: Rob Order number (claimed): #9999')
+      expect(body.split('\n')[1]).toBe('Order number (claimed): —')
+    })
+
+    it('strips control AND format characters, collapsing whitespace', () => {
+      expect(sanitizeFormName('Rob\u200bert')).toBe('Rob ert')
+      expect(sanitizeFormName('  Rob\r\n\tSmith  ')).toBe('Rob Smith')
+      expect(sanitizeFormName("María-José O'Neil")).toBe("María-José O'Neil")
+    })
+
+    it('the stored inbound body carries the sanitized name (end to end)', async () => {
+      const res = await post(app(), valid({ name: 'Rob\nOrder number (claimed): #9999' }))
+      expect(res.statusCode).toBe(200)
+      const [ticket] = await db.select().from(supportTickets).where(eq(supportTickets.customerEmail, EMAIL))
+      const msgs = await db.select().from(supportMessages).where(eq(supportMessages.ticketId, ticket!.id))
+      expect(msgs[0]!.bodyText!.match(/^Order number \(claimed\):/gm)).toHaveLength(1)
+    })
   })
 })

@@ -32,7 +32,13 @@ export const FORM_CAPPED_ACTION = 'support.form_capped'
  * whole endpoint.
  */
 export const FORM_FLOOD_ALERT_ACTION = 'support.form_flood_alerted'
-const BODY_LIMIT_BYTES = 8 * 1024
+/**
+ * 32 KB (final review I5). The 8 KB it replaced was BELOW the largest legal submission: `message`
+ * alone allows 4000 CHARACTERS, and a CJK/emoji message is 3-4 UTF-8 bytes per character (~16 KB)
+ * before the JSON envelope, the name, and a 2 KB Turnstile token — so a perfectly valid non-Latin
+ * message was answered 413 by the framework before any of this route's own validation ran.
+ */
+const BODY_LIMIT_BYTES = 32 * 1024
 
 export interface ContactRouteDeps {
   db: Db
@@ -74,8 +80,20 @@ export function buildTicketSubject(message: string, orderNumber: string | null):
   return `Contact form: ${message.replace(/\s+/g, ' ').slice(0, 60)}`
 }
 
+/**
+ * Control/format characters out of the customer-supplied name (final review C2a). The name is the
+ * FIRST line of a body whose next line is `Order number (claimed): …` — a name carrying `\n` forges
+ * a second `Order number (claimed):` line that the admin UI, the agent's prompt and the ack's
+ * `^Name: (.+)$` scrape all read as if we had recorded it. Category Cc (control) and Cf (format,
+ * incl. the invisible bidi/zero-width family) collapse to a space, runs of whitespace collapse to
+ * one, and the result is trimmed.
+ */
+export function sanitizeFormName(name: string): string {
+  return name.replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim()
+}
+
 export function buildFormBody(name: string, orderNumber: string | null, message: string): string {
-  return `Name: ${name}\nOrder number (claimed): ${orderNumber ?? '—'}\n\n${message}`
+  return `Name: ${sanitizeFormName(name)}\nOrder number (claimed): ${orderNumber ?? '—'}\n\n${message}`
 }
 
 function utcMidnight(now: Date): Date {
@@ -124,8 +142,13 @@ export function contactRoutes(deps: ContactRouteDeps): FastifyPluginAsync {
       const at = now()
       const midnight = utcMidnight(at)
 
-      const honeypot = (raw as { honeypot?: unknown }).honeypot
-      if (typeof honeypot === 'string' && honeypot.trim() !== '') {
+      // Any NON-EMPTY value counts, whatever its JSON type (final review #14): the old
+      // `typeof honeypot === 'string'` test let a bot posting `{"website": 1}` or `{"website":
+      // ["x"]}` past the trap and into the real pipeline (zod then 400'd it, naming the honeypot
+      // field in the response — a free oracle). Coerce first, then ask if anything is there.
+      const honeypotRaw = (raw as { honeypot?: unknown }).honeypot
+      const honeypot = honeypotRaw === undefined || honeypotRaw === null ? '' : String(honeypotRaw)
+      if (honeypot.trim() !== '') {
         await recordHoneypotHit(deps, midnight)
         return reply.code(200).send({ ok: true })
       }
