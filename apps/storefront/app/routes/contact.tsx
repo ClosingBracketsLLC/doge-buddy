@@ -19,9 +19,14 @@ export async function loader({context}: Route.LoaderArgs) {
 
 export async function action({request, context}: Route.ActionArgs) {
   const opsBaseUrl = context.env.OPS_BASE_URL;
-  if (!opsBaseUrl)
-    return {result: {kind: 'unavailable'} as ContactResult, values: null};
+  // Parsed BEFORE the config check so every non-'sent' result — 'unavailable' included — can hand
+  // the typed values back to the re-rendered form (see the banner below).
   const parsed = parseContactForm(await request.formData());
+  if (!opsBaseUrl)
+    return {
+      result: {kind: 'unavailable'} as ContactResult,
+      values: parsed.fields,
+    };
   const result = await forwardContact({
     opsBaseUrl,
     ...parsed,
@@ -37,6 +42,10 @@ const TURNSTILE_SCRIPT =
 type TurnstileWindow = {
   turnstile?: {reset: (container?: string | HTMLElement) => void};
 };
+
+/** React 18's DOM allow-list (and @types/react@18) has no `inert` prop — it arrived in React 19 —
+ * so it is spread in as a plain string attribute, which is how the HTML spec spells it anyway. */
+const INERT = {inert: ''} as Record<string, string>;
 
 /** Validation keys that have their own inline <span> under an input. */
 const RENDERED_FIELDS = ['name', 'email', 'orderNumber', 'message'];
@@ -67,19 +76,25 @@ export default function Contact() {
 
   // Turnstile tokens are single-use: <Form> re-renders the same widget after a failed
   // submit, so without a reset the redeemed token is resubmitted and every retry fails.
-  // Only the states that keep the form mounted are reset ('unavailable' unmounts it).
+  // Every result that keeps the form mounted is reset — 'unavailable' included, since ops
+  // redeemed (or never saw) the token either way and the visitor is about to retry.
   useEffect(() => {
     if (
       result &&
       (result.kind === 'validation' ||
         result.kind === 'turnstile' ||
-        result.kind === 'capped')
+        result.kind === 'capped' ||
+        result.kind === 'unavailable')
     ) {
       (window as unknown as TurnstileWindow).turnstile?.reset();
     }
   }, [data, result]);
 
-  if (!enabled || result?.kind === 'unavailable') {
+  // Only a DISABLED form (no keys configured) replaces the page: there is nothing to submit and
+  // nothing typed to lose. A runtime 'unavailable' (ops down, timeout, 503) is a retryable
+  // failure of an already-typed message, so it renders as a banner over the still-mounted form
+  // with the values restored — replacing the page there threw the customer's message away.
+  if (!enabled) {
     return (
       <main className="mx-auto max-w-2xl px-4 py-12">
         <h1 className="font-display text-3xl text-ink">Contact us</h1>
@@ -114,6 +129,12 @@ export default function Contact() {
       {result?.kind === 'capped' && (
         <p role="alert" className="mt-4 text-red-700">
           Too many messages right now — please try again later.
+        </p>
+      )}
+      {result?.kind === 'unavailable' && (
+        <p role="alert" className="mt-4 text-red-700">
+          The contact form is temporarily unavailable — your message is still
+          here, please try again in a moment.
         </p>
       )}
       {otherErrors.length > 0 && (
@@ -183,9 +204,12 @@ export default function Contact() {
             </span>
           )}
         </label>
-        {/* Honeypot: off-screen, not display:none (some bots skip hidden fields); humans never see it. */}
+        {/* Honeypot: off-screen, not display:none (some bots skip hidden fields); humans never see it.
+            `inert` (not aria-hidden) because the wrapper holds a FOCUSABLE input: aria-hidden hides
+            it from the a11y tree while leaving it reachable, which is exactly the combination
+            screen-reader users hit as an unlabelled focus stop. inert removes it from both. */}
         <div
-          aria-hidden="true"
+          {...INERT}
           style={{
             position: 'absolute',
             left: '-10000px',
