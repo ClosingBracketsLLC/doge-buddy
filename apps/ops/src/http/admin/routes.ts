@@ -444,6 +444,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
               claimedOrderNumber: supportTickets.claimedOrderNumber,
               lastInboundAt: supportTickets.lastInboundAt,
               createdAt: supportTickets.createdAt,
+              source: supportTickets.source,
             })
             .from(supportTickets)
             .leftJoin(orders, eq(supportTickets.orderId, orders.id))

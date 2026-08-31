@@ -36,6 +36,7 @@ export interface TicketListRow {
   claimedOrderNumber: string | null
   lastInboundAt: Date | null
   createdAt: Date
+  source: string
 }
 
 /** The linked order's summary shown on the thread view — a small projection of `orders`, not the
@@ -85,7 +86,7 @@ function renderTicketRow(row: TicketListRow): RawHtml {
     <td>${row.category ?? '—'}</td>
     <td>${row.sentiment ?? '—'}</td>
     <td>${row.customerEmail ?? '—'}</td>
-    <td><a href="/admin/tickets/${row.id}">${row.subject ?? '(no subject)'}</a></td>
+    <td>${row.source === 'form' ? html`<span class="badge">via contact form</span> ` : html``}<a href="/admin/tickets/${row.id}">${row.subject ?? '(no subject)'}</a></td>
     <td>${renderOrderCell(row)}</td>
     <td>${(row.lastInboundAt ?? row.createdAt).toISOString()}</td>
   </tr>`
@@ -259,6 +260,7 @@ export function renderTicketDetail(
     <p>Status: ${t.status}</p>
     <p>Subject: ${t.subject ?? '(no subject)'}</p>
     <p>Customer: ${t.customerEmail ?? '—'}</p>
+    <p>Source: ${t.source === 'form' ? 'contact form' : 'email'}</p>
     ${renderVerdictBlock(t)}
     ${renderLinkedOrderSection(linkedOrder, t.claimedOrderNumber)}
     ${renderActionForms(t)}

@@ -99,6 +99,7 @@ describe('tickets view, thread, and guarded actions', () => {
     category: string | null
     sentiment: string | null
     escalationReason: string | null
+    source: string
   }> = {}): Promise<typeof supportTickets.$inferSelect> {
     const [row] = await db
       .insert(supportTickets)
@@ -119,6 +120,7 @@ describe('tickets view, thread, and guarded actions', () => {
         category: overrides.category ?? null,
         sentiment: overrides.sentiment ?? null,
         escalationReason: overrides.escalationReason ?? null,
+        ...(overrides.source ? { source: overrides.source } : {}),
       })
       .returning()
     createdTicketIds.push(row!.id)
@@ -594,6 +596,29 @@ describe('tickets view, thread, and guarded actions', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toContain('No proposals.')
     expect(res.body).toContain('No agent runs.')
+
+    await app.close()
+  })
+
+  it('18. list shows a "via contact form" badge only for form-sourced tickets, and detail shows the Source line', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const formTicket = await seedTicket({ source: 'form' })
+    const emailTicket = await seedTicket()
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const listRes = await app.inject({ method: 'GET', url: '/admin/tickets', headers: { cookie } })
+    expect(listRes.statusCode).toBe(200)
+    const badgeCount = listRes.body.split('via contact form').length - 1
+    expect(badgeCount).toBe(1)
+
+    const formDetailRes = await app.inject({ method: 'GET', url: `/admin/tickets/${formTicket.id}`, headers: { cookie } })
+    expect(formDetailRes.statusCode).toBe(200)
+    expect(formDetailRes.body).toContain('<p>Source: contact form</p>')
+
+    const emailDetailRes = await app.inject({ method: 'GET', url: `/admin/tickets/${emailTicket.id}`, headers: { cookie } })
+    expect(emailDetailRes.statusCode).toBe(200)
+    expect(emailDetailRes.body).toContain('<p>Source: email</p>')
 
     await app.close()
   })
