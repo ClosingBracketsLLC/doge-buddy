@@ -1,17 +1,67 @@
 {
   "request": {
     "method": "GET",
-    "path": "/gmail/v1/users/me/threads/thread-100",
-    "query": { "format": "minimal" }
+    "path": "/gmail/v1/users/me/threads/1a050c80ad6eb6d0",
+    "query": {
+      "format": "minimal"
+    }
   },
   "response": {
     "status": 200,
     "body": {
-      "id": "thread-100",
-      "historyId": "3050",
+      "id": "1a050c80ad6eb6d0",
+      "historyId": "5290",
       "messages": [
-        { "id": "msg-201", "threadId": "thread-100", "labelIds": ["INBOX"] },
-        { "id": "msg-205", "threadId": "thread-100", "labelIds": ["SENT"] }
+        {
+          "id": "1a050c80ad6eb6d0",
+          "threadId": "1a050c80ad6eb6d0",
+          "labelIds": [
+            "UNREAD",
+            "Label_2",
+            "CATEGORY_PERSONAL",
+            "SPAM"
+          ],
+          "snippet": "Hey, before I order — roughly how long does delivery usually take within the US, and will I get a tracking number once it ships? Thanks, Rob",
+          "sizeEstimate": 11711,
+          "historyId": "4771",
+          "internalDate": "1788061680000"
+        },
+        {
+          "id": "1a050cb8f3d313ef",
+          "threadId": "1a050c80ad6eb6d0",
+          "labelIds": [
+            "SENT"
+          ],
+          "snippet": "Hi Rob, Thanks for reaching out before ordering! Here&#39;s how shipping works: All orders ship from US warehouses. Standard delivery arrives in 3-7 business days after your order is processed (",
+          "sizeEstimate": 1530,
+          "historyId": "4964",
+          "internalDate": "1788061912000"
+        },
+        {
+          "id": "1a0546cd45070d07",
+          "threadId": "1a050c80ad6eb6d0",
+          "labelIds": [
+            "Label_2",
+            "IMPORTANT",
+            "CATEGORY_PERSONAL",
+            "INBOX"
+          ],
+          "snippet": "Hi — just checking in on this. Can I send it back for a refund? From: support@dogebuddy.com &lt;support@dogebuddy.com&gt; Sent: Sunday, August 30, 2026 3:51 AM To: collinscontracting509@outlook.com",
+          "sizeEstimate": 14265,
+          "historyId": "5290",
+          "internalDate": "1788122811000"
+        },
+        {
+          "id": "1a0546e8974d4a47",
+          "threadId": "1a050c80ad6eb6d0",
+          "labelIds": [
+            "SENT"
+          ],
+          "snippet": "Hi Rob, Happy to help, but I don&#39;t see an order on file under this email yet — could you send along your order number so we can look into it? A couple of quick notes depending on the situation: If",
+          "sizeEstimate": 1835,
+          "historyId": "5264",
+          "internalDate": "1788122925000"
+        }
       ]
     }
   }

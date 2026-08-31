@@ -1,35 +1,86 @@
 {
   "request": {
     "method": "GET",
-    "path": "/gmail/v1/users/me/messages/msg-single-1",
-    "query": { "format": "full" }
+    "path": "/gmail/v1/users/me/messages/1a0546e8974d4a47",
+    "query": {
+      "format": "full"
+    }
   },
   "response": {
     "status": 200,
     "body": {
-      "id": "msg-single-1",
-      "threadId": "thread-300",
-      "labelIds": ["INBOX", "UNREAD"],
-      "snippet": "Quick question about my refund status. - Bob",
-      "internalDate": "1756150000000",
-      "sizeEstimate": 900,
-      "historyId": "3060",
+      "id": "1a0546e8974d4a47",
+      "threadId": "1a050c80ad6eb6d0",
+      "labelIds": [
+        "SENT"
+      ],
+      "snippet": "Hi Rob, Happy to help, but I don&#39;t see an order on file under this email yet — could you send along your order number so we can look into it? A couple of quick notes depending on the situation: If",
       "payload": {
+        "partId": "",
         "mimeType": "text/plain",
         "filename": "",
         "headers": [
-          { "name": "From", "value": "Bob <bob@customer.com>" },
-          { "name": "To", "value": "support@dogebuddy.com" },
-          { "name": "Subject", "value": "Refund status?" },
-          { "name": "Message-ID", "value": "<bob-msg-1@mail.gmail.com>" },
-          { "name": "Date", "value": "Tue, 26 Aug 2026 09:15:00 -0400" },
-          { "name": "Content-Type", "value": "text/plain; charset=\"UTF-8\"" }
+          {
+            "name": "Received",
+            "value": "from 332537007277 named unknown by gmailapi.google.com with HTTPREST; Sun, 30 Aug 2026 16:48:45 -0400"
+          },
+          {
+            "name": "Received",
+            "value": "from 332537007277 named unknown by gmailapi.google.com with HTTPREST; Sun, 30 Aug 2026 16:48:45 -0400"
+          },
+          {
+            "name": "From",
+            "value": "support@dogebuddy.com"
+          },
+          {
+            "name": "To",
+            "value": "collinscontracting509@outlook.com"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Shipping time + tracking?"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<SA1PR05MB998463BBE5394402B91CBDDA4AEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "References",
+            "value": "<SA1PR05MB9984632C57E7B7D97E03E3B496EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com> <SA1PR05MB998463BBE5394402B91CBDDA4AEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/plain; charset=\"UTF-8\""
+          },
+          {
+            "name": "Content-Transfer-Encoding",
+            "value": "quoted-printable"
+          },
+          {
+            "name": "X-DogeBuddy-Proposal",
+            "value": "72b9da79-364c-44c8-b160-d3e8e44a8cc1"
+          },
+          {
+            "name": "Date",
+            "value": "Sun, 30 Aug 2026 16:48:45 -0400"
+          },
+          {
+            "name": "Message-Id",
+            "value": "<CAHaBOBZnV454MJQsmc_NG=GW-0TpfkGCe4XAnsJJEGveb0h0GQ@mail.gmail.com>"
+          }
         ],
         "body": {
-          "size": 44,
-          "data": "UXVpY2sgcXVlc3Rpb24gYWJvdXQgbXkgcmVmdW5kIHN0YXR1cy4gLSBCb2I"
+          "size": 874,
+          "data": "SGkgUm9iLAoKSGFwcHkgdG8gaGVscCwgYnV0IEkgZG9uJ3Qgc2VlIGFuIG9yZGVyIG9uIGZpbGUgdW5kZXIgdGhpcyBlbWFpbCB5ZXQg4oCUIGNvdWxkIHlvdSBzZW5kIGFsb25nIHlvdXIgb3JkZXIgbnVtYmVyIHNvIHdlIGNhbiBsb29rIGludG8gaXQ_CgpBIGNvdXBsZSBvZiBxdWljayBub3RlcyBkZXBlbmRpbmcgb24gdGhlIHNpdHVhdGlvbjoKCklmIHlvdSBzaW1wbHkgY2hhbmdlZCB5b3VyIG1pbmQgb3IgaXQgZGlkbid0IHdvcmsgb3V0IGZvciB5b3VyIGRvZywgb3VyIHBvbGljeSBpcyB0aGF0IHRob3NlIHNhbGVzIGFyZSBmaW5hbCBhbmQgd2UncmUgbm90IGFibGUgdG8gb2ZmZXIgYSByZWZ1bmQgb3IgcmV0dXJuIGluIHRoYXQgY2FzZSDigJQgYnV0IHdlJ2QgYmUgZ2xhZCB0byBzZW5kIHlvdSBhIDEwJSBvZmYgY291cG9uIChjb2RlIFNPUlJZMTApIHRvd2FyZCBhIGZ1dHVyZSBvcmRlci4KCklmIGluc3RlYWQgdGhlIGl0ZW0gYXJyaXZlZCBkYW1hZ2VkLCBkZWZlY3RpdmUsIG9yIHdyb25nLCBsZXQgdXMga25vdyB3aXRoaW4gMTQgZGF5cyBvZiBkZWxpdmVyeSBhbG9uZyB3aXRoIGEgcGhvdG8gb2Ygd2hhdCB5b3UgcmVjZWl2ZWQsIGFuZCB3ZSdsbCBlbWFpbCB5b3UgcmV0dXJuIGluc3RydWN0aW9ucy4gUmV0dXJuIHNoaXBwaW5nIHdvdWxkIGJlIGF0IHlvdXIgY29zdCwgYW5kIG9uY2UgaXQgcmVhY2hlcyB1cyBhbmQgcGFzc2VzIGluc3BlY3Rpb24sIHdlJ2xsIHNoaXAgYSByZXBsYWNlbWVudCBhdCBubyBjaGFyZ2UuCgpKdXN0IGxldCB1cyBrbm93IHlvdXIgb3JkZXIgbnVtYmVyIGFuZCB3aGljaCBzaXR1YXRpb24gYXBwbGllcywgYW5kIHdlJ2xsIHRha2UgaXQgZnJvbSB0aGVyZS4KCkRvZ2UgQnVkZHkgU3VwcG9ydA=="
         }
-      }
+      },
+      "sizeEstimate": 1835,
+      "historyId": "5264",
+      "internalDate": "1788122925000"
     }
   }
 }

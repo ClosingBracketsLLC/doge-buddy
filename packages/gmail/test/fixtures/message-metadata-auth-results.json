@@ -1,7 +1,7 @@
 {
   "request": {
     "method": "GET",
-    "path": "/gmail/v1/users/me/messages/msg-auth-1",
+    "path": "/gmail/v1/users/me/messages/1a055078d2151dab",
     "query": {
       "format": "metadata",
       "metadataHeaders": [
@@ -21,33 +21,55 @@
   "response": {
     "status": 200,
     "body": {
-      "id": "msg-auth-1",
-      "threadId": "thread-auth-1",
-      "labelIds": ["INBOX"],
-      "snippet": "Hi DogeBuddy team...",
-      "internalDate": "1756148400000",
-      "sizeEstimate": 9000,
-      "historyId": "3060",
+      "id": "1a055078d2151dab",
+      "threadId": "1a055078d2151dab",
+      "labelIds": [
+        "Label_2",
+        "IMPORTANT",
+        "CATEGORY_PERSONAL",
+        "INBOX"
+      ],
+      "snippet": "Update — this is about order #1001. The snuff pad arrived with the seams split open, photo attached. I&#39;d like a refund. From: Robert Collins Sent: Sunday, August 30, 2026 3:16 AM To: support@",
       "payload": {
-        "mimeType": "multipart/mixed",
-        "filename": "",
+        "mimeType": "multipart/alternative",
         "headers": [
           {
-            "name": "Authentication-Results",
-            "value": "mx.google.com; spf=pass (google.com: domain of jane@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=jane@example.com; dkim=pass header.i=@example.com; dmarc=pass"
+            "name": "Delivered-To",
+            "value": "support@dogebuddy.com"
           },
-          { "name": "Delivered-To", "value": "support@dogebuddy.com" },
           {
             "name": "Authentication-Results",
-            "value": "mail.example.com; spf=neutral"
+            "value": "mx.google.com;       dkim=pass header.i=@outlook.com header.s=selector1 header.b=cTyH+z9f;       arc=pass (i=1);       spf=pass (google.com: domain of collinscontracting509@outlook.com designates 2a01:111:f403:d002:: as permitted sender) smtp.mailfrom=CollinsContracting509@outlook.com;       dmarc=pass (p=NONE sp=QUARANTINE dis=NONE) header.from=outlook.com"
           },
-          { "name": "From", "value": "\"Jane D\" <Jane@Example.com>" },
-          { "name": "To", "value": "DogeBuddy Support <support@dogebuddy.com>" },
-          { "name": "Subject", "value": "Order #4521" },
-          { "name": "Message-ID", "value": "<CAJ+auth1@mail.gmail.com>" }
-        ],
-        "body": { "size": 0 }
-      }
+          {
+            "name": "From",
+            "value": "Robert Collins <CollinsContracting509@outlook.com>"
+          },
+          {
+            "name": "To",
+            "value": "\"support@dogebuddy.com\" <support@dogebuddy.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Return request — my dog isn't interested"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<SA1PR05MB99846352AA70BDB8D69B7A819BEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "References",
+            "value": "<SA1PR05MB998463F33A0C15E728033E86D1EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<SA1PR05MB998463F33A0C15E728033E86D1EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          }
+        ]
+      },
+      "sizeEstimate": 13361,
+      "historyId": "5504",
+      "internalDate": "1788132951000"
     }
   }
 }

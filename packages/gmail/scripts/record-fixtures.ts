@@ -12,31 +12,45 @@ import { createGmailClient } from '../src/client.ts'
  * (packages/gmail/test/client.test.ts) already reads — the output is a drop-in replacement, not a
  * new format.
  *
- * Usage (from repo root):
- *   GMAIL_CONTRACT=1 env $(grep -v '^#' apps/ops/.env | xargs) \
+ * Usage (from repo root; `set -a` sourcing is deliberate — the PEM in GMAIL_SERVICE_ACCOUNT_KEY is
+ * double-quoted with literal `\n` sequences, and `env $(grep … | xargs)` would strip the quotes AND
+ * turn every `\n` into `n`, corrupting the key):
+ *   set -a && . apps/ops/.env && set +a && GMAIL_CONTRACT=1 \
  *     pnpm --filter @doge-buddy/gmail exec tsx scripts/record-fixtures.ts
  *
  * Required env vars (read directly from process.env — apps/ops's loadDotEnv helper isn't
- * reachable from this package, hence the `env $(...)` invocation above pulling values out of
- * apps/ops/.env): GMAIL_SERVICE_ACCOUNT_EMAIL, GMAIL_SERVICE_ACCOUNT_KEY, GMAIL_IMPERSONATE,
- * SUPPORT_ADDRESS. GMAIL_SERVICE_ACCOUNT_KEY's literal `\n` sequences are unescaped the same way
- * apps/ops/src/config.ts does for the live server.
+ * reachable from this package, hence sourcing apps/ops/.env above): GMAIL_SERVICE_ACCOUNT_EMAIL,
+ * GMAIL_SERVICE_ACCOUNT_KEY, GMAIL_IMPERSONATE, SUPPORT_ADDRESS. GMAIL_SERVICE_ACCOUNT_KEY's
+ * literal `\n` sequences are unescaped the same way apps/ops/src/config.ts does for the live
+ * server.
  *
- * Before running: seed at least two owner test messages in the support inbox — one plain
- * single-part message and one multipart message (e.g. with an HTML alternative or an attachment)
- * — so the nested-multipart / single-part fixture pair below has real examples to record.
+ * Before running: the support inbox needs at least one real received message (any modern client
+ * sends multipart/alternative, which is the nested-multipart case, and Gmail stamps every inbound
+ * with Authentication-Results). The single-part text/plain case is taken from the inbox when one
+ * exists, otherwise from `in:sent` — OUR OWN replies are plain single-part text (buildReplyRaw),
+ * and no mainstream mail client produces that shape any more, so a sent copy is the realistic
+ * source (learned on the first live run, 2026-08-30: 17 inbox messages, zero single-part text).
  *
  * With GMAIL_CONTRACT unset (or not '1'), this prints usage and exits 0 without touching the
  * network or the filesystem — safe to invoke by accident, and this is the only path exercised in
  * environments without credentials (including this one).
  *
- * Recorded endpoints: getProfile, listHistory (1 page — no pageToken follow-up), listMessages,
- * getThread, getMessage (format=full for one nested-multipart + one single-part owner-seeded test
- * message; format=metadata for the nested one AND for a message carrying an Authentication-Results
- * header — the money gate's input, FR9), listLabels. See `RECORDED_FIXTURE_NAMES` for the exact
- * file list. Everything else in the fixtures directory (404/error fixtures, label-create,
- * send-reply, message-metadata-proposal-marker) is hand-authored and left untouched — the
- * X-DogeBuddy-Proposal marker only rides OUR OWN sends, which the recorder never performs.
+ * Recorded endpoints: getProfile; listHistory twice — once from the profile's CURRENT historyId
+ * (always the empty page: real Gmail omits the `history` key entirely, `history-empty.json`) and
+ * once from the newest message historyId that yields at least one `messagesAdded` record within a
+ * single page (`history-page1.json`; no pageToken follow-up — pagination stays on the hand-authored
+ * `history-paged-{1,2}.json` pair because a real mailbox can't be made to paginate on demand);
+ * listMessages; getThread (preferring a message whose threadId differs from its id, so the recorded
+ * thread has more than one message); getMessage (format=full for one nested-multipart inbound, one
+ * single-part text message, and — opportunistically, only when one is in the inbox — one
+ * attachment-only message with no text leaf at all, e.g. Google's daily DMARC zip report, which is
+ * real traffic the poll ingests; format=metadata for the single-part message AND for a message
+ * carrying an Authentication-Results header — the money gate's input, FR9); listLabels. See
+ * `RECORDED_FIXTURE_NAMES` for the exact file list. Everything else in the fixtures directory
+ * (404/error fixtures, label-create, send-reply, history-paged-*, message-metadata-proposal-marker)
+ * is hand-authored and left untouched — the X-DogeBuddy-Proposal marker only rides OUR OWN sends,
+ * which the recorder never performs (a sent copy chosen for the single-part case does carry a real
+ * marker, which is a bonus round-trip check, not the marker fixture's replacement).
  *
  * NEVER records:
  *   - sendReply — no unsolicited sends against a real mailbox.
@@ -72,11 +86,15 @@ interface CapturedFixture {
  */
 export const RECORDED_FIXTURE_NAMES = [
   'profile.json',
+  'history-empty.json',
   'history-page1.json',
   'messages-list.json',
   'thread-get.json',
   'message-full-nested.json',
   'message-full-singlepart.json',
+  // Written only when the inbox holds an attachment-only message (no text leaf); otherwise the
+  // previous recording is left in place.
+  'message-full-attachment-only.json',
   'message-metadata.json',
   'message-metadata-auth-results.json',
   'labels-list.json',
@@ -190,6 +208,12 @@ const FIXTURES_DIR = new URL('../test/fixtures/', import.meta.url)
 
 async function writeFixtures(captured: Map<string, CapturedFixture>): Promise<void> {
   const files: FixtureFile[] = [...captured.entries()].map(([name, fixture]) => ({ name, fixture }))
+  // Scratch captures are keyed `candidate:<id>` / `history:<id>` and must all have been consumed
+  // by now — a leftover would otherwise resolve as a `candidate:` URL scheme in `new URL()` below.
+  const leftovers = files.filter(({ name }) => !/^[\w.-]+\.json$/.test(name)).map(({ name }) => name)
+  if (leftovers.length > 0) {
+    throw new Error(`record-fixtures: unconsumed scratch capture(s), nothing written: ${leftovers.join(', ')}`)
+  }
   assertScrubbed(files)
 
   for (const { name, fixture } of files) {
@@ -215,7 +239,10 @@ async function recordFixtures(): Promise<void> {
   target.current = 'profile.json'
   const profile = await client.getProfile()
 
-  target.current = 'history-page1.json'
+  // From the CURRENT historyId there is never anything newer: real Gmail answers with just
+  // `{ historyId }` and NO `history` key at all — the shape the client's `raw.history ?? []` exists
+  // for, and the one every quiet poll cycle sees.
+  target.current = 'history-empty.json'
   await client.listHistory({ startHistoryId: profile.historyId })
 
   target.current = 'messages-list.json'
@@ -224,22 +251,51 @@ async function recordFixtures(): Promise<void> {
   const firstMessage = messages.ids[0]
   if (!firstMessage) {
     throw new Error(
-      'record-fixtures: listMessages returned no messages — seed at least 2 owner test messages ' +
-        '(one plain-text, one multipart) in the support inbox before recording.',
+      'record-fixtures: listMessages returned no messages — the support inbox needs at least one ' +
+        'real received message before recording.',
     )
   }
 
+  // A message whose threadId differs from its own id is a reply inside a thread, so the recorded
+  // thread carries more than one message (typically the customer's mail plus our SENT reply).
+  const threadSample = messages.ids.find((m) => m.threadId !== m.id) ?? firstMessage
   target.current = 'thread-get.json'
-  await client.getThread(firstMessage.threadId)
+  await client.getThread(threadSample.threadId)
 
-  // Classify owner-seeded messages by real payload shape (payload.parts present -> nested
-  // multipart) rather than guessing from listMessages alone, which carries no structural info. The
-  // same full-format scan ALSO finds a message that carries an `Authentication-Results` header
+  // Classify messages by real payload shape rather than guessing from listMessages alone, which
+  // carries no structural info:
+  //   nested      — payload.parts present (multipart/*; every modern client's default)
+  //   singlepart  — no parts, a text/* mimeType and inline body.data
+  //   attachment-only — no parts and no inline data (e.g. an application/zip DMARC report)
+  // The same full-format scan ALSO finds a message that carries an `Authentication-Results` header
   // (FR9) — a real received email naturally has Google's A-R stamp — so its metadata fetch below
-  // exercises the money gate's own normalization against real Gmail.
+  // exercises the money gate's own normalization against real Gmail. Each scanned message's own
+  // `historyId` is kept (newest first) as a candidate start point for the history recording.
   let nestedId: string | null = null
   let singlepartId: string | null = null
+  let attachmentOnlyId: string | null = null
   let authResultsId: string | null = null
+  const historyStarts: string[] = []
+
+  type RawFullBody = {
+    historyId?: string
+    payload?: {
+      mimeType?: string
+      body?: { data?: string }
+      parts?: unknown[]
+      headers?: { name?: string; value?: string }[]
+    }
+  }
+  const classify = (body: RawFullBody): 'nested' | 'singlepart' | 'attachment-only' => {
+    const payload = body.payload
+    if (Array.isArray(payload?.parts) && payload.parts.length > 0) return 'nested'
+    const hasInlineText =
+      typeof payload?.mimeType === 'string' &&
+      payload.mimeType.toLowerCase().startsWith('text/') &&
+      typeof payload.body?.data === 'string' &&
+      payload.body.data.length > 0
+    return hasInlineText ? 'singlepart' : 'attachment-only'
+  }
 
   for (const { id } of messages.ids) {
     if (nestedId && singlepartId && authResultsId) break
@@ -251,17 +307,19 @@ async function recordFixtures(): Promise<void> {
     captured.delete(scratchKey)
     if (!raw) continue
 
-    const body = raw.response.body as {
-      payload?: { parts?: unknown[]; headers?: { name?: string; value?: string }[] }
-    }
-    const isNested = Array.isArray(body.payload?.parts) && (body.payload?.parts?.length ?? 0) > 0
+    const body = raw.response.body as RawFullBody
+    if (typeof body.historyId === 'string') historyStarts.push(body.historyId)
 
-    if (isNested && !nestedId) {
+    const shape = classify(body)
+    if (shape === 'nested' && !nestedId) {
       nestedId = id
       captured.set('message-full-nested.json', raw)
-    } else if (!isNested && !singlepartId) {
+    } else if (shape === 'singlepart' && !singlepartId) {
       singlepartId = id
       captured.set('message-full-singlepart.json', raw)
+    } else if (shape === 'attachment-only' && !attachmentOnlyId) {
+      attachmentOnlyId = id
+      captured.set('message-full-attachment-only.json', raw)
     }
 
     const hasAuthResults = (body.payload?.headers ?? []).some(
@@ -270,11 +328,32 @@ async function recordFixtures(): Promise<void> {
     if (hasAuthResults && !authResultsId) authResultsId = id
   }
 
+  if (!singlepartId) {
+    // Our own replies are plain single-part text/plain (buildReplyRaw) — the realistic source for
+    // this shape, since no mainstream client sends it any more. Still a read: nothing is sent.
+    target.current = null // not a fixture — don't capture this listing under the last scan key
+    const sent = await client.listMessages({ q: 'in:sent' })
+    for (const { id } of sent.ids) {
+      const scratchKey = `candidate:${id}`
+      target.current = scratchKey
+      await client.getMessage(id, { format: 'full' })
+      const raw = captured.get(scratchKey)
+      captured.delete(scratchKey)
+      if (!raw) continue
+      if (classify(raw.response.body as RawFullBody) === 'singlepart') {
+        singlepartId = id
+        captured.set('message-full-singlepart.json', raw)
+        console.log(`record-fixtures: no single-part text message in the inbox — using sent copy ${id}`)
+        break
+      }
+    }
+  }
+
   if (!nestedId || !singlepartId) {
     throw new Error(
-      `record-fixtures: could not find both a nested-multipart and a single-part test message among ` +
-        `${messages.ids.length} support-inbox message(s) (found nested=${nestedId !== null} singlepart=${singlepartId !== null}). ` +
-        `Seed one of each (see this script's header comment) and retry.`,
+      `record-fixtures: could not find both a nested-multipart inbox message and a single-part text message ` +
+        `(inbox or sent) among ${messages.ids.length} support-inbox message(s) ` +
+        `(found nested=${nestedId !== null} singlepart=${singlepartId !== null}). See this script's header comment.`,
     )
   }
   if (!authResultsId) {
@@ -284,9 +363,43 @@ async function recordFixtures(): Promise<void> {
         'message-metadata-auth-results.json exercises authenticationResults normalization live.',
     )
   }
+  if (!attachmentOnlyId) {
+    console.log('record-fixtures: no attachment-only inbox message found — message-full-attachment-only.json left as is')
+  }
 
+  // history-page1: walk the scanned messages' historyIds newest-first and keep the first page that
+  // carries at least one `messagesAdded` record without spilling into a second page — the smallest
+  // real page that still exercises the ingest's record mapping. A message's historyId marks its
+  // LAST change (our poll's label add), so the newest one usually yields an empty page and the
+  // next-older one the arrival record of the newest message. Falls back to the last page tried.
+  let historyRecorded = false
+  for (const startHistoryId of historyStarts) {
+    const scratchKey = `history:${startHistoryId}`
+    target.current = scratchKey
+    const page = await client.listHistory({ startHistoryId })
+    const raw = captured.get(scratchKey)
+    captured.delete(scratchKey)
+    if (!raw) continue
+    const usable = page.records.some((r) => r.messagesAdded.length > 0) && page.nextPageToken === undefined
+    if (usable || startHistoryId === historyStarts[historyStarts.length - 1]) {
+      captured.set('history-page1.json', raw)
+      historyRecorded = true
+      console.log(
+        `record-fixtures: history-page1 from startHistoryId=${startHistoryId} (${page.records.length} record(s)` +
+          `${usable ? '' : ', fallback — no single page with messagesAdded found'})`,
+      )
+      break
+    }
+  }
+  if (!historyRecorded) {
+    console.log('record-fixtures: no scanned message exposed a historyId — history-page1.json left as is')
+  }
+
+  // metadata for the single-part message: when it is a sent copy this is also the one recorded
+  // message with NO Authentication-Results (Gmail stamps inbound only) and a REAL
+  // X-DogeBuddy-Proposal marker on the wire.
   target.current = 'message-metadata.json'
-  await client.getMessage(nestedId, { format: 'metadata' })
+  await client.getMessage(singlepartId, { format: 'metadata' })
 
   // FR9: metadata for a message that carries Authentication-Results — the topmost A-R header is the
   // refund sender-auth gate's input, and `getMessage(format:'metadata')` requests it (it is in
@@ -309,12 +422,12 @@ function printUsage(): void {
       'record-fixtures: GMAIL_CONTRACT is unset (or not "1") — nothing was recorded.',
       '',
       'Usage (from repo root):',
-      "  GMAIL_CONTRACT=1 env $(grep -v '^#' apps/ops/.env | xargs) \\",
+      '  set -a && . apps/ops/.env && set +a && GMAIL_CONTRACT=1 \\',
       '    pnpm --filter @doge-buddy/gmail exec tsx scripts/record-fixtures.ts',
       '',
       'Requires GMAIL_SERVICE_ACCOUNT_EMAIL, GMAIL_SERVICE_ACCOUNT_KEY, GMAIL_IMPERSONATE, SUPPORT_ADDRESS',
-      'in the environment, and at least 2 owner-seeded test messages (one plain-text, one multipart)',
-      'in the support inbox.',
+      'in the environment, and at least one real received message in the support inbox (the',
+      'single-part text case falls back to a sent copy of our own reply).',
     ].join('\n'),
   )
 }

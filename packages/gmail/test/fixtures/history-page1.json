@@ -2,41 +2,119 @@
   "request": {
     "method": "GET",
     "path": "/gmail/v1/users/me/history",
-    "query": { "startHistoryId": "3000" }
+    "query": {
+      "startHistoryId": "5290"
+    }
   },
   "response": {
     "status": 200,
     "body": {
       "history": [
         {
-          "id": "3025",
-          "messages": [{ "id": "msg-201", "threadId": "thread-100" }],
+          "id": "5352",
+          "messages": [
+            {
+              "id": "1a055078d2151dab",
+              "threadId": "1a055078d2151dab"
+            }
+          ],
           "messagesAdded": [
             {
               "message": {
-                "id": "msg-201",
-                "threadId": "thread-100",
-                "labelIds": ["INBOX", "UNREAD"]
+                "id": "1a055078d2151dab",
+                "threadId": "1a055078d2151dab",
+                "labelIds": [
+                  "UNREAD",
+                  "IMPORTANT",
+                  "CATEGORY_PERSONAL",
+                  "INBOX"
+                ]
               }
             }
           ]
         },
         {
-          "id": "3031",
-          "messages": [{ "id": "msg-202", "threadId": "thread-101" }],
-          "messagesAdded": [
+          "id": "5478",
+          "messages": [
+            {
+              "id": "1a055078d2151dab",
+              "threadId": "1a055078d2151dab"
+            }
+          ]
+        },
+        {
+          "id": "5493",
+          "messages": [
+            {
+              "id": "1a055078d2151dab",
+              "threadId": "1a055078d2151dab"
+            }
+          ],
+          "labelsAdded": [
             {
               "message": {
-                "id": "msg-202",
-                "threadId": "thread-101",
-                "labelIds": ["INBOX", "UNREAD"]
-              }
+                "id": "1a055078d2151dab",
+                "threadId": "1a055078d2151dab",
+                "labelIds": [
+                  "UNREAD",
+                  "Label_2",
+                  "IMPORTANT",
+                  "CATEGORY_PERSONAL",
+                  "INBOX"
+                ]
+              },
+              "labelIds": [
+                "Label_2"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "5500",
+          "messages": [
+            {
+              "id": "1a055078d2151dab",
+              "threadId": "1a055078d2151dab"
+            }
+          ]
+        },
+        {
+          "id": "5501",
+          "messages": [
+            {
+              "id": "1a055078d2151dab",
+              "threadId": "1a055078d2151dab"
+            }
+          ],
+          "labelsRemoved": [
+            {
+              "message": {
+                "id": "1a055078d2151dab",
+                "threadId": "1a055078d2151dab",
+                "labelIds": [
+                  "Label_2",
+                  "IMPORTANT",
+                  "CATEGORY_PERSONAL",
+                  "INBOX"
+                ]
+              },
+              "labelIds": [
+                "UNREAD"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "5502",
+          "messages": [
+            {
+              "id": "1a055078d2151dab",
+              "threadId": "1a055078d2151dab"
             }
           ]
         }
       ],
-      "historyId": "3031",
-      "nextPageToken": "page-2-token"
+      "historyId": "5563"
     }
   }
 }

@@ -75,6 +75,16 @@ describe('recorded fixture list (FR9)', () => {
     expect(RECORDED_FIXTURE_NAMES).not.toContain('message-metadata-proposal-marker.json')
   })
 
+  it('records the two real shapes the first live run exposed: the empty history page and an attachment-only message', () => {
+    expect(RECORDED_FIXTURE_NAMES).toContain('history-empty.json')
+    expect(RECORDED_FIXTURE_NAMES).toContain('message-full-attachment-only.json')
+  })
+
+  it('leaves the hand-authored pagination pair alone (a real mailbox cannot be made to paginate on demand)', () => {
+    expect(RECORDED_FIXTURE_NAMES).not.toContain('history-paged-1.json')
+    expect(RECORDED_FIXTURE_NAMES).not.toContain('history-paged-2.json')
+  })
+
   it('the recorded-name list still passes the scrub contract shape (no forbidden material in names)', () => {
     expect(() =>
       assertScrubbed(RECORDED_FIXTURE_NAMES.map((name) => ({ name, fixture: { response: { status: 200, body: {} } } }))),

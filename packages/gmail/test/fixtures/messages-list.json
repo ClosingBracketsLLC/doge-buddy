@@ -2,16 +2,84 @@
   "request": {
     "method": "GET",
     "path": "/gmail/v1/users/me/messages",
-    "query": { "q": "in:inbox" }
+    "query": {
+      "q": "in:inbox"
+    }
   },
   "response": {
     "status": 200,
     "body": {
       "messages": [
-        { "id": "msg-301", "threadId": "thread-200" },
-        { "id": "msg-302", "threadId": "thread-201" }
+        {
+          "id": "1a055078d2151dab",
+          "threadId": "1a055078d2151dab"
+        },
+        {
+          "id": "1a0546cd45070d07",
+          "threadId": "1a050c80ad6eb6d0"
+        },
+        {
+          "id": "1a05219fe1efd634",
+          "threadId": "1a05219fe1efd634"
+        },
+        {
+          "id": "1a04f15d1d0be6de",
+          "threadId": "1a04ecafbb582e94"
+        },
+        {
+          "id": "1a04efacabba91f3",
+          "threadId": "1a04efacabba91f3"
+        },
+        {
+          "id": "1a04ecafbb582e94",
+          "threadId": "1a04ecafbb582e94"
+        },
+        {
+          "id": "1a04ec9a3dbcc185",
+          "threadId": "1a04ec9a3dbcc185"
+        },
+        {
+          "id": "1a042b0cef8e6edc",
+          "threadId": "1a042b0cef8e6edc"
+        },
+        {
+          "id": "1a0418a440591df2",
+          "threadId": "1a0417ac4d66cea2"
+        },
+        {
+          "id": "1a0418921def3a4d",
+          "threadId": "1a0417ac4d66cea2"
+        },
+        {
+          "id": "1a0417ac4d66cea2",
+          "threadId": "1a0417ac4d66cea2"
+        },
+        {
+          "id": "1a04179fe39d800a",
+          "threadId": "1a04179fe39d800a"
+        },
+        {
+          "id": "1a04177f9e2479c5",
+          "threadId": "1a04177f9e2479c5"
+        },
+        {
+          "id": "1a04176076a1989f",
+          "threadId": "1a04176076a1989f"
+        },
+        {
+          "id": "1a041757d7f4d36e",
+          "threadId": "1a041757d7f4d36e"
+        },
+        {
+          "id": "1a04172c54ba84e6",
+          "threadId": "1a04172bce21a4dd"
+        },
+        {
+          "id": "1a03b642a0ecc638",
+          "threadId": "1a03b642a0ecc638"
+        }
       ],
-      "resultSizeEstimate": 2
+      "resultSizeEstimate": 17
     }
   }
 }

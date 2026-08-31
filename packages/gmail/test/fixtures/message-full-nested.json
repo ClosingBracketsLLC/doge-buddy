@@ -1,94 +1,272 @@
 {
   "request": {
     "method": "GET",
-    "path": "/gmail/v1/users/me/messages/msg-nested-1",
-    "query": { "format": "full" }
+    "path": "/gmail/v1/users/me/messages/1a055078d2151dab",
+    "query": {
+      "format": "full"
+    }
   },
   "response": {
     "status": 200,
     "body": {
-      "id": "msg-nested-1",
-      "threadId": "thread-100",
-      "labelIds": ["INBOX", "UNREAD", "CATEGORY_PERSONAL"],
-      "snippet": "Hi DogeBuddy team, My order #4521 hasn't shipped yet...",
-      "internalDate": "1756148400000",
-      "sizeEstimate": 15000,
-      "historyId": "3050",
+      "id": "1a055078d2151dab",
+      "threadId": "1a055078d2151dab",
+      "labelIds": [
+        "Label_2",
+        "IMPORTANT",
+        "CATEGORY_PERSONAL",
+        "INBOX"
+      ],
+      "snippet": "Update — this is about order #1001. The snuff pad arrived with the seams split open, photo attached. I&#39;d like a refund. From: Robert Collins Sent: Sunday, August 30, 2026 3:16 AM To: support@",
       "payload": {
-        "mimeType": "multipart/mixed",
+        "partId": "",
+        "mimeType": "multipart/alternative",
         "filename": "",
         "headers": [
           {
-            "name": "Authentication-Results",
-            "value": "mx.google.com; spf=pass (google.com: domain of jane@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=jane@example.com; dkim=pass header.i=@example.com; dmarc=pass"
+            "name": "Delivered-To",
+            "value": "support@dogebuddy.com"
           },
-          { "name": "Delivered-To", "value": "jane@example.com" },
-          { "name": "Delivered-To", "value": "support@dogebuddy.com" },
-          { "name": "Received", "value": "by 2002:a17:90a:1234::1 with SMTP id abc" },
-          { "name": "Authentication-Results", "value": "mail.example.com; spf=neutral" },
-          { "name": "From", "value": "\"Jane D\" <Jane@Example.com>" },
-          { "name": "To", "value": "DogeBuddy Support <support@dogebuddy.com>" },
-          { "name": "Cc", "value": "manager@example.com, \"Ops Team\" <ops@example.com>" },
-          { "name": "Subject", "value": "Re: Order #4521 hasn't shipped" },
-          { "name": "Message-ID", "value": "<CAJ+abc123@mail.gmail.com>" },
-          { "name": "In-Reply-To", "value": "<original-msg-999@mail.gmail.com>" },
-          { "name": "References", "value": "<original-msg-999@mail.gmail.com>" },
-          { "name": "Date", "value": "Mon, 25 Aug 2026 14:00:00 -0400" },
-          { "name": "MIME-Version", "value": "1.0" },
-          { "name": "Content-Type", "value": "multipart/mixed; boundary=\"mixed-boundary-1\"" }
+          {
+            "name": "Received",
+            "value": "by 2002:ac9:724f:0:b0:643:e2aa:253e with SMTP id x15csp2473120ocs;        Sun, 30 Aug 2026 16:35:53 -0700 (PDT)"
+          },
+          {
+            "name": "X-Received",
+            "value": "by 2002:a17:903:2f88:b0:2d6:fddf:a890 with SMTP id d9443c01a7336-2d91af7d82dmr34170315ad.6.1788132953338;        Sun, 30 Aug 2026 16:35:53 -0700 (PDT)"
+          },
+          {
+            "name": "ARC-Seal",
+            "value": "i=2; a=rsa-sha256; t=1788132953; cv=pass;        d=google.com; s=arc-20260327;        b=TyIH81GFuxeBAfvcADDbvqHshlkCfgHl/hsfG/Aj3YUOwZRrsM6PJIFWyOGdWwGdVv         QdHhi4K0BD4MQdca84WF0qh1NTH6SaxYdC8OyrXrr9ZzQbRacCnYJBEwj5+k6vZrwCe1         s5RPnnKq1tCaH4zErRXMgSCRfvO/RSybI2CdJffBXoWdqlfGk4MypfPy1Ya26jHBvAtN         Sk0wl1KKfna6RFyK9b2lwGXbhfobK6WReZFX5tiZDfKFW4nxF6np76OW/DygTLE4hiKw         bmk5z5jxLJINqAtdihvWaqOmwp4cTeFOMJo6inCPNyru3uyLegUV20StwS1DzdCwOBFD         Vwww=="
+          },
+          {
+            "name": "ARC-Message-Signature",
+            "value": "i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;        h=mime-version:msip_labels:content-language:accept-language         :in-reply-to:references:message-id:date:thread-index:thread-topic         :subject:to:from:dkim-signature;        bh=nfDj8YqV15KZ/kQcI0oPeavvnOZTn/Lo49kDexG2/7g=;        fh=fjF3sz20SaKmltGAoW2zYEARk9L/DgSMf1jukokkMxY=;        b=GlsRgKVWqEviIURI01vqAGjdxkhV9hJdoa8LRA/lTE0rJCfCJc5bRBIiRkw+mLdxsE         dKInpCG0Xr/uuYycEhjvv35D4Kjl8+oz6Queg4GlPp5PzuyYyy501bb+jymWKXHitNE+         oSKdK76SnZjjoG5uVvWLpHqqm2IHWrd5GIZejav4rzYoHtaFu5ng68BwsbA4QTtDogMl         N231gVRgyTAtVAuOU8a4S/NF4SICc91kSDqsDeztFGLvzLjqzmh+2nq1gfViN9oKJrh0         ZNfcxAEcrXz7BY44IXPqJT+3+MblVUA250+yhTvYpQD9s+jawWkB0jneCBE4ez9p47i+         g8Pw==;        dara=google.com"
+          },
+          {
+            "name": "ARC-Authentication-Results",
+            "value": "i=2; mx.google.com;       dkim=pass header.i=@outlook.com header.s=selector1 header.b=cTyH+z9f;       arc=pass (i=1);       spf=pass (google.com: domain of collinscontracting509@outlook.com designates 2a01:111:f403:d002:: as permitted sender) smtp.mailfrom=CollinsContracting509@outlook.com;       dmarc=pass (p=NONE sp=QUARANTINE dis=NONE) header.from=outlook.com"
+          },
+          {
+            "name": "Return-Path",
+            "value": "<CollinsContracting509@outlook.com>"
+          },
+          {
+            "name": "Received",
+            "value": "from MW6PR02CU001.outbound.protection.outlook.com (mail-westus2azolkn190120000.outbound.protection.outlook.com. [2a01:111:f403:d002::])        by mx.google.com with ESMTPS id d9443c01a7336-2d8ff7ed3fcsi67531595ad.34.2026.08.30.16.35.53        for <support@dogebuddy.com>        (version=TLS1_3 cipher=TLS_AES_256_GCM_SHA384 bits=256/256);        Sun, 30 Aug 2026 16:35:53 -0700 (PDT)"
+          },
+          {
+            "name": "Received-SPF",
+            "value": "pass (google.com: domain of collinscontracting509@outlook.com designates 2a01:111:f403:d002:: as permitted sender) client-ip=2a01:111:f403:d002::;"
+          },
+          {
+            "name": "Authentication-Results",
+            "value": "mx.google.com;       dkim=pass header.i=@outlook.com header.s=selector1 header.b=cTyH+z9f;       arc=pass (i=1);       spf=pass (google.com: domain of collinscontracting509@outlook.com designates 2a01:111:f403:d002:: as permitted sender) smtp.mailfrom=CollinsContracting509@outlook.com;       dmarc=pass (p=NONE sp=QUARANTINE dis=NONE) header.from=outlook.com"
+          },
+          {
+            "name": "ARC-Seal",
+            "value": "i=1; a=rsa-sha256; s=arcselector10001; d=microsoft.com; cv=none; b=EuI2oPNhNU6Ri2OyxbpC0AxxGvlqDImi10ekbVQizuRo8ac4e4NEm/xHI8QIb/y5r22TIRhQQjj4e544nieM20+gyHUQfLC1A3dUbwCJowYOwFtWqYxAvXkzqFk7QrjTQ888Bd4PqkVf5ZjHSJ+weRQepip86yjZ/NLG0mgdz6PQAf4+M68At0sihdTRo1H4pH9tSEIIG+pHrZMN4xkweD2qVDLkfWvFsv1SoeeXJTWL4biDXeVUb6PIX7kEgulp9dgPFjqSupIT7DL5eGQYoIiaJxBSKphKpdCon1Xk25b3cjIpl5KEUgLW02T3+JM5oDKgEmwrO41fXFLXqyzDqg=="
+          },
+          {
+            "name": "ARC-Message-Signature",
+            "value": "i=1; a=rsa-sha256; c=relaxed/relaxed; d=microsoft.com; s=arcselector10001; h=From:Date:Subject:Message-ID:MIME-Version; bh=nfDj8YqV15KZ/kQcI0oPeavvnOZTn/Lo49kDexG2/7g=; b=D9a/Tgw5Czdzf0KPsXQryWpRmS9bFTclKS0YRQvsIKOhziBS4CwSfeI5iEfCO+U+SUSxd1tpsghuFBCUgw7yJ/LaRpLLuwIaTvQVpF4PIomrKDo7cEoCoU55hCE8IeNLOLynCyygphVm/FTl99uQvhbGx0tcoXxOAbZc9924+Yy0RpItnbeD9RLio97/gCrv5ql6mqD+yCtmIVzyC2nrzt0PTQ2aj5oTa3BkVztMF83Za3icpP6GokhglTJnmEo1AbSdZyKpWiD3h2p6Y0mXScmPRpDREWYPPG4ZlDa1uAGQ2qZuxFqTJbMzBMWzDPoxCMEQ9zc6KCItnIMOg666Gg=="
+          },
+          {
+            "name": "ARC-Authentication-Results",
+            "value": "i=1; mx.microsoft.com 1; spf=none; dmarc=none; dkim=none; arc=none"
+          },
+          {
+            "name": "DKIM-Signature",
+            "value": "v=1; a=rsa-sha256; c=relaxed/relaxed; d=outlook.com; s=selector1; h=From:Date:Subject:Message-ID:Content-Type:MIME-Version:X-MS-Exchange-SenderADCheck; bh=nfDj8YqV15KZ/kQcI0oPeavvnOZTn/Lo49kDexG2/7g=; b=cTyH+z9fcRz+KGQ/5DwhF6y3kv3Y5WFXbKlPSLZyispOAwt6lrwGTgzPoEz8hUbZpJGwfCaVVUwoWbw1bCJoQTIrlmb263q71n+tXWEcv68uZomBfVoGr1ApTIuh6xbdfGAvEVrkcKA9il8tCMc1ZSI2eU4JgGNfQpMVIc3waRPrIbHEtelfC0OPnmYpK9ypCNDAc6hhqrEAQ329kkZ4+o6X7kz7aauyDtJrtoRryu1e9L8FNpxr+T7OQ450z03r1zWsrrln+pINfwW/EyVUe9+8OsknWQeZkhYwmnw6cUbFFfpri52BdoXs3bgHJA/E1qbw2BzubGKt56fSyZRQag=="
+          },
+          {
+            "name": "Received",
+            "value": "from SA1PR05MB998463.namprd05.prod.outlook.com (2603:10b6:806:4c0::8) by IA1PR05MB11227.namprd05.prod.outlook.com (2603:10b6:208:5b0::13) with Microsoft SMTP Server (version=TLS1_2, cipher=TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) id 15.21.360.13; Sun, 30 Aug 2026 23:35:51 +0000"
+          },
+          {
+            "name": "Received",
+            "value": "from SA1PR05MB998463.namprd05.prod.outlook.com ([fe80::8832:af8a:cb10:1bdd]) by SA1PR05MB998463.namprd05.prod.outlook.com ([fe80::8832:af8a:cb10:1bdd%5]) with mapi id 15.21.0360.008; Sun, 30 Aug 2026 23:35:51 +0000"
+          },
+          {
+            "name": "From",
+            "value": "Robert Collins <CollinsContracting509@outlook.com>"
+          },
+          {
+            "name": "To",
+            "value": "\"support@dogebuddy.com\" <support@dogebuddy.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Return request — my dog isn't interested"
+          },
+          {
+            "name": "Thread-Topic",
+            "value": "Return request — my dog isn't interested"
+          },
+          {
+            "name": "Thread-Index",
+            "value": "AQHdOC3K8FBpTdUyIEGCQzZjhcVWxba3QCw5"
+          },
+          {
+            "name": "Date",
+            "value": "Sun, 30 Aug 2026 23:35:51 +0000"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<SA1PR05MB99846352AA70BDB8D69B7A819BEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "References",
+            "value": "<SA1PR05MB998463F33A0C15E728033E86D1EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<SA1PR05MB998463F33A0C15E728033E86D1EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "Accept-Language",
+            "value": "en-US"
+          },
+          {
+            "name": "Content-Language",
+            "value": "en-US"
+          },
+          {
+            "name": "X-MS-Has-Attach",
+            "value": ""
+          },
+          {
+            "name": "X-MS-TNEF-Correlator",
+            "value": ""
+          },
+          {
+            "name": "msip_labels",
+            "value": ""
+          },
+          {
+            "name": "x-ms-publictraffictype",
+            "value": "Email"
+          },
+          {
+            "name": "x-ms-traffictypediagnostic",
+            "value": "SA1PR05MB998463:EE_|IA1PR05MB11227:EE_"
+          },
+          {
+            "name": "x-ms-office365-filtering-correlation-id",
+            "value": "720332b6-f254-4d84-e9ae-08df06ef6dad"
+          },
+          {
+            "name": "x-microsoft-antispam",
+            "value": "BCL:0;ARA:14566002|7042599007|6050399003|15080799012|15030799006|45011099003|19110799012|8060799015|8062599012|41001999006|31061999003|51005399006|440099028|3412199025|102099032|40105399003|3430499035|2607281247196008;"
+          },
+          {
+            "name": "x-microsoft-antispam-message-info",
+            "value": "waX9+JN7BhfYfcduaDFxgT6k8FI2Lq8cnB46lq894ZnoYX4YWz+XgJTynNtQXPKGSXBtmiF9Okx6vhEX0NcxluyDOO98llSCfZQOT4aQaRyGBIaOTSM3gQyXg1IAN1bw1QC3JXgapQydurp93goNENyIxMbpxKfRrPC/QLI/l+0UVsc+iODKvAsLEUMbRepO4WiQd4dd4w2Us8fGdya54y348ix2zTnohfIZETvnM8eRSwib3/UGspwxaKonFgOn8jUX9zMnNUW0ez+mbRQ9n0iId9MMMW69VS9m1UNCAbIrAnRSHkPN9ivbQrddjKYBhrJap9WiF6fDcLyA/mzH5d7Zr5gJuD7eWzq8MZcpL+b4JQCECDwNc2EaAUlQFNPUN/3Vfk/QOOTIZzZ7MNsiVB/byoOd8uaoWryJnvDHd6w1hAqT84cBivyExFIwdMhG0Apcp/WwLdBf3yG8ARaxKSW0KVkoInT6OCFU243XEx5NAtFTgj5cyiXEh0eCS13ea/kNGq5hsvIZXWWH+JEtNiWpH+6TwHAdhY3FRSN1cApyDj3qHJV4LTKfPjENwvdh8CXEIkC+SVvnSXkYSQ9p/MXTL5fJS8QOuHVG2TdTSw0HDgRtbDrVZCZEqGhn5CZfMz0UzAmbT/e4fD5F5rByFBsDp8Buvek5lt2E0lnNb4QJTkGupcgckD5KtvztCYOQXmnFHfhhaJdogTwP5jYIJGsMpYanHmhoU4Mcc9tpnwfPol+tq1cIgX5ImutaPPmGt817jJjsxc9ezk4nG7y2lY/otDCfpCRY7x5I0iqEPZYjaRENVvrjxe585tYlqPhtAq6yNx8szovL7mANqxJpemBPTVKVeEoHQUrPKVpA4fmjc7Spb6nSaLekNfO4Lk/OOII2aCyX2s1andLWtSBxascrJ+V7eL8kHk5wDDoIyzddNyNClzDBHEuPIxbPpehE/pU/24QUTEhgJ2pYo37/xsXK/tv0SMV5N8yqv4nt1Y0VPyGkfSlzNpySp5cIrrq+Ea1tFjcYtkCcHGrgXT5tUA=="
+          },
+          {
+            "name": "x-ms-exchange-antispam-messagedata-chunkcount",
+            "value": "1"
+          },
+          {
+            "name": "x-ms-exchange-antispam-messagedata-0",
+            "value": "xoYs1FTmaITkL7bzTEGiBJ2YuLLr/J0zP1eEyJpXVm4IenTWx15i72FdZbD/4as+z3ONWHw3VDs4afD1jkpRckQ+jsKI3gnqsHLSx9PEzOgH8U0pHoAWUZT/CRne4pSelYpF9pu6oLvFqKtS6Yk5U/+3xbc99oTLWM+8KWDzGwfzFcC13uEY1WXTIfeg36gzWGfOcxE6BIZEnFkdBf1vKgjVN2y3pu5nAXfyz1xfsKRrJJs7hXbwTuCwswd94T8UaW8w9xt7Y/mxgHU/mMmR+XNq8J2siVxsfwUl3YsHqmvrKkuycWEkYlsNmpf371a4bsPxB8gzZoHBD6jaZFlSPUwKg1M4wB7LiKZVt2LocSZFwBk1yX0NNkF3gDlI8myTxbtVLCwnNfKW+C8Dl7Cj1K+nVekL4zaXjzQBlhO61pFoHrg2ClXtM6Xl3MXDNF7I71WSWICWVG0oDSkjSJLsniA6w8P7SPlIGhETs4SVfimWCMmMn0bjjnzmzYG0CaFTkDpbq54fGUQFEuchwx1/vrqzAIwd5na8oL60dPLXltm0uXzXjoMBczAr1PgiX8E2gaKfpAJlYpZd9XqlzkWDBWoV2EhHpMGEf0KUDEaKq4zoxKtUlL35+n7N1kr9S6NdCLHRZ/sT6INHQrnnMHjoMYjuRocYLlQEDo0bXh3orS1WKHGwHewhWRX71GbBwnBOn35LrfoGDGEcU/FxqaacZ4+zLhc8wYEetzHLx6Yq2kZnd0CUsnvwnlraaDHFSdBiBBtJE1WrT6UgVdDh/CF0AvJQZV9QoHwa2NG+kJ3UXJlIGetZTfYbzJR6NzAh48n3dFIxssMV9WOm/Yb2rmXvCAMcncRC/Vd+fbudjsl/XEGCJCcNSnxJL4XOBUpQfQ3y/2BNnFntEKxGms2XXxKnXJcd0vTqDjYLG0ne7dOssda2HEG2Ndj78qr4pzsToRUMmReqj3h/lZc3V/mD3U105obpfn/J4WbNWg1BIuXoIqqlYoW9NRg822TrPu3coHaIwUiCsRvhVNC+W/3vn+566RDq1Vxp1urFY6vSOGDgr0YEM4Gw6PldfJq/8p6A6bQo2/9IeJMl6KHJpk2NQF3LW7K8eDrbUXNiFVikf/PKOFPRrkSQVD0GuHgrWxM4wuGau/VbZc4kamnEFLfaHPETyFR6mJqfMbQNlXoITpZXrm+YoVoY2jqKfxjXqDZVITGJiA0zRHWBaahpMLcxKnnLyG/JfaDpsdLx01zqJxjoL4BWQQ9/tM8E7UxZN0Vena61UmcVNUyJ0hoF9cn4WC9fbMICVbYhYymnkWNSkCz+eareRDaQm5F4WfOU1pHshCZTmxz+LQVTXNuRL9Nk3qKwadVBoqSZEXBy01kA+9auJaDvsEF0MxMBpJhCXIhqOomkBQreb+Akd5XVNEvFklZjkw=="
+          },
+          {
+            "name": "Content-Type",
+            "value": "multipart/alternative; boundary=\"_000_SA1PR05MB99846352AA70BDB8D69B7A819BEAAA2SA1PR05MB998463_\""
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "X-OriginatorOrg",
+            "value": "outlook.com"
+          },
+          {
+            "name": "X-MS-Exchange-CrossTenant-AuthAs",
+            "value": "Internal"
+          },
+          {
+            "name": "X-MS-Exchange-CrossTenant-AuthSource",
+            "value": "SA1PR05MB998463.namprd05.prod.outlook.com"
+          },
+          {
+            "name": "X-MS-Exchange-CrossTenant-RMS-PersistedConsumerOrg",
+            "value": "00000000-0000-0000-0000-000000000000"
+          },
+          {
+            "name": "X-MS-Exchange-CrossTenant-Network-Message-Id",
+            "value": "720332b6-f254-4d84-e9ae-08df06ef6dad"
+          },
+          {
+            "name": "X-MS-Exchange-CrossTenant-originalarrivaltime",
+            "value": "30 Aug 2026 23:35:51.6783 (UTC)"
+          },
+          {
+            "name": "X-MS-Exchange-CrossTenant-fromentityheader",
+            "value": "Hosted"
+          },
+          {
+            "name": "X-MS-Exchange-CrossTenant-id",
+            "value": "84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+          },
+          {
+            "name": "X-MS-Exchange-CrossTenant-rms-persistedconsumerorg",
+            "value": "00000000-0000-0000-0000-000000000000"
+          },
+          {
+            "name": "X-MS-Exchange-Transport-CrossTenantHeadersStamped",
+            "value": "IA1PR05MB11227"
+          }
         ],
-        "body": { "size": 0 },
+        "body": {
+          "size": 0
+        },
         "parts": [
           {
             "partId": "0",
-            "mimeType": "multipart/alternative",
+            "mimeType": "text/plain",
             "filename": "",
             "headers": [
-              { "name": "Content-Type", "value": "multipart/alternative; boundary=\"alt-boundary-1\"" }
-            ],
-            "body": { "size": 0 },
-            "parts": [
               {
-                "partId": "0.0",
-                "mimeType": "text/plain",
-                "filename": "",
-                "headers": [
-                  { "name": "Content-Type", "value": "text/plain; charset=\"UTF-8\"" }
-                ],
-                "body": {
-                  "size": 110,
-                  "data": "SGkgRG9nZUJ1ZGR5IHRlYW0sCgpNeSBvcmRlciAjNDUyMSBoYXNuJ3Qgc2hpcHBlZCB5ZXQgYW5kIGl0J3MgYmVlbiA5IGRheXMuIENhbiB5b3UgY2hlY2sgb24gaXQ_CgpUaGFua3MsCkphbmU"
-                }
+                "name": "Content-Type",
+                "value": "text/plain; charset=\"Windows-1252\""
               },
               {
-                "partId": "0.1",
-                "mimeType": "text/html",
-                "filename": "",
-                "headers": [
-                  { "name": "Content-Type", "value": "text/html; charset=\"UTF-8\"" }
-                ],
-                "body": {
-                  "size": 182,
-                  "data": "PGh0bWw-PGJvZHk-PHN0eWxlPnAgeyBjb2xvcjogcmVkOyB9PC9zdHlsZT48cD5IaSBEb2dlQnVkZHkgdGVhbSw8L3A-PHA-TXkgb3JkZXIgPGI-IzQ1MjE8L2I-IGhhc24mIzM5O3Qgc2hpcHBlZCB5ZXQgJmFtcDsgaXQgaGFzIGJlZW4gOSBkYXlzLjwvcD48cD5UaGFua3MsPGJyPkphbmU8L3A-PC9ib2R5PjwvaHRtbD4"
-                }
+                "name": "Content-Transfer-Encoding",
+                "value": "quoted-printable"
               }
-            ]
+            ],
+            "body": {
+              "size": 554,
+              "data": "VXBkYXRlIOKAlCB0aGlzIGlzIGFib3V0IG9yZGVyICMxMDAxLiBUaGUgc251ZmYgcGFkIGFycml2ZWQgd2l0aCB0aGUgc2VhbXMgc3BsaXQgb3BlbiwgcGhvdG8gYXR0YWNoZWQuIEknZCBsaWtlIGEgcmVmdW5kLg0KX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX18NCkZyb206IFJvYmVydCBDb2xsaW5zDQpTZW50OiBTdW5kYXksIEF1Z3VzdCAzMCwgMjAyNiAzOjE2IEFNDQpUbzogc3VwcG9ydEBkb2dlYnVkZHkuY29tIDxzdXBwb3J0QGRvZ2VidWRkeS5jb20-DQpTdWJqZWN0OiBSZXR1cm4gcmVxdWVzdCDigJQgbXkgZG9nIGlzbid0IGludGVyZXN0ZWQNCg0KSGksIEkgb3JkZXJlZCBhbiBpdGVtIGZyb20geW91IGEgY291cGxlIHdlZWtzIGFnby4gSG9uZXN0bHkgbXkgZG9nIGp1c3QgaXNuJ3QgaW50ZXJlc3RlZCBpbiBpdCDigJQgdGhlcmUncyBub3RoaW5nIHdyb25nIHdpdGggaXQsIGhlIHNuaWZmZWQgaXQgb25jZSBhbmQgaWdub3JlZCBpdCwgaGUganVzdCBkb2Vzbid0IGxpa2UgaXQuIENhbiBJIHNlbmQgaXQgYmFjayBmb3IgYSByZWZ1bmQ_IFRoYW5rcywgUm9iDQo="
+            }
           },
           {
             "partId": "1",
-            "mimeType": "application/pdf",
-            "filename": "receipt.pdf",
+            "mimeType": "text/html",
+            "filename": "",
             "headers": [
-              { "name": "Content-Type", "value": "application/pdf; name=\"receipt.pdf\"" },
-              { "name": "Content-Disposition", "value": "attachment; filename=\"receipt.pdf\"" }
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=\"Windows-1252\""
+              },
+              {
+                "name": "Content-Transfer-Encoding",
+                "value": "quoted-printable"
+              }
             ],
             "body": {
-              "attachmentId": "ANGjdJ_fakeAttachmentId1234567890",
-              "size": 24576
+              "size": 1468,
+              "data": "PGh0bWw-DQo8aGVhZD4NCjxtZXRhIGh0dHAtZXF1aXY9IkNvbnRlbnQtVHlwZSIgY29udGVudD0idGV4dC9odG1sOyBjaGFyc2V0PVdpbmRvd3MtMTI1MiI-DQo8c3R5bGUgdHlwZT0idGV4dC9jc3MiIHN0eWxlPSJkaXNwbGF5Om5vbmU7Ij4gUCB7bWFyZ2luLXRvcDowO21hcmdpbi1ib3R0b206MDt9IDwvc3R5bGU-DQo8L2hlYWQ-DQo8Ym9keSBkaXI9Imx0ciI-DQo8ZGl2IGNsYXNzPSJlbGVtZW50VG9Qcm9vZiIgc3R5bGU9ImZvbnQtZmFtaWx5OiBBcHRvcywgQXB0b3NfRW1iZWRkZWRGb250LCBBcHRvc19NU0ZvbnRTZXJ2aWNlLCBDYWxpYnJpLCBIZWx2ZXRpY2EsIHNhbnMtc2VyaWY7IGZvbnQtc2l6ZTogMTJwdDsgY29sb3I6IHJnYigwLCAwLCAwKTsiPg0KVXBkYXRlIOKAlCB0aGlzIGlzIGFib3V0IG9yZGVyICMxMDAxLiBUaGUgc251ZmYgcGFkIGFycml2ZWQgd2l0aCB0aGUgc2VhbXMgc3BsaXQgb3BlbiwgcGhvdG8gYXR0YWNoZWQuIEknZCBsaWtlIGEgcmVmdW5kLjwvZGl2Pg0KPGRpdiBpZD0iYXBwZW5kb25zZW5kIj48L2Rpdj4NCjxociBzdHlsZT0iZGlzcGxheTppbmxpbmUtYmxvY2s7d2lkdGg6OTglIiB0YWJpbmRleD0iLTEiPg0KPGRpdiBpZD0iZGl2UnBseUZ3ZE1zZyIgZGlyPSJsdHIiPjxmb250IGZhY2U9IkNhbGlicmksIHNhbnMtc2VyaWYiIHN0eWxlPSJmb250LXNpemU6MTFwdCIgY29sb3I9IiMwMDAwMDAiPjxiPkZyb206PC9iPiBSb2JlcnQgQ29sbGluczxicj4NCjxiPlNlbnQ6PC9iPiBTdW5kYXksIEF1Z3VzdCAzMCwgMjAyNiAzOjE2IEFNPGJyPg0KPGI-VG86PC9iPiBzdXBwb3J0QGRvZ2VidWRkeS5jb20gJmx0O3N1cHBvcnRAZG9nZWJ1ZGR5LmNvbSZndDs8YnI-DQo8Yj5TdWJqZWN0OjwvYj4gUmV0dXJuIHJlcXVlc3Qg4oCUIG15IGRvZyBpc24ndCBpbnRlcmVzdGVkPC9mb250Pg0KPGRpdj4mbmJzcDs8L2Rpdj4NCjwvZGl2Pg0KPHN0eWxlIHR5cGU9InRleHQvY3NzIiBzdHlsZT0iZGlzcGxheTpub25lIj4NCjwhLS0NCnANCgl7bWFyZ2luLXRvcDowOw0KCW1hcmdpbi1ib3R0b206MH0NCi0tPg0KPC9zdHlsZT4NCjxkaXYgZGlyPSJsdHIiPg0KPGRpdiBzdHlsZT0iZm9udC1mYW1pbHk6QXB0b3MsQXB0b3NfRW1iZWRkZWRGb250LEFwdG9zX01TRm9udFNlcnZpY2UsQ2FsaWJyaSxIZWx2ZXRpY2Esc2Fucy1zZXJpZjsgZm9udC1zaXplOjEycHQ7IGNvbG9yOnJnYigwLDAsMCkiPg0KSGksIEkgb3JkZXJlZCBhbiBpdGVtIGZyb20geW91IGEgY291cGxlIHdlZWtzIGFnby4gSG9uZXN0bHkgbXkgZG9nIGp1c3QgaXNuJ3QgaW50ZXJlc3RlZCBpbiBpdCDigJQgdGhlcmUncyBub3RoaW5nIHdyb25nIHdpdGggaXQsIGhlIHNuaWZmZWQgaXQgb25jZSBhbmQgaWdub3JlZCBpdCwgaGUganVzdCBkb2Vzbid0IGxpa2UgaXQuIENhbiBJIHNlbmQgaXQgYmFjayBmb3IgYSByZWZ1bmQ_IFRoYW5rcywgUm9iPC9kaXY-DQo8L2Rpdj4NCjwvYm9keT4NCjwvaHRtbD4NCg=="
             }
           }
         ]
-      }
+      },
+      "sizeEstimate": 13361,
+      "historyId": "5504",
+      "internalDate": "1788132951000"
     }
   }
 }

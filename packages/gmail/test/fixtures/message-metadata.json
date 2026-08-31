@@ -1,7 +1,7 @@
 {
   "request": {
     "method": "GET",
-    "path": "/gmail/v1/users/me/messages/msg-nested-1",
+    "path": "/gmail/v1/users/me/messages/1a0546e8974d4a47",
     "query": {
       "format": "metadata",
       "metadataHeaders": [
@@ -21,29 +21,48 @@
   "response": {
     "status": 200,
     "body": {
-      "id": "msg-nested-1",
-      "threadId": "thread-100",
-      "labelIds": ["INBOX", "UNREAD", "CATEGORY_PERSONAL"],
-      "snippet": "Hi DogeBuddy team, My order #4521 hasn't shipped yet...",
-      "internalDate": "1756148400000",
-      "sizeEstimate": 15000,
-      "historyId": "3050",
+      "id": "1a0546e8974d4a47",
+      "threadId": "1a050c80ad6eb6d0",
+      "labelIds": [
+        "SENT"
+      ],
+      "snippet": "Hi Rob, Happy to help, but I don&#39;t see an order on file under this email yet — could you send along your order number so we can look into it? A couple of quick notes depending on the situation: If",
       "payload": {
-        "mimeType": "multipart/mixed",
-        "filename": "",
+        "mimeType": "text/plain",
         "headers": [
-          { "name": "Delivered-To", "value": "jane@example.com" },
-          { "name": "Delivered-To", "value": "support@dogebuddy.com" },
-          { "name": "From", "value": "\"Jane D\" <Jane@Example.com>" },
-          { "name": "To", "value": "DogeBuddy Support <support@dogebuddy.com>" },
-          { "name": "Cc", "value": "manager@example.com, \"Ops Team\" <ops@example.com>" },
-          { "name": "Subject", "value": "Re: Order #4521 hasn't shipped" },
-          { "name": "Message-ID", "value": "<CAJ+abc123@mail.gmail.com>" },
-          { "name": "In-Reply-To", "value": "<original-msg-999@mail.gmail.com>" },
-          { "name": "References", "value": "<original-msg-999@mail.gmail.com>" }
-        ],
-        "body": { "size": 0 }
-      }
+          {
+            "name": "From",
+            "value": "support@dogebuddy.com"
+          },
+          {
+            "name": "To",
+            "value": "collinscontracting509@outlook.com"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Shipping time + tracking?"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<SA1PR05MB998463BBE5394402B91CBDDA4AEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "References",
+            "value": "<SA1PR05MB9984632C57E7B7D97E03E3B496EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com> <SA1PR05MB998463BBE5394402B91CBDDA4AEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>"
+          },
+          {
+            "name": "X-DogeBuddy-Proposal",
+            "value": "72b9da79-364c-44c8-b160-d3e8e44a8cc1"
+          },
+          {
+            "name": "Message-Id",
+            "value": "<CAHaBOBZnV454MJQsmc_NG=GW-0TpfkGCe4XAnsJJEGveb0h0GQ@mail.gmail.com>"
+          }
+        ]
+      },
+      "sizeEstimate": 1835,
+      "historyId": "5264",
+      "internalDate": "1788122925000"
     }
   }
 }

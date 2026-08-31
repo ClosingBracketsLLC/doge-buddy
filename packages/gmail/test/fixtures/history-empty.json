@@ -1,0 +1,15 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/history",
+    "query": {
+      "startHistoryId": "5563"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "historyId": "5563"
+    }
+  }
+}

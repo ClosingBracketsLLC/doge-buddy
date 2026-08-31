@@ -6,13 +6,16 @@ import { GmailApiError, GmailRateLimitError, HistoryExpiredError, MessageGoneErr
 
 import profileFixture from './fixtures/profile.json' with { type: 'json' }
 import historyPage1Fixture from './fixtures/history-page1.json' with { type: 'json' }
-import historyPage2Fixture from './fixtures/history-page2.json' with { type: 'json' }
+import historyEmptyFixture from './fixtures/history-empty.json' with { type: 'json' }
+import historyPaged1Fixture from './fixtures/history-paged-1.json' with { type: 'json' }
+import historyPaged2Fixture from './fixtures/history-paged-2.json' with { type: 'json' }
 import history404Fixture from './fixtures/history-404.json' with { type: 'json' }
 import messagesListFixture from './fixtures/messages-list.json' with { type: 'json' }
 import threadGetFixture from './fixtures/thread-get.json' with { type: 'json' }
 import thread404Fixture from './fixtures/thread-404.json' with { type: 'json' }
 import messageFullNestedFixture from './fixtures/message-full-nested.json' with { type: 'json' }
 import messageFullSinglepartFixture from './fixtures/message-full-singlepart.json' with { type: 'json' }
+import messageFullAttachmentOnlyFixture from './fixtures/message-full-attachment-only.json' with { type: 'json' }
 import messageMetadataFixture from './fixtures/message-metadata.json' with { type: 'json' }
 import messageMetadataAuthResultsFixture from './fixtures/message-metadata-auth-results.json' with { type: 'json' }
 import messageMetadataProposalMarkerFixture from './fixtures/message-metadata-proposal-marker.json' with { type: 'json' }
@@ -24,6 +27,22 @@ import error403PermFixture from './fixtures/error-403-perm.json' with { type: 'j
 import sendReplyFixture from './fixtures/send-reply.json' with { type: 'json' }
 
 const FROM_ADDRESS = 'support@dogebuddy.com'
+
+// Recorded against the live support mailbox with `GMAIL_CONTRACT=1` (scripts/record-fixtures.ts)
+// on 2026-08-30 — every id, address, and header literal below is what real Gmail returned, so a
+// re-record moves them (update this file in the same commit; see the recorder's header comment).
+// The hand-authored fixtures (404/error cases, label-create, send-reply, history-paged-*, the
+// proposal-marker metadata case) keep their synthetic `msg-…`/`thread-…` ids.
+const NESTED_ID = '1a055078d2151dab' // inbound from Outlook, multipart/alternative
+const SINGLEPART_ID = '1a0546e8974d4a47' // OUR sent reply — plain text/plain, carries a real marker
+const ATTACHMENT_ONLY_ID = '1a05219fe1efd634' // Google's daily DMARC report: application/zip, no text leaf
+const THREAD_ID = '1a050c80ad6eb6d0' // "Shipping time + tracking?" — two inbound + two SENT replies
+const OUTLOOK_AUTH_RESULTS =
+  'mx.google.com;       dkim=pass header.i=@outlook.com header.s=selector1 header.b=cTyH+z9f;       arc=pass (i=1);       spf=pass (google.com: domain of collinscontracting509@outlook.com designates 2a01:111:f403:d002:: as permitted sender) smtp.mailfrom=CollinsContracting509@outlook.com;       dmarc=pass (p=NONE sp=QUARANTINE dis=NONE) header.from=outlook.com'
+
+function decodeLeaf(data: string): string {
+  return Buffer.from(data, 'base64url').toString('utf8')
+}
 
 interface Fixture {
   request: { method: string; path: string; query?: Record<string, string | string[]> }
@@ -75,16 +94,53 @@ describe('createGmailClient', () => {
       fetchFn: fixtureFetch({ profile: profileFixture }),
     })
     await expect(client.getProfile()).resolves.toEqual({
-      emailAddress: 'admin@dogebuddy.com',
-      historyId: '3025',
+      emailAddress: 'support@dogebuddy.com',
+      historyId: '5563',
     })
   })
 
-  it('listHistory: pages via startHistoryId + pageToken and maps messagesAdded', async () => {
+  it('listHistory (recorded): maps a real page — messagesAdded on the arrival record only, label-change records map to an empty list', async () => {
     const client = createGmailClient({
       auth: stubAuth(),
       fromAddress: FROM_ADDRESS,
-      fetchFn: fixtureFetch({ page1: historyPage1Fixture, page2: historyPage2Fixture }),
+      fetchFn: fixtureFetch({ page1: historyPage1Fixture }),
+    })
+
+    const page = await client.listHistory({ startHistoryId: '5290' })
+    expect(page.nextPageToken).toBeUndefined()
+    // Six real records for one inbound message: its arrival (5352), then the poll's own label
+    // traffic (labelsAdded Label_2, labelsRemoved UNREAD) and bare `messages`-only records —
+    // only the arrival carries messagesAdded; everything else must map to [] and never throw.
+    expect(page.records).toEqual([
+      { id: '5352', messagesAdded: [{ id: NESTED_ID, threadId: NESTED_ID }] },
+      { id: '5478', messagesAdded: [] },
+      { id: '5493', messagesAdded: [] },
+      { id: '5500', messagesAdded: [] },
+      { id: '5501', messagesAdded: [] },
+      { id: '5502', messagesAdded: [] },
+    ])
+  })
+
+  it('listHistory (recorded): from the current historyId real Gmail omits the `history` key entirely — maps to no records', async () => {
+    const client = createGmailClient({
+      auth: stubAuth(),
+      fromAddress: FROM_ADDRESS,
+      fetchFn: fixtureFetch({ empty: historyEmptyFixture }),
+    })
+
+    // The shape every quiet poll cycle sees: `{ historyId }` and nothing else.
+    expect(historyEmptyFixture.response.body).not.toHaveProperty('history')
+    await expect(client.listHistory({ startHistoryId: '5563' })).resolves.toEqual({
+      records: [],
+      nextPageToken: undefined,
+    })
+  })
+
+  it('listHistory: pages via startHistoryId + pageToken and maps messagesAdded (hand-authored pair — a real mailbox cannot be made to paginate on demand)', async () => {
+    const client = createGmailClient({
+      auth: stubAuth(),
+      fromAddress: FROM_ADDRESS,
+      fetchFn: fixtureFetch({ page1: historyPaged1Fixture, page2: historyPaged2Fixture }),
     })
 
     const page1 = await client.listHistory({ startHistoryId: '3000' })
@@ -114,25 +170,31 @@ describe('createGmailClient', () => {
       fromAddress: FROM_ADDRESS,
       fetchFn: fixtureFetch({ list: messagesListFixture }),
     })
-    await expect(client.listMessages({ q: 'in:inbox' })).resolves.toEqual({
-      ids: [
-        { id: 'msg-301', threadId: 'thread-200' },
-        { id: 'msg-302', threadId: 'thread-201' },
-      ],
-      nextPageToken: undefined,
-    })
+    const result = await client.listMessages({ q: 'in:inbox' })
+
+    // 17 inbox messages at recording time, newest first; the wire carries only id/threadId pairs.
+    expect(result.nextPageToken).toBeUndefined()
+    expect(result.ids).toHaveLength(17)
+    expect(result.ids[0]).toEqual({ id: NESTED_ID, threadId: NESTED_ID })
+    expect(result.ids[1]).toEqual({ id: '1a0546cd45070d07', threadId: THREAD_ID })
+    for (const entry of result.ids) {
+      expect(entry.id).toMatch(/^[0-9a-f]{16}$/)
+      expect(entry.threadId).toMatch(/^[0-9a-f]{16}$/)
+    }
   })
 
   it('getThread: builds GET /threads/{id}?format=minimal and returns live message ids', async () => {
     const fetchFn = vi.fn(fixtureFetch({ thread: threadGetFixture }))
     const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
 
-    await expect(client.getThread('thread-100')).resolves.toEqual({
-      messages: [{ id: 'msg-201' }, { id: 'msg-205' }],
+    // A real four-message thread in wire order: customer (spam-foldered), our SENT reply, the
+    // customer's follow-up, our SENT follow-up. Snippets/labels/sizes on the wire are dropped.
+    await expect(client.getThread(THREAD_ID)).resolves.toEqual({
+      messages: [{ id: THREAD_ID }, { id: '1a050cb8f3d313ef' }, { id: '1a0546cd45070d07' }, { id: SINGLEPART_ID }],
     })
 
     const calledUrl = new URL(String(fetchFn.mock.calls[0]![0]))
-    expect(calledUrl.pathname).toBe('/gmail/v1/users/me/threads/thread-100')
+    expect(calledUrl.pathname).toBe(`/gmail/v1/users/me/threads/${THREAD_ID}`)
     expect(calledUrl.searchParams.get('format')).toBe('minimal')
   })
 
@@ -154,66 +216,128 @@ describe('createGmailClient', () => {
       fromAddress: FROM_ADDRESS,
       fetchFn: fixtureFetch({ msg: messageFullNestedFixture }),
     })
-    const msg = await client.getMessage('msg-nested-1', { format: 'full' })
+    const msg = await client.getMessage(NESTED_ID, { format: 'full' })
 
-    expect(msg.id).toBe('msg-nested-1')
-    expect(msg.threadId).toBe('thread-100')
-    expect(msg.labelIds).toEqual(['INBOX', 'UNREAD', 'CATEGORY_PERSONAL'])
-    expect(msg.internalDate).toEqual(new Date(1_756_148_400_000))
-    expect(msg.fromRaw).toBe('"Jane D" <Jane@Example.com>')
-    expect(msg.fromAddr).toBe('jane@example.com')
+    expect(msg.id).toBe(NESTED_ID)
+    expect(msg.threadId).toBe(NESTED_ID)
+    expect(msg.labelIds).toEqual(['Label_2', 'IMPORTANT', 'CATEGORY_PERSONAL', 'INBOX'])
+    expect(msg.internalDate).toEqual(new Date(1_788_132_951_000))
+    expect(msg.fromRaw).toBe('Robert Collins <CollinsContracting509@outlook.com>')
+    expect(msg.fromAddr).toBe('collinscontracting509@outlook.com') // lowercased
+    // Outlook writes `"support@dogebuddy.com" <support@dogebuddy.com>` — display name dropped.
     expect(msg.to).toEqual(['support@dogebuddy.com'])
-    expect(msg.cc).toEqual(['manager@example.com', 'ops@example.com'])
-    expect(msg.deliveredTo).toEqual(['jane@example.com', 'support@dogebuddy.com'])
-    expect(msg.subject).toBe("Re: Order #4521 hasn't shipped")
-    expect(msg.rfcMessageId).toBe('<CAJ+abc123@mail.gmail.com>')
-    expect(msg.inReplyTo).toBe('<original-msg-999@mail.gmail.com>')
-    expect(msg.references).toBe('<original-msg-999@mail.gmail.com>')
-    // depth-first walk must prefer the text/plain leaf over its text/html sibling
-    // and must never attempt to decode the attachment-only pdf part.
-    expect(msg.bodyText).toBe(
-      "Hi DogeBuddy team,\n\nMy order #4521 hasn't shipped yet and it's been 9 days. Can you check on it?\n\nThanks,\nJane",
-    )
+    expect(msg.cc).toEqual([]) // no Cc header at all on the wire
+    expect(msg.deliveredTo).toEqual(['support@dogebuddy.com'])
+    expect(msg.subject).toBe("Re: Return request — my dog isn't interested")
+    expect(msg.rfcMessageId).toBe('<SA1PR05MB99846352AA70BDB8D69B7A819BEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>')
+    expect(msg.inReplyTo).toBe('<SA1PR05MB998463F33A0C15E728033E86D1EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>')
+    expect(msg.references).toBe('<SA1PR05MB998463F33A0C15E728033E86D1EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>')
+
+    // multipart/alternative(text/plain, text/html): the depth-first walk must return the
+    // text/plain leaf verbatim (Outlook's CRLF line endings included) and never the HTML sibling.
+    const parts = messageFullNestedFixture.response.body.payload.parts
+    expect(parts.map((p) => p.mimeType)).toEqual(['text/plain', 'text/html'])
+    expect(msg.bodyText).toBe(decodeLeaf(parts[0]!.body.data))
+    expect(msg.bodyText).toMatch(/^Update — this is about order #1001\. The snuff pad arrived with the seams split open/)
+    expect(msg.bodyText).toContain('\r\n')
+    expect(msg.bodyText).not.toContain('</')
   })
 
-  it('getMessage(full, nested): authenticationResults exposes the TOPMOST Authentication-Results header value (controller ruling: full format, not just metadata)', async () => {
+  it('getMessage(full, nested): authenticationResults is the Authentication-Results header — NOT either of the two ARC-Authentication-Results headers Gmail also stamps', async () => {
     const client = createGmailClient({
       auth: stubAuth(),
       fromAddress: FROM_ADDRESS,
       fetchFn: fixtureFetch({ msg: messageFullNestedFixture }),
     })
-    const msg = await client.getMessage('msg-nested-1', { format: 'full' })
+    const msg = await client.getMessage(NESTED_ID, { format: 'full' })
 
-    // The fixture carries two Authentication-Results headers (Gmail's own stamp topmost, an
-    // upstream relay's stamp further down) — only the first occurrence must win.
-    expect(msg.authenticationResults).toBe(
-      'mx.google.com; spf=pass (google.com: domain of jane@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=jane@example.com; dkim=pass header.i=@example.com; dmarc=pass',
-    )
+    // Real Gmail stamps one Authentication-Results and two ARC-Authentication-Results headers on
+    // this message; the lookup must match the header NAME exactly (case-insensitively), not by
+    // suffix — the ARC variants would otherwise be mistaken for the money gate's input.
+    const names = messageFullNestedFixture.response.body.payload.headers.map((h) => h.name)
+    expect(names.filter((n) => n === 'Authentication-Results')).toHaveLength(1)
+    expect(names.filter((n) => n === 'ARC-Authentication-Results')).toHaveLength(2)
+    expect(msg.authenticationResults).toBe(OUTLOOK_AUTH_RESULTS)
   })
 
-  it('getMessage(full, singlepart): falls back to top-level body.data and nulls absent headers', async () => {
+  it('getMessage(full): with two Authentication-Results headers the TOPMOST wins (controller ruling: full format, not just metadata)', async () => {
+    // Real inbound mail carries a single Gmail stamp; an upstream relay can append its own further
+    // down. Synthesize that on top of the recorded message: Gmail's stays first and must win.
+    const body = structuredClone(messageFullNestedFixture.response.body) as {
+      payload: { headers: { name: string; value: string }[] }
+    }
+    body.payload.headers.push({
+      name: 'Authentication-Results',
+      value: 'relay.example.net; spf=fail smtp.mailfrom=someone@example.net; dmarc=fail',
+    })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch
+    const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
+
+    const msg = await client.getMessage(NESTED_ID, { format: 'full' })
+    expect(msg.authenticationResults).toBe(OUTLOOK_AUTH_RESULTS)
+  })
+
+  it('getMessage(full, singlepart): falls back to top-level body.data; a sent copy has no Delivered-To/Cc/Authentication-Results and carries the real proposal marker', async () => {
     const client = createGmailClient({
       auth: stubAuth(),
       fromAddress: FROM_ADDRESS,
       fetchFn: fixtureFetch({ msg: messageFullSinglepartFixture }),
     })
-    const msg = await client.getMessage('msg-single-1', { format: 'full' })
+    const msg = await client.getMessage(SINGLEPART_ID, { format: 'full' })
 
-    expect(msg.bodyText).toBe('Quick question about my refund status. - Bob')
-    expect(msg.fromAddr).toBe('bob@customer.com')
+    // No mainstream client sends single-part text/plain any more — OUR replies (buildReplyRaw) are
+    // the realistic source of this shape, so the recorded message is the SENT copy of an agent reply.
+    expect(msg.labelIds).toEqual(['SENT'])
+    expect(msg.bodyText).toBe(decodeLeaf(messageFullSinglepartFixture.response.body.payload.body.data))
+    expect(msg.bodyText).toMatch(/^Hi Rob,\n\nHappy to help/)
+    expect(msg.fromAddr).toBe('support@dogebuddy.com')
+    expect(msg.to).toEqual(['collinscontracting509@outlook.com'])
     expect(msg.cc).toEqual([])
-    expect(msg.deliveredTo).toEqual([])
-    expect(msg.inReplyTo).toBeNull()
-    expect(msg.references).toBeNull()
+    expect(msg.deliveredTo).toEqual([]) // Gmail stamps Delivered-To on inbound only
+    expect(msg.authenticationResults).toBeNull() // …and Authentication-Results likewise
+    expect(msg.inReplyTo).toBe('<SA1PR05MB998463BBE5394402B91CBDDA4AEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>')
+    expect(msg.references).toBe(
+      '<SA1PR05MB9984632C57E7B7D97E03E3B496EAAA2@SA1PR05MB998463.namprd05.prod.outlook.com> <SA1PR05MB998463BBE5394402B91CBDDA4AEAAA2@SA1PR05MB998463.namprd05.prod.outlook.com>',
+    )
+    expect(msg.dogeBuddyProposalId).toBe('72b9da79-364c-44c8-b160-d3e8e44a8cc1')
+
+    // Gmail hands OUR `Message-ID` header back as `Message-Id` on the sent copy — the header
+    // lookup has to be case-insensitive or every recovery scan would see a null message id.
+    const wireHeader = messageFullSinglepartFixture.response.body.payload.headers.find(
+      (h) => h.name.toLowerCase() === 'message-id',
+    )
+    expect(wireHeader?.name).toBe('Message-Id')
+    expect(msg.rfcMessageId).toBe(wireHeader?.value)
+    expect(msg.rfcMessageId).toMatch(/^<.+@.+>$/)
+  })
+
+  it('getMessage(full, attachment-only): a message with no text leaf at all (the daily DMARC zip report) yields bodyText null with headers still normalized', async () => {
+    const client = createGmailClient({
+      auth: stubAuth(),
+      fromAddress: FROM_ADDRESS,
+      fetchFn: fixtureFetch({ msg: messageFullAttachmentOnlyFixture }),
+    })
+    const msg = await client.getMessage(ATTACHMENT_ONLY_ID, { format: 'full' })
+
+    // Real traffic the poll ingests every day: Google's aggregate DMARC report is a single
+    // application/zip part with an attachmentId and no inline data — never decoded, never thrown on.
+    expect(messageFullAttachmentOnlyFixture.response.body.payload.mimeType).toBe('application/zip')
+    expect(msg.bodyText).toBeNull()
+    expect(msg.fromAddr).toBe('noreply-dmarc-support@google.com')
+    expect(msg.to).toEqual(['support@dogebuddy.com'])
+    expect(msg.subject).toBe('Report domain: dogebuddy.com Submitter: google.com Report-ID: 11316150216743750765')
+    expect(msg.labelIds).toEqual(['Label_1', 'Label_2', 'IMPORTANT', 'CATEGORY_UPDATES', 'INBOX'])
+    expect(msg.authenticationResults).toContain('dmarc=pass')
+    expect(msg.dogeBuddyProposalId).toBeNull()
   })
 
   it('getMessage(metadata): requests format=metadata with repeated metadataHeaders in the required order, bodyText is null', async () => {
     const fetchFn = vi.fn(fixtureFetch({ msg: messageMetadataFixture }))
     const client = createGmailClient({ auth: stubAuth(), fromAddress: FROM_ADDRESS, fetchFn })
-    const msg = await client.getMessage('msg-nested-1', { format: 'metadata' })
+    const msg = await client.getMessage(SINGLEPART_ID, { format: 'metadata' })
 
     const calledUrl = new URL(String(fetchFn.mock.calls[0]![0]))
-    expect(calledUrl.pathname).toBe('/gmail/v1/users/me/messages/msg-nested-1')
+    expect(calledUrl.pathname).toBe(`/gmail/v1/users/me/messages/${SINGLEPART_ID}`)
     expect(calledUrl.searchParams.get('format')).toBe('metadata')
     expect(calledUrl.searchParams.getAll('metadataHeaders')).toEqual([
       'From',
@@ -228,13 +352,17 @@ describe('createGmailClient', () => {
       'X-DogeBuddy-Proposal',
     ])
 
+    // A metadata fetch returns ONLY the requested headers and no payload body: Gmail answered with
+    // From/To/Subject/In-Reply-To/References/X-DogeBuddy-Proposal/Message-Id for this sent copy.
     expect(msg.bodyText).toBeNull()
-    expect(msg.fromAddr).toBe('jane@example.com')
-    expect(msg.deliveredTo).toEqual(['jane@example.com', 'support@dogebuddy.com'])
-    // This fixture's response carries no Authentication-Results header at all.
+    expect(msg.fromAddr).toBe('support@dogebuddy.com')
+    expect(msg.to).toEqual(['collinscontracting509@outlook.com'])
+    expect(msg.deliveredTo).toEqual([])
+    // A sent copy carries no Authentication-Results header at all (Gmail stamps inbound only).
     expect(msg.authenticationResults).toBeNull()
-    // Nor an X-DogeBuddy-Proposal one — an ordinary customer message never carries the marker.
-    expect(msg.dogeBuddyProposalId).toBeNull()
+    // …but it does carry our recovery marker — the real wire round-trip of the header
+    // `apply-support-reply.ts`'s re-entry scan reads to decide "already sent" vs "send now".
+    expect(msg.dogeBuddyProposalId).toBe('72b9da79-364c-44c8-b160-d3e8e44a8cc1')
   })
 
   it('getMessage(metadata): dogeBuddyProposalId exposes the X-DogeBuddy-Proposal marker when present', async () => {
@@ -258,13 +386,14 @@ describe('createGmailClient', () => {
       fromAddress: FROM_ADDRESS,
       fetchFn: fixtureFetch({ msg: messageMetadataAuthResultsFixture }),
     })
-    const msg = await client.getMessage('msg-auth-1', { format: 'metadata' })
+    const msg = await client.getMessage(NESTED_ID, { format: 'metadata' })
 
-    // The fixture carries two Authentication-Results headers — only the first (topmost, Gmail's
-    // own stamp) occurrence must be returned.
-    expect(msg.authenticationResults).toBe(
-      'mx.google.com; spf=pass (google.com: domain of jane@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=jane@example.com; dkim=pass header.i=@example.com; dmarc=pass',
-    )
+    // Gmail's real stamp on the Outlook message, verbatim (multi-space separators included) — the
+    // refund sender-auth gate parses exactly this string. An inbound metadata fetch carries no marker.
+    expect(msg.authenticationResults).toBe(OUTLOOK_AUTH_RESULTS)
+    expect(msg.authenticationResults).toContain('dmarc=pass')
+    expect(msg.deliveredTo).toEqual(['support@dogebuddy.com'])
+    expect(msg.dogeBuddyProposalId).toBeNull()
   })
 
   it('getMessage: 404 becomes MessageGoneError', async () => {
@@ -282,12 +411,21 @@ describe('createGmailClient', () => {
       fromAddress: FROM_ADDRESS,
       fetchFn: fixtureFetch({ labels: labelsListFixture }),
     })
-    await expect(client.listLabels()).resolves.toEqual([
-      { id: 'INBOX', name: 'INBOX' },
-      { id: 'SENT', name: 'SENT' },
-      { id: 'UNREAD', name: 'UNREAD' },
-      { id: 'Label_1', name: 'DogeBuddy/New' },
-    ])
+    const labels = await client.listLabels()
+
+    // 14 system labels + the two the poll created; type/visibility fields on the wire are dropped.
+    expect(labels).toHaveLength(16)
+    expect(labels).toEqual(
+      expect.arrayContaining([
+        { id: 'INBOX', name: 'INBOX' },
+        { id: 'SENT', name: 'SENT' },
+        { id: 'UNREAD', name: 'UNREAD' },
+        { id: 'SPAM', name: 'SPAM' },
+        { id: 'Label_1', name: 'DogeBuddy/Spam' },
+        { id: 'Label_2', name: 'DogeBuddy/New' },
+      ]),
+    )
+    for (const label of labels) expect(Object.keys(label).sort()).toEqual(['id', 'name'])
   })
 
   it('createLabel: POSTs {name} to /labels and returns the created label', async () => {
@@ -469,7 +607,7 @@ describe('createGmailClient', () => {
     }) as unknown as typeof fetch
 
     const client = createGmailClient({ auth, fromAddress: FROM_ADDRESS, fetchFn })
-    await expect(client.getProfile()).resolves.toEqual({ emailAddress: 'admin@dogebuddy.com', historyId: '3025' })
+    await expect(client.getProfile()).resolves.toEqual({ emailAddress: 'support@dogebuddy.com', historyId: '5563' })
 
     expect(invalidate).toHaveBeenCalledTimes(1)
     expect(getAccessToken).toHaveBeenCalledTimes(2)

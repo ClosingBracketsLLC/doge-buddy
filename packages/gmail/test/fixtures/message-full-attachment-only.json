@@ -1,0 +1,130 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/1a05219fe1efd634",
+    "query": {
+      "format": "full"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "1a05219fe1efd634",
+      "threadId": "1a05219fe1efd634",
+      "labelIds": [
+        "Label_1",
+        "Label_2",
+        "IMPORTANT",
+        "CATEGORY_UPDATES",
+        "INBOX"
+      ],
+      "snippet": "",
+      "payload": {
+        "partId": "",
+        "mimeType": "application/zip",
+        "filename": "google.com!dogebuddy.com!1787961600!1788047999.zip",
+        "headers": [
+          {
+            "name": "Delivered-To",
+            "value": "support@dogebuddy.com"
+          },
+          {
+            "name": "Received",
+            "value": "by 2002:ac9:724f:0:b0:643:e2aa:253e with SMTP id x15csp1895635ocs;        Sun, 30 Aug 2026 02:57:11 -0700 (PDT)"
+          },
+          {
+            "name": "X-Received",
+            "value": "by 2002:a05:620a:40cb:b0:930:b4f9:f327 with SMTP id af79cd13be357-939138df3d1mr1779078985a.33.1788083830667;        Sun, 30 Aug 2026 02:57:10 -0700 (PDT)"
+          },
+          {
+            "name": "ARC-Seal",
+            "value": "i=1; a=rsa-sha256; t=1788083830; cv=none;        d=google.com; s=arc-20260327;        b=RT4N3iS2CI8Z3WDG9yIQdhgoGTYz1GcBeXk9txTftd4m+hF7XgMjZ1uH8hKT5/D56b         BAo757SkcvfL+ejACt0T+aELKysgW/p6hReot9oVK0VUzRBktl2k3mTo5f6RA5Mek9h7         AHyck2boouyOgMyWR/kWyb+3hwMb8G6Marqm8rWxmmInSpg2CTqpOJDgoYMvlCSH2DJJ         OV4BXzkb5TI7ViVRLuStneBPIwVMA+RAQllF5j7mlOk9ZdRdVgaHCiAE6jENe7CeAJz5         bWc6IC6d419cYNhTTScabX6a54S4EAp9T9F+x0Q79WQbPBdV8s5IqnbmyPshDJ1cRPzx         4c2w=="
+          },
+          {
+            "name": "ARC-Message-Signature",
+            "value": "i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;        h=content-transfer-encoding:content-disposition:to:from:subject         :message-id:date:mime-version:dkim-signature;        bh=utldB7n6cCwI8vmLNiZ32px/ix5/NY/7wTnk9qioa8c=;        fh=wKDNxARggc5f/hNRhZi+WK8+2oHB+kPW3TnYkBVlrjE=;        b=M4WvugSGpYNj43pCWoaqR3jQrkZoyOr6Cx5oEtJma5/sOUxd538zpGo7MUmdNditBy         KJrwfaQzvO8J0OuG6dJLSmodcaQn0RpFv1iwI8LPr2ZjOhVwtaimpwjTfgJdGKkhxnpC         vrTHHDGmR+2Nxa6/GGtVMAvinaunLCHNHSf1J4Vm0ipSEqTMg58P46+IyQpJZ3mTfyOk         BTZm9HsKx03em4pFCPAvzN9dPYoPGPQ0vD9jfh/3hEtHjpGBSdkt+RboM5dEIpHWPe75         Xl6ynMXU4MOobOKDLpqVS3jUsWfI+MWMloD/tUOYezRSVnr6tUVRtnk+TV+0UDwpxQ27         2mVQ==;        dara=google.com"
+          },
+          {
+            "name": "ARC-Authentication-Results",
+            "value": "i=1; mx.google.com;       dkim=pass header.i=@google.com header.s=20251104 header.b=togMsk5F;       spf=pass (google.com: domain of noreply-dmarc-support@google.com designates 209.85.220.73 as permitted sender) smtp.mailfrom=noreply-dmarc-support@google.com;       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=google.com;       dara=neutral header.i=@dogebuddy.com"
+          },
+          {
+            "name": "Return-Path",
+            "value": "<noreply-dmarc-support@google.com>"
+          },
+          {
+            "name": "Received",
+            "value": "from mail-sor-f73.google.com (mail-sor-f73.google.com. [209.85.220.73])        by mx.google.com with SMTPS id af79cd13be357-93917669d5bsor490156885a.14.2026.08.30.02.57.10        for <support@dogebuddy.com>        (Google Transport Security);        Sun, 30 Aug 2026 02:57:10 -0700 (PDT)"
+          },
+          {
+            "name": "Received-SPF",
+            "value": "pass (google.com: domain of noreply-dmarc-support@google.com designates 209.85.220.73 as permitted sender) client-ip=209.85.220.73;"
+          },
+          {
+            "name": "Authentication-Results",
+            "value": "mx.google.com;       dkim=pass header.i=@google.com header.s=20251104 header.b=togMsk5F;       spf=pass (google.com: domain of noreply-dmarc-support@google.com designates 209.85.220.73 as permitted sender) smtp.mailfrom=noreply-dmarc-support@google.com;       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=google.com;       dara=neutral header.i=@dogebuddy.com"
+          },
+          {
+            "name": "DKIM-Signature",
+            "value": "v=1; a=rsa-sha256; c=relaxed/relaxed;        d=google.com; s=20251104; t=1788083830; x=1788688630; darn=dogebuddy.com;        h=content-transfer-encoding:content-disposition:content-type:to:from         :subject:message-id:date:mime-version:from:to:cc:subject:date         :message-id:reply-to:content-type;        bh=utldB7n6cCwI8vmLNiZ32px/ix5/NY/7wTnk9qioa8c=;        b=togMsk5FkTuAk6Q2VmeAuq+Oa1+pqDWGKs5OyOySC2q+o+Qm9blu8McwIIXOmzbVWH         SuIZrhrokn75BGbwx7ppjDFgYq2KFuScjxJZqx0aEVqf/q+EUT7LdTVS8HLVfdGN2HeG         4j3pMR7YActvvn4Q9K7JMVbSPvcJzs+fziPJS5MeXcBxqoK6zxrpSlzctm11nAFdEWPR         6YNHC9WErZYcvh4bVqvsPItUikTMT9T5K59wxxeO8tWncaecHQtNOwLv0dKFaKebg7f8         Dep0DqT32b+wiCQAh8fjMuqtpERTmX1m+x0vQE7bDNw9KuhvEIwZjrp12tFdswPrYK3Z         WcKQ=="
+          },
+          {
+            "name": "X-Google-DKIM-Signature",
+            "value": "v=1; a=rsa-sha256; c=relaxed/relaxed;        d=1e100.net; s=20251104; t=1788083830; x=1788688630;        h=content-transfer-encoding:content-disposition:content-type:to:from         :subject:message-id:date:mime-version:x-gm-message-state:from:to:cc         :subject:date:message-id:reply-to:content-type;        bh=utldB7n6cCwI8vmLNiZ32px/ix5/NY/7wTnk9qioa8c=;        b=tQ1Jf/6mLz2t1xnY1oq+s+4hXApgoN1HikxSPyuO+fYFtipXY4AI2ERYzvhqj6U5wz         kWtow7YnJ8h8NbUqAUgZvq0emkGNkqNKjmfNyx3pL4xJhsY2UyLWR1PPptHDGwZyxlvU         hxY0BikrxE3TI/BuAzbURyXg/dWC3R8JBgBcJhuX4pfxjc6aGMJmPxJwKLkc53TbGnfV         xYbdn2XLk0hFcSqaAs5mm081xgw1mVT9FrhP1ydn5hziYBirFedR5CvbEu81DW6o/m8p         BeINS27B4niCMWP7NAL0VmqINQnoUXUJ0kKu5GrNxYXSxz3y/kg7FB7HiHCPYmD74bbc         Om9A=="
+          },
+          {
+            "name": "X-Gm-Message-State",
+            "value": "AFuF++mZtD33uG0uw2YMOYCWw4ib6YUXjsCP1eyeNC2FFbeUnhonquRZ UNghAHF6Q4RpVr8MkN3HNhKP2wfoHRE1Xj6estg+eSnxQDtpbXy820iVsFY1HOJQwcAoFB8="
+          },
+          {
+            "name": "MIME-Version",
+            "value": "1.0"
+          },
+          {
+            "name": "X-Received",
+            "value": "by 2002:a05:620a:462b:b0:930:987d:9cd7 with SMTP id af79cd13be357-9391377c6a1mr2059694985a.11.1788083830491; Sun, 30 Aug 2026 02:57:10 -0700 (PDT)"
+          },
+          {
+            "name": "Date",
+            "value": "Sat, 29 Aug 2026 16:59:59 -0700"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<11316150216743750765@google.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Report domain: dogebuddy.com Submitter: google.com Report-ID: 11316150216743750765"
+          },
+          {
+            "name": "From",
+            "value": "noreply-dmarc-support@google.com"
+          },
+          {
+            "name": "To",
+            "value": "support@dogebuddy.com"
+          },
+          {
+            "name": "Content-Type",
+            "value": "application/zip; name=\"google.com!dogebuddy.com!1787961600!1788047999.zip\""
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "attachment; filename=\"google.com!dogebuddy.com!1787961600!1788047999.zip\""
+          },
+          {
+            "name": "Content-Transfer-Encoding",
+            "value": "base64"
+          }
+        ],
+        "body": {
+          "attachmentId": "ANGjdJ8X6E4jFbu2eKW-Cqh_SXvYx3E67Vw1wPz-5Kq5uZn1LFIpcZ5u7_RgRyKl_2DI3MLOSF4fOlFtTB0z4M1dhWuJziY6f6Y90IDkXxuQUhf1f61hrR0ezlyjQxMc8ykZBqsleHWGPf6iM5a-pXafirfmRJIe3yvsU_mazUNPF-c3DFmpRKWo_Tkjap2eYKojOFaJ4vrg1fkMmTZtYwzlpUZFqkdGXX4dJfjI803NqmRDENxAqUpIeerFJEHeLAK_jghIqGw7zHcLjLW_Oz6lA-INtzrYgIt4Tw7jhh1hinz82jzjR1ZeIbpJx64zBQ77OQHQ-QYOYNyKI6I94Pr16NK8vc1lilpTMSHpCYdmb-s55MNs2AeXrNVhseS6yhlkBmWKBlIsuaRC6otI",
+          "size": 719
+        }
+      },
+      "sizeEstimate": 6330,
+      "historyId": "4975",
+      "internalDate": "1788047999000"
+    }
+  }
+}
