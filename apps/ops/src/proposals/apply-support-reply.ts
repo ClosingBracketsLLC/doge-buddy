@@ -12,6 +12,7 @@ import {
   type ProposalRow,
 } from './apply-shared.ts'
 import { applyProposalTransition } from './transitions.ts'
+import { isFormPlaceholder } from '../support/form-ids.ts'
 import { clearRedraftCycle } from '../support/redraft.ts'
 
 /**
@@ -57,6 +58,12 @@ const OUTBOUND_SUBJECT_MAX_CHARS = 900
  * examine — the job retries rather than sending blind. */
 export const THREAD_TOO_BUSY_ERROR = 'thread too busy to verify prior send — retrying'
 
+/** Thrown (never returned) when a contact-form ticket is still on its `form:<ticketId>` placeholder
+ * thread id — the ack job hasn't created its Gmail thread yet, so there is nothing to scan or
+ * thread onto. The job retries on its normal schedule; the ack job's own dead-letter alert pages
+ * the owner if the thread never materializes. */
+export const FORM_ACK_PENDING_ERROR = 'form acknowledgement not sent yet — retrying'
+
 type TicketRow = typeof supportTickets.$inferSelect
 type MessageRow = typeof supportMessages.$inferSelect
 
@@ -89,7 +96,8 @@ type MessageRow = typeof supportMessages.$inferSelect
  * in the customer's inbox. Only the two checks that make recovery itself impossible — a missing
  * ticket, an unconfigured Gmail client — run ahead of the scan.
  *
- * Full order: load + recovery-blocking checks -> RECOVERY SCAN (hit -> post-send, done) ->
+ * Full order: load + recovery-blocking checks -> placeholder guard (a contact-form ticket still on
+ * its `form:<ticketId>` thread id throws, retrying) -> RECOVERY SCAN (hit -> post-send, done) ->
  * ticket-status pre-check -> customer email / rfc id pre-checks -> staleness -> send -> post-send.
  *
  * **Refusals vs throws.** Every *refusal* is terminal (`applying -> failed` + audit + owner
@@ -129,6 +137,11 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
   }
   const gmail: GmailClient = deps.gmail
 
+  // A contact-form ticket whose ack hasn't created its Gmail thread yet (contact-form spec §5):
+  // nothing to scan or thread onto. Throw — the job retries on its normal schedule and the ack
+  // job's own dead-letter alert pages the owner if the thread never materializes.
+  if (isFormPlaceholder(ticket.gmailThreadId)) throw new Error(FORM_ACK_PENDING_ERROR)
+
   // --- Recovery scan (spec §4.4), FIRST — see the step-order note above ---
 
   const recoveredId = await findAlreadySentMessageId(gmail, messages, ticket.gmailThreadId, proposalId)
@@ -159,11 +172,14 @@ export async function applySupportReply(deps: ApplyProposalDeps, row: ProposalRo
     await failTerminal(deps, row, ticket.id, 'no inbound message to reply to')
     return
   }
-  const inReplyTo = latestInbound.rfcMessageId
+  // The first reply on a form ticket threads onto OUR ack (its inbound has no rfc id); once the
+  // customer has replied to the ack, the newest inbound carries a real id and wins as before.
+  const latestOutboundWithId = [...messages].reverse().find((m) => m.direction === 'outbound' && m.rfcMessageId !== null)
+  const inReplyTo = latestInbound.rfcMessageId ?? latestOutboundWithId?.rfcMessageId ?? null
   if (inReplyTo === null) {
     // Never send unthreaded: a reply with no In-Reply-To starts a new conversation in the
     // customer's client, detached from the thread they wrote in.
-    await failTerminal(deps, row, ticket.id, 'latest inbound message has no rfc message id')
+    await failTerminal(deps, row, ticket.id, 'no rfc message id to thread the reply onto')
     return
   }
 

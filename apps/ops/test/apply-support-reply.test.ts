@@ -4,6 +4,7 @@ import { and, asc, eq, inArray, like } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SUPPORT_AGENT_QUEUE } from '../src/jobs/support-agent-run.ts'
 import {
+  FORM_ACK_PENDING_ERROR,
   PROPOSAL_APPLIED_ACTION,
   PROPOSAL_APPLY_FAILED_ACTION,
   STALE_APPLY_ERROR,
@@ -49,11 +50,18 @@ describe('applySupportReply', () => {
   let alert: ReturnType<typeof vi.fn>
   let enqueue: ReturnType<typeof vi.fn>
 
+  /** Ticket ids created under `THREAD_PREFIX` that a test then moves OFF the prefix (a form
+   * placeholder `form:<ticketId>`, or a real ack thread id `sendNew` mints) — the LIKE-based scan
+   * below can no longer find them by `gmailThreadId`, so a test that does this pushes its id here
+   * and afterEach sweeps both sets. */
+  let extraTicketIds: string[] = []
+
   beforeEach(() => {
     gmail = createMockGmail({ selfAddress: SUPPORT_ADDRESS })
     notify = vi.fn(async () => true)
     alert = vi.fn(async () => {})
     enqueue = vi.fn(async () => {})
+    extraTicketIds = []
   })
 
   afterEach(async () => {
@@ -61,7 +69,7 @@ describe('applySupportReply', () => {
       .select({ id: supportTickets.id })
       .from(supportTickets)
       .where(like(supportTickets.gmailThreadId, `${THREAD_PREFIX}%`))
-    const ticketIds = ticketRows.map((r) => r.id)
+    const ticketIds = [...new Set([...ticketRows.map((r) => r.id), ...extraTicketIds])]
     if (ticketIds.length > 0) {
       const proposalRows = await db
         .select({ id: proposals.id })
@@ -198,6 +206,56 @@ describe('applySupportReply', () => {
       })
       .returning()
     return row!
+  }
+
+  /**
+   * Seeds a bare ticket row with no Gmail thread and no messages — used by the contact-form
+   * placeholder tests below, which need direct control over `gmailThreadId`/`status` rather than
+   * `seedThread`'s Gmail-round-trip inbound seeding (a form ticket's ids never touch MockGmail
+   * until the ack job runs).
+   */
+  async function seedTicket(opts: {
+    gmailThreadId: string
+    status?: (typeof supportTickets.$inferInsert)['status']
+  }): Promise<string> {
+    const [ticket] = await db
+      .insert(supportTickets)
+      .values({
+        gmailThreadId: opts.gmailThreadId,
+        customerEmail: CUSTOMER,
+        subject: SUBJECT,
+        status: opts.status ?? 'awaiting_approval',
+        lastInboundAt: new Date(),
+      })
+      .returning({ id: supportTickets.id })
+    return ticket!.id
+  }
+
+  /**
+   * Inserts one `support_messages` row directly (no MockGmail round-trip) — used where the test
+   * needs a shape MockGmail would never itself produce: a form placeholder message id, or a null
+   * rfc id on an otherwise-ordinary row.
+   */
+  async function seedInbound(
+    ticketId: string,
+    opts: { gmailMessageId: string; rfcMessageId: string | null; direction?: 'inbound' | 'outbound' },
+  ): Promise<void> {
+    const direction = opts.direction ?? 'inbound'
+    await db.insert(supportMessages).values({
+      ticketId,
+      gmailMessageId: opts.gmailMessageId,
+      direction,
+      fromEmail: direction === 'outbound' ? SUPPORT_ADDRESS : CUSTOMER,
+      bodyText: 'seeded',
+      rfcMessageId: opts.rfcMessageId,
+      sentAt: new Date(),
+    })
+  }
+
+  /** Seeds an `applying` support_reply proposal straight off a ticket id, defaulting the snapshot
+   * to "now" — the form-placeholder tests below only care about threading, not staleness. */
+  async function seedApplyingProposal(ticketId: string, threadSnapshotAt: Date = new Date()) {
+    return seedProposal(ticketId, threadSnapshotAt)
   }
 
   async function readTicket(ticketId: string) {
@@ -487,9 +545,39 @@ describe('applySupportReply', () => {
 
     const failed = await readProposal(proposal.id)
     expect(failed.status).toBe('failed')
-    expect(failed.applyError).toBe('latest inbound message has no rfc message id')
+    expect(failed.applyError).toBe('no rfc message id to thread the reply onto')
     expect(gmail.sentMessages()).toHaveLength(0)
     expect(notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('form ticket still on its placeholder thread id → throws FORM_ACK_PENDING_ERROR (retry), sends nothing, proposal stays applying', async () => {
+    const ticketId = await seedTicket({ gmailThreadId: `${THREAD_PREFIX}form-placeholder`, status: 'awaiting_approval' })
+    extraTicketIds.push(ticketId)
+    await db.update(supportTickets).set({ gmailThreadId: `form:${ticketId}`, source: 'form' }).where(eq(supportTickets.id, ticketId))
+    await seedInbound(ticketId, { gmailMessageId: `form:${uid()}`, rfcMessageId: null })
+    const row = await seedApplyingProposal(ticketId)
+    await expect(applySupportReply(makeDeps(), row)).rejects.toThrow(FORM_ACK_PENDING_ERROR)
+    expect(gmail.sentMessages()).toHaveLength(0)
+    expect((await db.select().from(proposals).where(eq(proposals.id, row.id)))[0]!.status).toBe('applying')
+  })
+
+  it('form ticket after the ack: In-Reply-To falls back to the ack\'s (outbound) Message-ID and References starts with it', async () => {
+    const ticketId = await seedTicket({ gmailThreadId: `${THREAD_PREFIX}acked`, status: 'awaiting_approval' })
+    extraTicketIds.push(ticketId)
+    await seedInbound(ticketId, { gmailMessageId: `form:${uid()}`, rfcMessageId: null })
+    const ack = await gmail.sendNew({ to: CUSTOMER, subject: 'We got your message', messageId: '<form-ack-t@dogebuddy.test>', bodyText: 'ack' })
+    await db.update(supportTickets).set({ gmailThreadId: ack.threadId, source: 'form' }).where(eq(supportTickets.id, ticketId))
+    await db.insert(supportMessages).values({ ticketId, gmailMessageId: ack.id, direction: 'outbound', fromEmail: SUPPORT_ADDRESS, bodyText: 'ack', rfcMessageId: '<form-ack-t@dogebuddy.test>', sentAt: new Date() })
+    const row = await seedApplyingProposal(ticketId)
+
+    await applySupportReply(makeDeps(), row)
+
+    const sent = gmail.sentMessages().filter((m) => m.id !== ack.id)
+    expect(sent).toHaveLength(1)
+    const headers = headerLines(sent[0]!.raw)
+    expect(headers).toContain('In-Reply-To: <form-ack-t@dogebuddy.test>')
+    expect(headers.find((h) => h.startsWith('References: '))).toBe('References: <form-ack-t@dogebuddy.test>')
+    expect(sent[0]!.threadId).toBe(ack.threadId)
   })
 
   it('recovery: a re-entered apply finds its own marker on the thread and does NOT send twice', async () => {
