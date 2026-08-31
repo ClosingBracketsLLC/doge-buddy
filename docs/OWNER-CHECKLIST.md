@@ -9,7 +9,8 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 ## Now / this week
 
 - [x] ~~Tap APPROVE on a proposal on your phone.~~ **Done (2026-08-25) — and it closed BOTH open live tiers.** You approved the *Low Noise Pet Hair Clipper* **from the admin dashboard** (Telegram login-link → `/admin/proposals` → approve — exactly Phase 4B's walk) and rejected the *Plush Round Dog Bed* via the Telegram link. The apply worker created ACTIVE Shopify product `gid://shopify/Product/8949329592408` ($54.99, SKU `CJJJCWGY01635-Style D`) with its CJ fulfillment mapping 6 seconds after the tap. **Phase 5 is closed on every tier.**
-- [ ] 🔴 **`git push origin main`** — carries the **`@idempotent` placement fix** (Shopify requires the directive on `refundCreate`/`inventorySetQuantities` but on the mutation FIELD — ours sat on the operation header, so the first live refund dead-lettered after 5 retries; live-probed both ways, fixed, re-probed accepted) + dead-letter pages now include the GraphQL `errors[]` + the Tier-2 helper scripts. After the redeploy Claude re-seeds the refund and you tap Approve once more. *(Earlier in this item: the cross-thread reply fix)* (a reply Gmail files under a new thread id now attaches to its ticket via `In-Reply-To`/`References` instead of opening a duplicate — found live when your Outlook reply on the spam-foldered "Return request" thread became a 3rd ticket and tripped repeat-complainant) plus docs. The refund-input fix is already deployed. Push, then Claude merges the duplicate ticket into the original and re-arms it for the refund walk.
+- [ ] 🔴 **Migration 0008 on Railway FIRST, then `git push origin main`.** Local main is ahead of origin with the Tier-2 sign-off (re-recorded Gmail fixtures — tests only) **and the pre-triage spam short-circuit, which adds `support_tickets.gmail_spam` (migration `0008_flat_lionheart`)**. Same drill as 0005/0006/0007 — the STRICT order matters: the new ingest code writes that column on every inbound message, so a redeploy before the migration throws on every poll while `/healthz` stays green (a silent mail outage). (1) From this checkout: `DATABASE_URL='<Railway PUBLIC postgres url>' pnpm --filter @doge-buddy/db migrate` → expect `migrations applied` (9/9). (2) Then `git push origin main` and let Railway redeploy. Nothing else to configure — the short-circuit's only knob (`support.spam_shortcircuit.always`) defaults off and lives on `/admin/settings`.
+- [x] ~~`git push origin main` (the `@idempotent` placement fix).~~ **Done (2026-08-30 evening)** — the push landed, the refund was re-seeded and approved, and walk #2 closed on it (live refund `999129448536`). *Original item:* carries the **`@idempotent` placement fix** (Shopify requires the directive on `refundCreate`/`inventorySetQuantities` but on the mutation FIELD — ours sat on the operation header, so the first live refund dead-lettered after 5 retries; live-probed both ways, fixed, re-probed accepted) + dead-letter pages now include the GraphQL `errors[]` + the Tier-2 helper scripts. *(Earlier in this item: the cross-thread reply fix)* (a reply Gmail files under a new thread id now attaches to its ticket via `In-Reply-To`/`References` instead of opening a duplicate — found live when your Outlook reply on the spam-foldered "Return request" thread became a 3rd ticket and tripped repeat-complainant) plus docs.
 - [ ] 🟡 **Rotate the Railway Postgres password AGAIN before launch** (Settings on the Postgres service → regenerate) — the fresh URL was pasted into chat once on 2026-08-30 for the Tier-2 DB verifications. Same drill as 2026-08-27: after regenerating, check whether the ops service's `DATABASE_URL` is the reference `${{Postgres.DATABASE_URL}}` or a stale pasted literal (the literal is what broke ops last time), and remember Railway stages variable edits behind the easy-to-miss Apply banner + a manual redeploy. No rush today; required before real customer data flows.
 - [ ] ⚪ **Publish the storefront — a LAUNCH-DAY switch, deliberately OFF.** `dogebuddy.com` now
   targets the Hydrogen storefront on Oxygen (done 2026-08-30), and Robert keeps it
@@ -23,9 +24,24 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
   - *Already built in ops:* Haiku triage auto-resolves spam (labeled, never escalates, never counts
     toward repeat-complainant); 5-tickets-per-sender-per-day flood fold; triage capped at
     **200 LLM calls/UTC-day** (20/cycle) with a once-a-day Telegram warning — so a flood costs
-    at most ~200 Haiku calls/day. Weak spot: at cap, REAL customer mail waits behind the spam
-    until the next UTC day.
-  - *Do before publishing (Claude builds, ~1 task):* a pre-triage short-circuit — Gmail-SPAM-labeled
+    at most ~200 Haiku calls/day. ~~Weak spot: at cap, REAL customer mail waits behind the spam
+    until the next UTC day.~~ *Closed by the short-circuit below.*
+  - [x] ~~*Do before publishing (Claude builds, ~1 task):* a pre-triage short-circuit.~~ **BUILT
+    (2026-08-30 late; needs migration 0008 + a push — see the 🔴 item above).** A "spam candidate"
+    = the ticket's latest inbound sat in Gmail's own SPAM folder (new `support_tickets.gmail_spam`,
+    kept in step with `last_inbound_at` by ingest) from a sender with **no order on file** (none
+    linked, none under that email in `orders`); tripwired tickets are escalated and never selected.
+    Two things happen: **(1) candidates always sort BEHIND real mail** in the triage selection, so a
+    flood can never delay a real ticket, and **(2) once the day's 200-call cap is reached they are
+    resolved as spam + labeled `DogeBuddy/Spam` WITHOUT a model call** (audit
+    `support.triage_spam_shortcircuit`), never spending the cap. **Deliberate deviation from the
+    original wording ("always without an LLM call"):** while the cap has room a candidate still gets
+    the cheap Haiku verdict, because the live walks showed Gmail spam-foldering a *legitimate*
+    pre-purchase question from a new Outlook sender — exactly the "no order yet" case — and the
+    literal rule would have auto-resolved it unseen. If you'd rather have zero spend on
+    spam-foldered no-order mail regardless, flip **`support.spam_shortcircuit.always`** on at
+    `/admin/settings` (default off) — it's one checkbox, no redeploy.
+    *Original item:* Gmail-SPAM-labeled
     mail from a sender with no order and no tripwire hit auto-resolves as spam **without** an LLM
     call and without consuming the daily cap, so a flood can't starve real tickets.
   - *Decide before publishing:* the privacy policy still says "Email support@ (email address

@@ -196,6 +196,23 @@ Anthropic client (a hung call must not stall ingest).
   midnight; at cap, tickets stay `new` and ONE warning alert fires per UTC day (guarded by
   checking for that day's existing cap-warning audit row). The §2.6 tripwire keeps
   escalation-class mail alerting even at cap.
+- **Pre-triage spam short-circuit (amended 2026-08-30, pre-publish anti-spam hardening —
+  migration 0008):** ingest keeps `support_tickets.gmail_spam` (did the ticket's LATEST inbound sit
+  in Gmail's own SPAM folder; set in the same statement as `last_inbound_at` so an out-of-order
+  older message never overrides it). A **spam candidate** is `gmail_spam AND order_id IS NULL AND
+  no `orders` row under the sender's email` — tripwired tickets are `escalated` and outside the
+  selection anyway. Two effects: (1) the selection ORDER BY puts candidates BEHIND all other
+  tickets, so a spam flood can never delay a real ticket; (2) once the daily cap is reached a
+  candidate is resolved as spam + labeled `DogeBuddy/Spam` WITHOUT a model call and without a
+  spend row (audit `support.triage_spam_shortcircuit {mode: at_cap}`), while real tickets wait for
+  the next UTC day as before (the loop `continue`s past them instead of `break`ing so the
+  candidates behind them still clear). While the cap has room a candidate still gets the Haiku
+  verdict — deliberately: the live walks showed Gmail spam-foldering a legitimate pre-purchase
+  question from a new Outlook sender (no order yet, by definition), which an always-skip rule
+  would auto-resolve unseen. The boolean setting `support.spam_shortcircuit.always` (default
+  false) switches to always-skip (`{mode: always}`) for an owner who prefers zero spend on that
+  class. Short-circuited tickets are `is_spam = true`, so the repeat-complainant tally excludes
+  them exactly like model-verdict spam.
 
 ## 4. Admin — `/admin/tickets` replaces the stub
 
