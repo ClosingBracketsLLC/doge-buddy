@@ -1,6 +1,6 @@
 # Contact form — Turnstile-gated storefront form → support ticket → Gmail-threaded reply
 
-**Date:** 2026-08-31 · **Status:** BUILT 2026-08-31 (branch `contact-form`); live walk pending owner keys ·
+**Date:** 2026-08-31 · **Status:** LIVE 2026-08-31 — merged to main, deployed, live walk PASSED (results + 3 findings at the end) ·
 **Parent:** OWNER-CHECKLIST "Publish the storefront" → *Decide before publishing* (option (a))
 · **Builds on:** 6A support plumbing (ingest/triage/admin), 6B support agent (reply worker,
 `X-DogeBuddy-Proposal` marker), the 2026-08-30 spam short-circuit (migration 0008).
@@ -254,3 +254,35 @@ Create the Turnstile widget (Cloudflare account, free) → two keys; `TURNSTILE_
 Railway; `PUBLIC_TURNSTILE_SITE_KEY` + `OPS_BASE_URL` on Oxygen (all environments); migration
 0009 on Railway BEFORE the push (the new endpoint reads `source`); push; then the live walk (§Exit
 criteria) from the Outlook test address — reply-on-thread only, per the test-address rule.
+
+## Live walk results (2026-08-31, Railway + Oxygen, Robert + Claude)
+
+| Exit criterion | Result |
+|---|---|
+| 1 ticket + "via contact form" badge | ✓ |
+| 2 ack in the customer's inbox | ✓ Gmail recipient (`robert@closingbrackets.com`, 22:34:24Z) · ✗ Outlook.com — finding B |
+| 3 approved reply threads onto the ack | ✓ sent 22:36:26Z, `In-Reply-To`/`References` = the ack's REAL Message-ID, marker `871f3f80-…` on the sent copy |
+| 4 customer reply attaches to the same ticket | ✓ Gmail reply 22:38:42Z landed in the ack thread, ingested by the next poll (`DogeBuddy/New` label), same ticket in admin |
+| 5 honeypot / bad token / fold | covered by the ops test suite; not exercised live |
+| 6 Gmail preserves our `Message-ID` | ✗ — finding A (absorbed by design) |
+
+**Finding A — Gmail rewrites the client-supplied `Message-ID` on `messages.send`.** We sent
+`<form-ack-<ticketId>@dogebuddy.com>`; the wire copy carries `<CAHaBOB…@mail.gmail.com>`. Consequences:
+the `rfc822msgid:` crash-recovery search can never match, so duplicate-ack protection rests entirely on
+the claim sentinel + stale reclaim (§4, final-review hardening); threading is unaffected because the job
+reads the real id back after sending and persists it — §4 step 2's "fallback" paragraph is the normal
+case. Optional follow-up: make the recovery search `to:<email> subject:"We got your message" newer_than:1h`
+so crash-window recovery works again.
+
+**Finding B — Outlook.com silently discards first-contact mail from the new domain.** Google's Email Log
+Search shows both the ack and the reply to `collinscontracting509@outlook.com` as `Delivered to an SMTP
+server 52.101.73.122 (TLS)` in 0.5 s; nothing arrived in Inbox/Junk/Other/Deleted; no bounce. Earlier
+walks' replies to that mailbox landed only because it had written to support@ first. SPF/DKIM/DMARC all
+pass — this is Microsoft's reputation filter on a 6-day-old domain. Owner item on OWNER-CHECKLIST
+(DMARC tightening + warm-up + safe-sender on the test account); the storefront success copy now hedges.
+
+**Finding C — the walk's first submission (from the Outlook test address) tripped `repeat_complainant`**
+(3rd ticket in 30 days from that address) and the agent never ran. Correct behaviour; re-armed with the
+walk-#2 SQL (`status='triaged', escalation_reason=NULL, escalation_notified_at=NULL`). Test-address rule
+applies to the form too.
+

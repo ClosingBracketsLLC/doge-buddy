@@ -119,7 +119,7 @@ export default function Contact() {
         {/* Deliberately does NOT name the support address — the whole point of this
             form is that the address is never printed on a public page (spec §1). */}
         <p className="mt-4 text-ink">
-          A confirmation from Doge Buddy Support is on its way — reply to it to
+          A confirmation from Doge Buddy Support should arrive within a few minutes (check your junk or spam folder if it doesn&apos;t) — reply to it to
           add anything (photos included).
         </p>
       </main>
