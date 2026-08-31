@@ -28,5 +28,12 @@ describe('verifyTurnstile', () => {
     await expect(verifyTurnstile({ secretKey: 's', token: 't', remoteIp: null, fetchFn: boom })).resolves.toEqual({ ok: false, errorCodes: ['network'] })
     const five = vi.fn(async () => new Response('bad gateway', { status: 502 })) as unknown as typeof fetch
     await expect(verifyTurnstile({ secretKey: 's', token: 't', remoteIp: null, fetchFn: five })).resolves.toEqual({ ok: false, errorCodes: ['network'] })
+    const junk = vi.fn(async () => new Response('not json', { status: 200 })) as unknown as typeof fetch
+    await expect(verifyTurnstile({ secretKey: 's', token: 't', remoteIp: null, fetchFn: junk })).resolves.toEqual({ ok: false, errorCodes: ['network'] })
+  })
+
+  it('surfaces errorCodes:["unknown"] when a 2xx body has success:false with no error-codes', async () => {
+    const empty = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
+    await expect(verifyTurnstile({ secretKey: 's', token: 't', remoteIp: null, fetchFn: empty })).resolves.toEqual({ ok: false, errorCodes: ['unknown'] })
   })
 })
