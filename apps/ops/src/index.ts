@@ -25,6 +25,7 @@ import type { ReconcileDeps } from './fulfillment/run-reconcile.ts'
 import type { ShopifyFulfillmentOps } from './fulfillment/run-sync-tracking.ts'
 import type { ActionRouteDeps } from './http/actions.ts'
 import type { AdminDeps } from './http/admin/routes.ts'
+import type { ContactRouteDeps } from './http/contact.ts'
 import type { WebhookDeps } from './http/webhooks.ts'
 import { cjDisputePollHandler, type DisputePollDeps } from './jobs/cj-dispute-poll.ts'
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
@@ -121,6 +122,11 @@ const alert = (severity: AlertSeverity, kind: string, detail: Record<string, unk
 
 const actionDeps: ActionRouteDeps = { db, enqueue, alert }
 
+// `POST /public/contact` (contact-form spec §2): only when Gmail (the ack) AND a Turnstile secret
+// exist — otherwise the route must not exist at all, and the storefront shows its unavailable copy.
+const contactDeps: ContactRouteDeps | undefined =
+  config.gmail && config.turnstile ? { db, enqueue, alert, turnstileSecretKey: config.turnstile.secretKey } : undefined
+
 // Owner-notification seam for the proposal pipeline (Task 6): Telegram when configured, else the
 // alert-and-false noop fallback (`createNoopNotifier`). Built here (rather than down by
 // `shopifyOps`/`proposalShopify`, which it doesn't depend on) so it's available for `adminDeps`
@@ -149,7 +155,10 @@ const adminDeps: AdminDeps = {
 const app = buildServer({
   pool, isQueueReady: () => queue.ready(), webhooks: webhookDeps,
   ...(config.adminBaseUrl ? { actions: actionDeps, admin: adminDeps } : {}),
+  ...(contactDeps ? { contact: contactDeps } : {}),
 })
+
+app.log.info(contactDeps ? 'contact form endpoint ARMED' : 'contact form endpoint DISABLED (needs GMAIL_* + TURNSTILE_SECRET_KEY)')
 
 // Loud on purpose: which adapter actually backs the money path is the single most important fact
 // about this boot, and it's driven by an env var (`FULFILLMENT_SUPPLIER`) that's easy to leave

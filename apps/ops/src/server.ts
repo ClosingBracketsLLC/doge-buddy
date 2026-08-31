@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import type pg from 'pg'
 import { actionRoutes, type ActionRouteDeps } from './http/actions.ts'
 import { adminRoutes, type AdminDeps } from './http/admin/routes.ts'
+import { contactRoutes, type ContactRouteDeps } from './http/contact.ts'
 import { redactTokenParam } from './http/redact.ts'
 import { webhookRoutes, type WebhookDeps } from './http/webhooks.ts'
 
@@ -11,6 +12,7 @@ export interface ServerDeps {
   webhooks?: WebhookDeps
   actions?: ActionRouteDeps
   admin?: AdminDeps
+  contact?: ContactRouteDeps
 }
 
 export function buildServer(deps: ServerDeps): FastifyInstance {
@@ -61,6 +63,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   if (deps.admin) {
     // No prefix: route paths carry /admin/... literally, matching the actions.ts style above.
     app.register(adminRoutes(deps.admin))
+  }
+
+  if (deps.contact) {
+    // No prefix: the route path is literally /public/contact.
+    app.register(contactRoutes(deps.contact))
   }
 
   return app
