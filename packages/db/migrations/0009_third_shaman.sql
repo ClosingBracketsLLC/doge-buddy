@@ -1,0 +1,1 @@
+ALTER TABLE "support_tickets" ADD COLUMN "source" text DEFAULT 'email' NOT NULL;

@@ -3,6 +3,7 @@ import { auditLog, orders, supportMessages, supportTickets, type createDb } from
 import type { GmailClient } from '@doge-buddy/gmail'
 import { and, asc, count, desc, eq, gte, or, sql } from 'drizzle-orm'
 import { createSettings, type Settings } from '../settings.ts'
+import { isGmailMessageId } from './form-ids.ts'
 import { applyLabel, createLabelCache, SPAM_LABEL, type Alert } from './ingest.ts'
 import { clearRedraftCycle } from './redraft.ts'
 
@@ -474,6 +475,8 @@ async function labelSpam(
     .where(eq(supportMessages.ticketId, ticketId))
 
   for (const message of messages) {
+    // A contact-form message has no Gmail message behind it (spec §3) — nothing to label.
+    if (!isGmailMessageId(message.gmailMessageId)) continue
     await applyLabel(deps.gmail, labels, deps.alert, message.gmailMessageId, SPAM_LABEL)
   }
 }

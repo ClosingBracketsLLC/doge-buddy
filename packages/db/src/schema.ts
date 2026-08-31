@@ -152,6 +152,10 @@ export const supportTickets = pgTable('support_tickets', {
   lastTriagedAt: timestamp('last_triaged_at', { withTimezone: true }),
   triageFailureCount: integer('triage_failure_count').notNull().default(0),
   claimedOrderNumber: text('claimed_order_number'),
+  // Where the ticket's conversation began: 'email' (Gmail ingest) or 'form' (the storefront
+  // contact form — `gmail_thread_id` starts life as the `form:<ticketId>` placeholder until the
+  // ack job swaps in the real Gmail thread; see support/form-ids.ts).
+  source: text('source').notNull().default('email'),
   // Whether the ticket's LATEST inbound message sat in Gmail's own SPAM folder at ingest time
   // (ingest keeps it in step with last_inbound_at). Read by triage's pre-LLM spam short-circuit:
   // Gmail-spam + no order on file + no tripwire → deprioritized behind real mail and, at the daily

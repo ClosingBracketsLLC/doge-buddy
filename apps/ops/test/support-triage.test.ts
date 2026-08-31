@@ -245,6 +245,20 @@ describe('runTriage', () => {
     expect((await ticketById(laterId))!.status).toBe('triaged')
   })
 
+  it('a spam verdict on a form ticket labels only its REAL Gmail messages — a form: id never reaches applyLabel', async () => {
+    const id = await seedTicket({ customerEmail: 'bulk@example.com', subject: 'Contact form: buy now' })
+    await seedMessage(id, { bodyText: 'buy now', gmailMessageId: 'form:11111111-1111-1111-1111-111111111111' })
+    const real = gmail.receiveInbound({ from: 'bulk@example.com', to: ['support@dogebuddy.com'], subject: 'Re: buy now', bodyText: 'again' })
+    await seedMessage(id, { bodyText: 'again', gmailMessageId: real.id })
+    const modify = vi.spyOn(gmail, 'modifyMessage')
+
+    await runTriage(makeDeps(async () => verdict({ is_spam: true, category: 'other' })))
+
+    expect((await ticketById(id))!.status).toBe('resolved')
+    expect(modify.mock.calls.map(([mid]) => mid)).toEqual([real.id])
+    expect(alert).not.toHaveBeenCalled()
+  })
+
   // 5
   it('escalates the 3rd non-spam ticket from the same customer inside 30 days (repeat complainant)', async () => {
     await seedTicket({ status: 'resolved', customerEmail: 'repeat@example.com' })

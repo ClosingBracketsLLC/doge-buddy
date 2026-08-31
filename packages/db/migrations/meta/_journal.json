@@ -64,6 +64,13 @@
       "when": 1788137855259,
       "tag": "0008_flat_lionheart",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788139660771,
+      "tag": "0009_third_shaman",
+      "breakpoints": true
     }
   ]
 }
