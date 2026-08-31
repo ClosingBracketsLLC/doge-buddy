@@ -121,6 +121,27 @@ describe('/contact action', () => {
     }
   });
 
+  it("an unreadable body can't 500 — it takes the 'unavailable' page", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // a direct POST whose declared content-type lies about the body
+      const request = new Request('https://shop.example/contact', {
+        method: 'POST',
+        headers: {'content-type': 'multipart/form-data; boundary=nope'},
+        body: 'not actually multipart',
+      });
+      const res = (await action({
+        request,
+        context: {env: {OPS_BASE_URL: 'https://ops.example'}},
+        params: {},
+      } as unknown as Parameters<typeof action>[0])) as ActionData;
+      expect(res.result).toEqual({kind: 'unavailable'});
+      expect(res.values).toBeNull();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it('returns the typed values when OPS_BASE_URL is missing too', async () => {
     const form = new FormData();
     form.set('name', TYPED.name);

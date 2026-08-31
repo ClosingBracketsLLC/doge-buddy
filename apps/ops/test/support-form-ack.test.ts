@@ -4,8 +4,8 @@ import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   FORM_ACK_BODY_SCREENED_ACTION, FORM_ACK_QUEUE, FORM_ACK_SEND_OPTS, FORM_ACK_SENT_ACTION, FORM_ACK_SKIPPED_ACTION,
-  FORM_ACK_SUBJECT, FORM_ACK_SWEEP_AFTER_MS, executeFormAck, formAckBody, formAckHandler, formAckMessageId,
-  greetingName, nameFromFormBody, sweepUnackedFormTickets,
+  FORM_ACK_SUBJECT, FORM_ACK_SWEEP_AFTER_MS, FORM_ACK_CLAIM_STALE_MS, executeFormAck, formAckBody, formAckHandler,
+  formAckMessageId, greetingName, nameFromFormBody, sweepUnackedFormTickets,
 } from '../src/jobs/support-form-ack.ts'
 import { PROPOSAL_RETRY_OPTS } from '../src/proposals/submit.ts'
 import { formPlaceholderThreadId, formSendingSentinel } from '../src/support/form-ids.ts'
@@ -125,8 +125,10 @@ describe('support.form-ack', () => {
 
   it("a concurrent worker that finds the sentinel returns 'skipped' and sends nothing", async () => {
     const id = await seedFormTicket()
-    // Worker A has claimed the ticket and is inside gmail.sendNew right now.
-    await db.update(supportTickets).set({ gmailThreadId: formSendingSentinel(id) }).where(eq(supportTickets.id, id))
+    // Worker A claimed the ticket a moment ago and is inside gmail.sendNew RIGHT NOW — a fresh
+    // sentinel, well inside FORM_ACK_CLAIM_STALE_MS, so this really is the concurrency case and
+    // not the stranded-claim case below.
+    await db.update(supportTickets).set({ gmailThreadId: formSendingSentinel(id, NOW.getTime() - 1_000) }).where(eq(supportTickets.id, id))
     await expect(executeFormAck(deps(), id)).resolves.toBe('skipped')
     expect(gmail.sentMessages()).toHaveLength(0)
     const skipped = await db.select().from(auditLog).where(eq(auditLog.action, FORM_ACK_SKIPPED_ACTION))
@@ -154,7 +156,7 @@ describe('support.form-ack', () => {
   it('crash recovery still works with the sentinel in place (died between send and DB write)', async () => {
     const id = await seedFormTicket()
     const prior = await gmail.sendNew({ to: EMAIL, subject: FORM_ACK_SUBJECT, messageId: formAckMessageId(id, SUPPORT), bodyText: 'x' })
-    await db.update(supportTickets).set({ gmailThreadId: formSendingSentinel(id) }).where(eq(supportTickets.id, id))
+    await db.update(supportTickets).set({ gmailThreadId: formSendingSentinel(id, NOW.getTime() - 1_000) }).where(eq(supportTickets.id, id))
     await expect(executeFormAck(deps(), id)).resolves.toBe('recovered')
     expect(gmail.sentMessages()).toHaveLength(1)
     const [t] = await db.select().from(supportTickets).where(eq(supportTickets.id, id))
@@ -277,5 +279,83 @@ describe('support.form-ack', () => {
     const enqueue = vi.fn(async (_name: string, data: object) => { seen.push((data as { ticketId: string }).ticketId) })
     await sweepUnackedFormTickets({ db, enqueue, now: () => NOW })
     expect(seen).toEqual([older, newer])
+  })
+
+  // -- re-review CRITICAL: a crash inside the CLAIM window must not strand the ticket --
+
+  it('a STALE sentinel (process killed between claim and send) is reclaimed: the ack actually sends, and the owner is warned', async () => {
+    const id = await seedFormTicket()
+    // A worker claimed it, then died. No sent copy exists (it never got that far).
+    const dead = formSendingSentinel(id, NOW.getTime() - FORM_ACK_CLAIM_STALE_MS - 1_000)
+    await db.update(supportTickets).set({ gmailThreadId: dead }).where(eq(supportTickets.id, id))
+
+    await expect(executeFormAck(deps(), id)).resolves.toBe('sent')
+
+    expect(gmail.sentMessages()).toHaveLength(1)
+    const [t] = await db.select().from(supportTickets).where(eq(supportTickets.id, id))
+    expect(t!.gmailThreadId).toBe(gmail.sentMessages()[0]!.threadId)
+    const out = (await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))).find((m) => m.direction === 'outbound')
+    expect(out).toBeDefined()
+    expect(await db.select().from(auditLog).where(eq(auditLog.action, FORM_ACK_SENT_ACTION))).toHaveLength(1)
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'support_form_ack_stale_claim_reclaimed',
+      expect.objectContaining({ ticketId: id }),
+    )
+  })
+
+  it('a stale sentinel WITH a prior sent copy is recovered, not re-sent (no duplicate ack)', async () => {
+    const id = await seedFormTicket()
+    const prior = await gmail.sendNew({ to: EMAIL, subject: FORM_ACK_SUBJECT, messageId: formAckMessageId(id, SUPPORT), bodyText: 'x' })
+    await db
+      .update(supportTickets)
+      .set({ gmailThreadId: formSendingSentinel(id, NOW.getTime() - FORM_ACK_CLAIM_STALE_MS - 1_000) })
+      .where(eq(supportTickets.id, id))
+
+    await expect(executeFormAck(deps(), id)).resolves.toBe('recovered')
+
+    expect(gmail.sentMessages()).toHaveLength(1)
+    const [t] = await db.select().from(supportTickets).where(eq(supportTickets.id, id))
+    expect(t!.gmailThreadId).toBe(prior.threadId)
+    // recovery beats reclaim: no takeover warning when the sent copy was found
+    expect(alert).not.toHaveBeenCalledWith('warning', 'support_form_ack_stale_claim_reclaimed', expect.anything())
+  })
+
+  it('two workers reclaiming the SAME dead sentinel: only one wins (compare-and-swap on the observed value)', async () => {
+    const id = await seedFormTicket()
+    const dead = formSendingSentinel(id, NOW.getTime() - FORM_ACK_CLAIM_STALE_MS - 1_000)
+    await db.update(supportTickets).set({ gmailThreadId: dead }).where(eq(supportTickets.id, id))
+
+    const [a, b] = await Promise.all([executeFormAck(deps(), id), executeFormAck(deps(), id)])
+    // The invariant is ONE acknowledgement, not a particular pair of return values: the loser
+    // either skips (lost the CAS) or recovers (found the winner's sent copy) depending on where
+    // the two interleave. Neither may send.
+    expect(gmail.sentMessages()).toHaveLength(1)
+    expect([a, b].filter((r) => r === 'sent')).toHaveLength(1)
+    const [t] = await db.select().from(supportTickets).where(eq(supportTickets.id, id))
+    expect(t!.gmailThreadId).toBe(gmail.sentMessages()[0]!.threadId)
+    const outbound = (await db.select().from(supportMessages).where(eq(supportMessages.ticketId, id))).filter((m) => m.direction === 'outbound')
+    expect(outbound).toHaveLength(1)
+  })
+
+  // -- the thread_taken loop is bounded --
+
+  it('the sweep does NOT re-enqueue a ticket already recorded as thread_taken', async () => {
+    const taken = await seedFormTicket({ createdAt: new Date(NOW.getTime() - 60 * 60_000) })
+    const normal = await seedFormTicket({ createdAt: new Date(NOW.getTime() - 30 * 60_000) })
+    await db.insert(auditLog).values({
+      actor: 'system', action: FORM_ACK_SKIPPED_ACTION, entityType: 'support_ticket', entityId: taken,
+      detail: { reason: 'thread_taken' },
+    })
+    // a DIFFERENT skip reason on the other ticket must not exclude it
+    await db.insert(auditLog).values({
+      actor: 'system', action: FORM_ACK_SKIPPED_ACTION, entityType: 'support_ticket', entityId: normal,
+      detail: { reason: 'claimed_elsewhere' },
+    })
+
+    const seen: string[] = []
+    const enqueue = vi.fn(async (_name: string, data: object) => { seen.push((data as { ticketId: string }).ticketId) })
+    await expect(sweepUnackedFormTickets({ db, enqueue, now: () => NOW })).resolves.toEqual({ enqueued: 1 })
+    expect(seen).toEqual([normal])
   })
 })

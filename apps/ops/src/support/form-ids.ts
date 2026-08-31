@@ -33,9 +33,32 @@ export function formMessageId(): string {
  * sweep's `LIKE 'form:%'` all still recognise a ticket whose process died mid-send, and the next
  * attempt recovers the already-sent copy through the deterministic `rfc822msgid:` search. The
  * random suffix keeps `gmail_thread_id`'s UNIQUE constraint satisfiable for concurrent claims.
+ *
+ * The embedded CLAIM TIMESTAMP is what makes the claim recoverable rather than terminal (re-review
+ * critical). A process killed between the claim and `sendNew` returning — a Railway redeploy, an
+ * OOM, a pg-boss expiry — leaves a sentinel no one owns any more: the retry's `rfc822msgid:` search
+ * finds nothing (never sent, or the index still lags) and a claim guarded only on the plain
+ * placeholder matches 0 rows forever. `parseSendingSentinel` lets the next attempt see HOW OLD the
+ * claim is and take it over once no live worker could still be holding it.
  */
-export function formSendingSentinel(ticketId: string): string {
-  return `${FORM_ID_PREFIX}${ticketId}:sending:${randomUUID()}`
+export function formSendingSentinel(ticketId: string, nowMs: number = Date.now()): string {
+  return `${FORM_ID_PREFIX}${ticketId}:sending:${nowMs}:${randomUUID()}`
+}
+
+const SENDING_SENTINEL_RE = /^form:.+:sending:(\d+):[0-9a-f-]{36}$/
+
+/**
+ * Reads the claim timestamp back out of a sending sentinel — `null` for a plain placeholder, a real
+ * Gmail thread id, or any shape this version did not write (so an in-flight sentinel from the
+ * PREVIOUS deploy, which carried no timestamp, is treated as "not parseable" and left alone rather
+ * than reclaimed on a guess; its ticket is recovered by the `rfc822msgid:` search or reported by
+ * the sweep, exactly as before).
+ */
+export function parseSendingSentinel(threadId: string): { claimedAtMs: number } | null {
+  const m = SENDING_SENTINEL_RE.exec(threadId)
+  if (!m) return null
+  const claimedAtMs = Number(m[1])
+  return Number.isFinite(claimedAtMs) ? { claimedAtMs } : null
 }
 
 /** Matches the plain placeholder AND every sending sentinel for one ticket — the guard the ack's

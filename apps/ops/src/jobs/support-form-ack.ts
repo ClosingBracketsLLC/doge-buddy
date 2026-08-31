@@ -1,6 +1,6 @@
 import { auditLog, supportMessages, supportTickets, type createDb } from '@doge-buddy/db'
 import type { GmailClient } from '@doge-buddy/gmail'
-import { and, asc, eq, like, lt } from 'drizzle-orm'
+import { and, asc, eq, like, lt, notExists, sql } from 'drizzle-orm'
 import type PgBoss from 'pg-boss'
 import type { SendOpts } from '../fulfillment/types.ts'
 import {
@@ -8,6 +8,7 @@ import {
   formSendingSentinel,
   formThreadIdLikePattern,
   isFormPlaceholder,
+  parseSendingSentinel,
 } from '../support/form-ids.ts'
 import type { Alert } from '../support/ingest.ts'
 import { validateReplyBody } from '../support/validator.ts'
@@ -41,6 +42,13 @@ export const FORM_ACK_SKIPPED_ACTION = 'support.form_ack_skipped'
 export const FORM_ACK_BODY_SCREENED_ACTION = 'support.form_ack_body_screened'
 /** A form ticket still on its placeholder this long after creation is re-enqueued by the poll. */
 export const FORM_ACK_SWEEP_AFTER_MS = 2 * 60_000
+/**
+ * How old a `:sending:` claim must be before another attempt may take it over. Set to the job's own
+ * `expireInSeconds` (600s) — past that ceiling pg-boss has already expired the invocation that
+ * wrote the claim, so no live worker can still be inside `sendNew` holding it. Below the ceiling a
+ * sentinel is assumed live and the attempt still skips.
+ */
+export const FORM_ACK_CLAIM_STALE_MS = 600_000
 const SWEEP_LIMIT = 20
 
 export function formAckMessageId(ticketId: string, supportAddress: string): string {
@@ -149,6 +157,11 @@ async function composeAckBody(deps: FormAckDeps, ticketId: string, inboundBody: 
  *  3. GUARDED SWAP — the thread swap matches any `form:<id>%` value for this ticket and returns
  *     its rowcount; the outbound message row and the `form_ack_sent` audit row are written ONLY
  *     when it matched, so a worker that lost the race writes nothing at all.
+ *
+ * A claim is never permanent: a sentinel older than `FORM_ACK_CLAIM_STALE_MS` (the job's own
+ * expiry, past which pg-boss has already expired the invocation that wrote it) is taken over by a
+ * compare-and-swap on the exact observed value, with a `support_form_ack_stale_claim_reclaimed`
+ * warning. Without that a kill inside the claim window stranded the ticket for good.
  */
 export async function executeFormAck(deps: FormAckDeps, ticketId: string): Promise<'sent' | 'recovered' | 'skipped'> {
   if (!deps.gmail) throw new Error('support.form-ack: gmail not configured')
@@ -182,15 +195,35 @@ export async function executeFormAck(deps: FormAckDeps, ticketId: string): Promi
     sent = prior.ids[0]
     recovered = true
   } else {
-    const sentinel = formSendingSentinel(ticketId)
+    // A claim we may be allowed to TAKE OVER: the ticket already carries a sentinel, and it is old
+    // enough that pg-boss has expired whatever invocation wrote it (a kill / redeploy / expiry
+    // between the claim and `sendNew` returning). Without this the ticket is stranded forever —
+    // the search above finds nothing and a placeholder-only guard can never match again.
+    const priorClaim = parseSendingSentinel(ticket.gmailThreadId)
+    const staleClaim = priorClaim !== null && now().getTime() - priorClaim.claimedAtMs >= FORM_ACK_CLAIM_STALE_MS
+
+    const sentinel = formSendingSentinel(ticketId, now().getTime())
     const claimed = await deps.db
       .update(supportTickets)
       .set({ gmailThreadId: sentinel })
-      .where(and(eq(supportTickets.id, ticketId), eq(supportTickets.gmailThreadId, formPlaceholderThreadId(ticketId))))
+      // Stale takeover is a compare-and-swap against the EXACT value we observed, so two workers
+      // reclaiming the same dead sentinel still cannot both win. A fresh sentinel (someone is
+      // plausibly still sending) keeps the plain-placeholder guard and therefore still skips.
+      .where(and(
+        eq(supportTickets.id, ticketId),
+        eq(supportTickets.gmailThreadId, staleClaim ? ticket.gmailThreadId : formPlaceholderThreadId(ticketId)),
+      ))
       .returning({ id: supportTickets.id })
     if (claimed.length === 0) {
       await auditSkip(deps, ticketId, 'claimed_elsewhere')
       return 'skipped'
+    }
+    if (staleClaim) {
+      // The owner needs to know: the dead attempt MAY have reached Gmail without the search
+      // catching it (index lag), so this recovery can produce a duplicate acknowledgement.
+      await deps
+        .alert('warning', 'support_form_ack_stale_claim_reclaimed', { ticketId, claimedAtMs: priorClaim!.claimedAtMs })
+        .catch(() => {})
     }
     try {
       sent = await gmail.sendNew({ to: ticket.customerEmail, subject: FORM_ACK_SUBJECT, messageId, bodyText })
@@ -274,14 +307,39 @@ export function formAckHandler(deps: FormAckDeps): PgBoss.WorkHandler<{ ticketId
   }
 }
 
-/** Poll stage: any form ticket still on its placeholder after FORM_ACK_SWEEP_AFTER_MS gets its ack job (re-)enqueued — `stately` + singletonKey make this idempotent. Oldest first (T6-2) so the LIMIT can never starve an early ticket behind newer ones. */
+/**
+ * Poll stage: any form ticket still on its placeholder after FORM_ACK_SWEEP_AFTER_MS gets its ack
+ * job (re-)enqueued — `stately` + singletonKey make this idempotent. Oldest first (T6-2) so the
+ * LIMIT can never starve an early ticket behind newer ones.
+ *
+ * A ticket whose thread id was TAKEN by an ingest-created ticket (I7) is excluded: its swap can
+ * only ever raise 23505, so re-enqueueing it every poll cycle buys nothing and grows the audit log
+ * forever while occupying one of the LIMIT slots. The `support_form_ack_thread_taken` warning has
+ * already asked the owner to merge the two tickets by hand; that merge clears the placeholder and
+ * the ticket leaves this select for good.
+ */
 export async function sweepUnackedFormTickets(deps: { db: Db; enqueue: SendFn; now?: () => Date }): Promise<{ enqueued: number }> {
   const now = deps.now ?? (() => new Date())
   const cutoff = new Date(now().getTime() - FORM_ACK_SWEEP_AFTER_MS)
   const rows = await deps.db
     .select({ id: supportTickets.id })
     .from(supportTickets)
-    .where(and(eq(supportTickets.source, 'form'), like(supportTickets.gmailThreadId, 'form:%'), lt(supportTickets.createdAt, cutoff)))
+    .where(and(
+      eq(supportTickets.source, 'form'),
+      like(supportTickets.gmailThreadId, 'form:%'),
+      lt(supportTickets.createdAt, cutoff),
+      notExists(
+        deps.db
+          .select({ one: sql`1` })
+          .from(auditLog)
+          .where(and(
+            eq(auditLog.action, FORM_ACK_SKIPPED_ACTION),
+            // audit_log.entity_id is text, support_tickets.id is uuid.
+            sql`${auditLog.entityId} = ${supportTickets.id}::text`,
+            sql`${auditLog.detail} ->> 'reason' = 'thread_taken'`,
+          )),
+      ),
+    ))
     .orderBy(asc(supportTickets.createdAt))
     .limit(SWEEP_LIMIT)
   for (const { id } of rows) await deps.enqueue(FORM_ACK_QUEUE, { ticketId: id }, FORM_ACK_SEND_OPTS(id))

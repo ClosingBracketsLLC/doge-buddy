@@ -20,8 +20,16 @@ export async function loader({context}: Route.LoaderArgs) {
 export async function action({request, context}: Route.ActionArgs) {
   const opsBaseUrl = context.env.OPS_BASE_URL;
   // Parsed BEFORE the config check so every non-'sent' result — 'unavailable' included — can hand
-  // the typed values back to the re-rendered form (see the banner below).
-  const parsed = parseContactForm(await request.formData());
+  // the typed values back to the re-rendered form (see the banner below). A direct POST with a
+  // malformed/absent body makes `formData()` throw, which would surface as a 500; there is nothing
+  // to restore in that case, so it takes the same 'unavailable' page a real outage does.
+  let parsed;
+  try {
+    parsed = parseContactForm(await request.formData());
+  } catch (err) {
+    console.error('contact form: unreadable submission body', err);
+    return {result: {kind: 'unavailable'} as ContactResult, values: null};
+  }
   if (!opsBaseUrl)
     return {
       result: {kind: 'unavailable'} as ContactResult,
