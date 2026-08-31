@@ -10,6 +10,14 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 - [x] ~~Tap APPROVE on a proposal on your phone.~~ **Done (2026-08-25) — and it closed BOTH open live tiers.** You approved the *Low Noise Pet Hair Clipper* **from the admin dashboard** (Telegram login-link → `/admin/proposals` → approve — exactly Phase 4B's walk) and rejected the *Plush Round Dog Bed* via the Telegram link. The apply worker created ACTIVE Shopify product `gid://shopify/Product/8949329592408` ($54.99, SKU `CJJJCWGY01635-Style D`) with its CJ fulfillment mapping 6 seconds after the tap. **Phase 5 is closed on every tier.**
 - [ ] 🔴 **Migration 0008 on Railway FIRST, then `git push origin main`.** Local main is ahead of origin with the Tier-2 sign-off (re-recorded Gmail fixtures — tests only) **and the pre-triage spam short-circuit, which adds `support_tickets.gmail_spam` (migration `0008_flat_lionheart`)**. Same drill as 0005/0006/0007 — the STRICT order matters: the new ingest code writes that column on every inbound message, so a redeploy before the migration throws on every poll while `/healthz` stays green (a silent mail outage). (1) From this checkout: `DATABASE_URL='<Railway PUBLIC postgres url>' pnpm --filter @doge-buddy/db migrate` → expect `migrations applied` (9/9). (2) Then `git push origin main` and let Railway redeploy. Nothing else to configure — the short-circuit's only knob (`support.spam_shortcircuit.always`) defaults off and lives on `/admin/settings`.
+- [ ] 🔴 **Contact form go-live (3 keys, 1 migration, 1 push, then a 5-minute live walk).**
+  1. **Cloudflare → Turnstile → Add widget**: name `dogebuddy contact`, hostnames `dogebuddy.com` AND the Oxygen preview hostname (from the Hydrogen channel), widget mode **Managed**. Copy the **Site key** and the **Secret key**.
+  2. **Railway → ops → Variables**: `TURNSTILE_SECRET_KEY=<secret key>` (Apply banner!).
+  3. **Shopify admin → Hydrogen channel → storefront → Environments → every environment**: `PUBLIC_TURNSTILE_SITE_KEY=<site key>`, `OPS_BASE_URL=https://doge-buddyops-production.up.railway.app`.
+  4. From this checkout: `DATABASE_URL='<Railway PUBLIC postgres url>' pnpm --filter @doge-buddy/db migrate` → expect 10/10 (0008 + 0009 together if 0008 hasn't run yet).
+  5. `git push origin main` → Railway redeploys ops (log line `contact form endpoint ARMED`), Oxygen redeploys the storefront.
+  6. **Live walk** (Claude watches the DB/mailbox): open `/contact` on the preview URL signed in, submit from the Outlook test address with a real question → (a) ticket with the "via contact form" badge on `/admin/tickets`; (b) ack in the Outlook INBOX from support@; (c) approve the agent's draft from your phone → reply lands in the SAME Outlook conversation; (d) reply to it from Outlook → same ticket, no duplicate. Claude then checks `rfc822msgid:` on the sent ack (spec exit criterion 6).
+  7. **Housekeeping**: the build's local verification sent one real acknowledgement email from support@ to robert@closingbrackets.com (subject "We got your message — Doge Buddy Support") — that thread can be deleted from the support mailbox whenever.
 - [x] ~~`git push origin main` (the `@idempotent` placement fix).~~ **Done (2026-08-30 evening)** — the push landed, the refund was re-seeded and approved, and walk #2 closed on it (live refund `999129448536`). *Original item:* carries the **`@idempotent` placement fix** (Shopify requires the directive on `refundCreate`/`inventorySetQuantities` but on the mutation FIELD — ours sat on the operation header, so the first live refund dead-lettered after 5 retries; live-probed both ways, fixed, re-probed accepted) + dead-letter pages now include the GraphQL `errors[]` + the Tier-2 helper scripts. *(Earlier in this item: the cross-thread reply fix)* (a reply Gmail files under a new thread id now attaches to its ticket via `In-Reply-To`/`References` instead of opening a duplicate — found live when your Outlook reply on the spam-foldered "Return request" thread became a 3rd ticket and tripped repeat-complainant) plus docs.
 - [ ] 🟡 **Rotate the Railway Postgres password AGAIN before launch** (Settings on the Postgres service → regenerate) — the fresh URL was pasted into chat once on 2026-08-30 for the Tier-2 DB verifications. Same drill as 2026-08-27: after regenerating, check whether the ops service's `DATABASE_URL` is the reference `${{Postgres.DATABASE_URL}}` or a stale pasted literal (the literal is what broke ops last time), and remember Railway stages variable edits behind the easy-to-miss Apply banner + a manual redeploy. No rush today; required before real customer data flows.
 - [ ] ⚪ **Publish the storefront — a LAUNCH-DAY switch, deliberately OFF.** `dogebuddy.com` now
@@ -17,10 +25,12 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
   **password-protected on purpose**: his last published Shopify store was flooded with thousands of
   bot emails. This does NOT block any Tier-2 walk (checkout works signed-in; webhooks don't care).
   Before flipping it public, the anti-spam picture for THIS stack, audited 2026-08-30:
-  - *Already true:* the Hydrogen storefront has **no contact form, no newsletter signup, no
-    `mailto:`** — the classic Liquid-theme flood vectors (contact/comment forms → merchant
-    notification emails) don't exist here. The only forms are search (GET) and the signed-in
-    account pages.
+  - *Already true:* the Hydrogen storefront now has a `/contact` form — no newsletter signup, no
+    `mailto:`, and the support address is never printed — but the form itself exists and is
+    **Turnstile-gated + honeypotted + capped (100/day) + folded (5/sender/day)**. The classic
+    Liquid-theme flood vector (a contact form → unbounded merchant notification emails) is closed
+    by those four layers rather than by the form's absence. The only other forms are search (GET)
+    and the signed-in account pages.
   - *Already built in ops:* Haiku triage auto-resolves spam (labeled, never escalates, never counts
     toward repeat-complainant); 5-tickets-per-sender-per-day flood fold; triage capped at
     **200 LLM calls/UTC-day** (20/cycle) with a once-a-day Telegram warning — so a flood costs
@@ -44,9 +54,11 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
     *Original item:* Gmail-SPAM-labeled
     mail from a sender with no order and no tripwire hit auto-resolves as spam **without** an LLM
     call and without consuming the daily cap, so a flood can't starve real tickets.
-  - *Decide before publishing:* the privacy policy still says "Email support@ (email address
+  - [x] ~~*Decide before publishing:* the privacy policy still says "Email support@ (email address
     coming soon — see contact page)". Options: (a) a Turnstile+honeypot contact form that creates a
-    ticket directly (no address exposed — recommended), or (b) print the address as text (scrapeable).
+    ticket directly (no address exposed — recommended), or (b) print the address as text
+    (scrapeable).~~ **Decided + BUILT (2026-08-31): option (a).** See the 🔴 "Contact form go-live"
+    item above for the remaining owner keys + live walk.
   - *Shopify-side:* Settings → Notifications → turn off every staff notification you don't want
     (new customer sign-ups etc.); Settings → Customer accounts → keep the passwordless "new"
     accounts (bots can only trigger codes to THEMSELVES).

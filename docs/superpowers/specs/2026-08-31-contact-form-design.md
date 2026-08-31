@@ -1,6 +1,6 @@
 # Contact form — Turnstile-gated storefront form → support ticket → Gmail-threaded reply
 
-**Date:** 2026-08-31 · **Status:** approved in chat 2026-08-30 (Robert), spec for review ·
+**Date:** 2026-08-31 · **Status:** BUILT 2026-08-31 (branch `contact-form`); live walk pending owner keys ·
 **Parent:** OWNER-CHECKLIST "Publish the storefront" → *Decide before publishing* (option (a))
 · **Builds on:** 6A support plumbing (ingest/triage/admin), 6B support agent (reply worker,
 `X-DogeBuddy-Proposal` marker), the 2026-08-30 spam short-circuit (migration 0008).
@@ -52,13 +52,22 @@ the agent, validator, triage verdicts, or the refund path; a customer-account-ga
   `{ name, email, orderNumber, message, turnstileToken, honeypot, ip }` as JSON to
   `${OPS_BASE_URL}/public/contact` with a 10s timeout; `ip` = `cf-connecting-ip` header, else the
   first `x-forwarded-for` entry, else null. Maps ops' response: `200 {ok:true}` → success state
-  ("Sent — a confirmation from support@dogebuddy.com is on its way; reply to it to add anything");
-  `400 {error:'validation', fields}` → inline field errors, form re-rendered with values;
+  ("Sent!" / "A confirmation from Doge Buddy Support is on its way — reply to it to add anything
+  (photos included)." — deliberately never names `support@dogebuddy.com`, per the Problem
+  statement's own constraint); `400 {error:'validation', fields}` → inline field errors, form
+  re-rendered with values;
   `400 {error:'turnstile'}` → "Verification failed — please try again"; `429` → "Too many messages
   right now — please try again later"; `503`/network error → the unavailable copy. The honeypot
-  is ALSO checked in the action (filled → render success without calling ops).
+  is ALSO checked in the action (filled → render success without calling ops). A rejected
+  submission resets the Turnstile widget (its token is single-use, so the re-rendered form would
+  otherwise resubmit an already-redeemed token on the next try); validation errors on keys the
+  form doesn't render an inline `<span>` for (e.g. `turnstileToken`) show as a banner instead of
+  being silently dropped.
 - **CSP** (`entry.server.tsx`): add `https://challenges.cloudflare.com` to `script-src`,
   `frame-src`, and `connect-src` (Turnstile loads a script and an iframe and posts to itself).
+  *Implementation note:* Hydrogen's `createContentSecurityPolicy` REPLACES (does not merge)
+  `scriptSrc`/`frameSrc`, so `entry.server.tsx` repeats Hydrogen's `default-src` list on those two
+  directives plus `challenges.cloudflare.com`; `connectSrc` merges.
 - **Nav/policy**: footer gets `{to: '/contact', title: 'Contact'}`; `POLICY_COPY` privacy line
   becomes "Use the contact form at /contact to access or delete your data." (the storefront
   renders `POLICY_COPY`; the agent quotes it — run it through the existing validator regression
@@ -77,7 +86,8 @@ the endpoint must not exist — the storefront then sees a 404 and shows the una
 as 503). JSON body, 8KB limit. Order of checks — each is a hard stop:
 
 1. **Honeypot** non-empty → `200 {ok:true}` and NOTHING is stored (bots see success); one audit
-   row `support.form_honeypot` (no content, no email — just a count).
+   row `support.form_honeypot` (no content, no email — just a count), capped at 100 honeypot
+   audit rows per UTC day.
 2. **Validation** (same rules as §1, server-authoritative; email lower-cased/trimmed) →
    `400 {ok:false, error:'validation', fields:{...}}`.
 3. **Turnstile** `POST https://challenges.cloudflare.com/turnstile/v0/siteverify`
@@ -92,7 +102,9 @@ as 503). JSON body, 8KB limit. Order of checks — each is a hard stop:
 5. **One transaction** (mirrors `ingestMessageId`'s atomic block, reusing its exported helpers):
    - **per-sender fold**: `findFloodFoldTarget(tx, now, email)` (exported from ingest.ts) — a
      sender already at `MAX_TICKETS_PER_SENDER_PER_DAY` (5) today lands as a message on their
-     newest ticket instead of a new one (+ the existing fold warning alert after commit).
+     newest ticket instead of a new one (+ the existing fold warning alert after commit); the
+     `support_sender_flood` alert fires once per sender per UTC day (audit
+     `support.form_flood_alerted`).
    - else **create the ticket**: `source = 'form'`, `gmail_thread_id = 'form:<ticketId>'`
      (placeholder — see §3), `customer_email`, `subject = 'Contact form: ' + first 60 chars of
      the message` (or `'Contact form: order #<n>'` when an order number was given), `status
@@ -108,9 +120,14 @@ as 503). JSON body, 8KB limit. Order of checks — each is a hard stop:
    - audit `support.form_submission {ticketId, folded, ip: null}`.
    - enqueue `support.form-ack {ticketId}` **from inside the tx** using the same `queue.boss
      .send` closure pattern the poll uses (pg-boss writes to the same Postgres — if the tx rolls
-     back, no job).
+     back, no job). *Implementation note:* the ack job is enqueued **after** commit (pg-boss
+     sends on its own connection); the poll's 5th stage re-enqueues any form ticket still on its
+     placeholder after 2 minutes, which gives the same no-ticket-without-ack guarantee.
 6. `200 {ok:true}`. Escalation notify for a tripwired form ticket rides the next poll cycle's
    `notifyPendingEscalations` (it selects by `escalation_notified_at IS NULL`, source-agnostic).
+
+A plugin-scoped error handler answers `500 {ok:false,error:'internal'}` — raw errors never reach
+the client.
 
 Everything triage does afterwards is unchanged: Haiku verdict (spam / category / order number →
 ownership-checked link), repeat-complainant, agent selection, draft → Telegram → approve.
