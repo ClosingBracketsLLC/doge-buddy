@@ -68,6 +68,15 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
 
 ## P1
 
+- [ ] **Sourcing agent upgrades (brainstorm AFTER the admin control center — owner ruling 2026-08-31).**
+  Three specs, in this order: (1) competitor-price tool for the agent (Amazon / Google Shopping
+  lookup on the top candidates, rule "price ≤ 1.3× market" enforced in Stage 6, not just advised);
+  (2) a demand-signal harvest source beyond CJ keyword search (Amazon movers-and-shakers / Google
+  Shopping trends per category feeding candidate discovery; also confirm `SERPAPI` is configured on
+  Railway — the trends stage degrades silently without it); (3) an outcome feedback loop —
+  `product_scores` (units, refunds) biasing the next harvest's keywords/price bands. Today the agent
+  is Sonnet 5 + 4 read-only CJ MCP tools + web search; discovery is keyword-only.
+
 - [ ] **Supplier delisting → automatic deprecation proposal.** CJ answers `Variant has been removed
   from shelves` on `getVariantStock` for a delisted variant (seen live 2026-08-31 on the Snuff
   Pad). Today that is just a failed read every 6 h (and a `listing_stock_read_failed` warning);
