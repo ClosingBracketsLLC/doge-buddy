@@ -15,6 +15,8 @@ import {
 import {
   SOURCING_OUTPUT_JSON_SCHEMA,
   SourcingOutputSchema,
+  sourcingOutputJsonSchema,
+  sourcingOutputSchema,
 } from '../src/agents/output-schema.ts'
 import type { HarvestCandidate } from '../src/sourcing/harvest.ts'
 import type { TrendSignal } from '../src/sourcing/trends.ts'
@@ -104,6 +106,58 @@ describe('runSourcingAgent (fake SDK stream)', () => {
     expect(capturedPrompt).toContain('US stock — HARD RULE')
     expect(capturedPrompt).toContain('DISQUALIFIED')
     expect(capturedPrompt).toContain('NOT evidence of US stock')
+  })
+
+  it('knobs drive the prompt, the budget and the output schema cap (defaults when no knobs passed)', async () => {
+    const runId = await claimRow('knobs')
+    let capturedPrompt: string | undefined
+    let capturedOptions: Record<string, unknown> | undefined
+    async function* stream(): AsyncGenerator<Record<string, unknown>> {
+      yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
+    }
+    const d = deps((args) => { capturedPrompt = args.prompt; capturedOptions = args.options; return stream() })
+
+    await runSourcingAgent(d, {
+      runId,
+      candidates: candidates(),
+      trendSignals: trendSignals(),
+      knobs: { keywords: ['dog toy'], maxWinners: 8, maxBudgetUsd: 6.5, candidateTarget: 40, maxPages: 20 },
+    })
+
+    expect(capturedPrompt).toContain('up to 8 winners')
+    expect(capturedPrompt).not.toContain('up to THREE')
+    expect(capturedOptions!.maxBudgetUsd).toBe(6.5)
+    expect(((capturedOptions!.outputFormat as { schema: { properties: { winners: { maxItems: number } } } }).schema).properties.winners.maxItems).toBe(8)
+  })
+
+  it('prompt pins the category tags to the store CATEGORIES and asks for keyword-intent matching', async () => {
+    const runId = await claimRow('categories')
+    let capturedPrompt: string | undefined
+    async function* stream(): AsyncGenerator<Record<string, unknown>> {
+      yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
+    }
+    const d = deps((args) => { capturedPrompt = args.prompt; return stream() })
+
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: trendSignals() })
+
+    expect(capturedPrompt).toContain('toys|walks|beds|grooming')
+    expect(capturedPrompt).toContain('CATEGORIES')
+    expect(capturedPrompt).toContain("match the keyword's intent when obvious")
+  })
+
+  it('no knobs passed: the constants still drive the prompt and the budget (unchanged default behaviour)', async () => {
+    const runId = await claimRow('knob-defaults')
+    let capturedPrompt: string | undefined
+    let capturedOptions: Record<string, unknown> | undefined
+    async function* stream(): AsyncGenerator<Record<string, unknown>> {
+      yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
+    }
+    const d = deps((args) => { capturedPrompt = args.prompt; capturedOptions = args.options; return stream() })
+
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: trendSignals() })
+
+    expect(capturedPrompt).toContain('up to 3 winners')
+    expect(capturedOptions!.maxBudgetUsd).toBe(SOURCING_MAX_BUDGET_USD)
   })
 
   it('constants match the spec Global Constraints', () => {
@@ -325,5 +379,29 @@ describe('output-schema', () => {
   it('parses a valid single-winner output', () => {
     const parsed = SourcingOutputSchema.safeParse({ winners: [validWinner()], notes: 'ok' })
     expect(parsed.success).toBe(true)
+  })
+
+  it('the default export is exactly sourcingOutputSchema(3) — untouched callers keep the old cap', () => {
+    const w = validWinner()
+    expect(sourcingOutputSchema(3).safeParse({ winners: [w, w, w] }).success).toBe(true)
+    expect(sourcingOutputSchema(3).safeParse({ winners: [w, w, w, w] }).success).toBe(false)
+    expect(SourcingOutputSchema.safeParse({ winners: [w, w, w] }).success).toBe(true)
+  })
+
+  it('sourcingOutputSchema(8) accepts 8 winners and rejects 9', () => {
+    const w = validWinner()
+    const eight = Array.from({ length: 8 }, () => w)
+    expect(sourcingOutputSchema(8).safeParse({ winners: eight }).success).toBe(true)
+    expect(sourcingOutputSchema(8).safeParse({ winners: [...eight, w] }).success).toBe(false)
+  })
+
+  it('sourcingOutputJsonSchema(n) carries the live cap and stays draft-07', () => {
+    const schema = sourcingOutputJsonSchema(8) as {
+      $schema?: string
+      properties?: { winners?: { maxItems?: number } }
+    }
+    expect(schema.$schema).toBe('http://json-schema.org/draft-07/schema#')
+    expect(schema.properties?.winners?.maxItems).toBe(8)
+    expect(JSON.stringify(schema)).not.toContain('draft/2020-12')
   })
 })

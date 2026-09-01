@@ -131,6 +131,13 @@ describe('settings editor + manual-signal paste box', () => {
     expect(res.body).toContain('<option value="auto">auto</option>')
     // Number keys render as a number input with the current value.
     expect(res.body).toContain(`value="${SETTINGS_DEFAULTS['fulfillment.spend_cap_per_order_cents']}"`)
+    // Catalog-build sourcing knobs (spec 2026-08-31 catalog-p0 §5): they are plain numeric
+    // settings, so the generic catalog above already renders them — asserted explicitly here
+    // because the owner drives the whole build week from this page.
+    for (const key of ['sourcing.max_winners', 'sourcing.candidate_target', 'sourcing.max_pages', 'sourcing.max_budget_cents'] as const) {
+      expect(res.body).toContain(key)
+      expect(res.body).toContain(`value="${SETTINGS_DEFAULTS[key]}"`)
+    }
     // The paste box.
     expect(res.body).toContain('action="/admin/signals"')
     expect(res.body).toContain('name="content"')

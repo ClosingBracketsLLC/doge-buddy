@@ -1,11 +1,12 @@
 import { type createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
-import { CATEGORY_TAGS } from '@doge-buddy/core'
+import { CATEGORIES, CATEGORY_TAGS } from '@doge-buddy/core'
 import { type createDb } from '@doge-buddy/db'
 import { CLAIM_TERMS, EXCLUDED_CATEGORY_TERMS } from '../sourcing/guards.ts'
 import type { HarvestCandidate } from '../sourcing/harvest.ts'
+import type { SourcingKnobs } from '../sourcing/knobs.ts'
 import type { TrendSignal } from '../sourcing/trends.ts'
 import { runAgentQuery, type QueryFn } from './run-harness.ts'
-import { SOURCING_OUTPUT_JSON_SCHEMA, SourcingOutputSchema, type SourcingOutput } from './output-schema.ts'
+import { DEFAULT_MAX_WINNERS, sourcingOutputJsonSchema, sourcingOutputSchema, type SourcingOutput } from './output-schema.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -40,11 +41,17 @@ export interface SourcingRunInput {
   runId: string
   candidates: HarvestCandidate[]
   trendSignals: TrendSignal[]
+  /**
+   * Resolved catalog-build knobs for this run (`sourcing/knobs.ts`). Only `maxWinners` and
+   * `maxBudgetUsd` reach the agent; the harvest knobs are already spent by the time we get here.
+   * Optional: absent means the module constants, i.e. exactly the pre-knobs behaviour.
+   */
+  knobs?: SourcingKnobs
 }
 
-const SYSTEM_PROMPT =
+const buildSystemPrompt = (maxWinners: number): string =>
   'You are the sourcing researcher for a US dog-products store. You research demand and competition ' +
-  'for a fixed set of candidate products and return up to three ready-to-approve new_listing ' +
+  `for a fixed set of candidate products and return up to ${maxWinners} ready-to-approve new_listing ` +
   'proposals as structured output. You never take side-effecting actions; plain code validates, ' +
   'prices, and submits everything you return, and re-verifies every number against the supplier — ' +
   'so propose real candidates confidently; the downstream gate catches anything that does not hold up. ' +
@@ -58,13 +65,14 @@ const SYSTEM_PROMPT =
 /** Compact, deterministic prompt per spec §Stage 3: candidates + signals as JSON lines, store
  * context with the freight-inclusive margin formula spelled out, BOTH guard lists verbatim, and a
  * hard "winners ONLY from these candidates" instruction. */
-function buildPrompt(input: SourcingRunInput): string {
+function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
   const candidateLines = input.candidates.map((c) => JSON.stringify(c)).join('\n')
   const signalLines = input.trendSignals.map((s) => JSON.stringify(s)).join('\n')
 
   return [
     '## Store context',
     `Category tags (pick exactly one per listing): ${CATEGORY_TAGS.join(', ')}.`,
+    `categoryTag must be one of ${CATEGORIES.map((c) => c.tag).join('|')} (the store's CATEGORIES); match the keyword's intent when obvious.`,
     'Prices and costs are integer cents. Ships from US only; buyers expect a few-days delivery window.',
     'A winner must clear the freight-inclusive margin floor. For every variant:',
     `  floor((priceCents - supplierCostCents - freightCents) * 10000 / priceCents) >= ${SOURCING_MARGIN_FLOOR_BPS} bps.`,
@@ -98,7 +106,7 @@ function buildPrompt(input: SourcingRunInput): string {
     '',
     '## Task',
     'Work the candidates in this order — do NOT skip straight to output:',
-    '1. Pick your ~3-5 most promising candidates from the list above (best demand signal, price band',
+    `1. Pick your ~${maxWinners}-${maxWinners + 2} most promising candidates from the list above (best demand signal, price band`,
     '   that can clear the margin floor, not in an excluded category).',
     '2. For EACH, call get_product_detail (variants, supplier costs, description, images), get_stock',
     '   (confirm real US warehouse stock), and quote_freight (US shipping cost + days). Use get_reviews',
@@ -106,7 +114,7 @@ function buildPrompt(input: SourcingRunInput): string {
     '3. Build a complete new_listing payload for each candidate that clears the margin floor: one',
     '   categoryTag, real variants with SKUs/priceCents/supplierCostCents from the detail call, an',
     "   http(s) image URL, US-appropriate delivery days, and clean marketing copy (no disallowed claims).",
-    '4. Return up to THREE winners in the required structured output, each with rationale, marginPct,',
+    `4. Return up to ${maxWinners} winners in the required structured output, each with rationale, marginPct,`,
     '   and freightEstimateCents (from your quote_freight call).',
     '',
     'Do NOT return zero winners without first calling get_product_detail on at least your top three',
@@ -131,17 +139,22 @@ function buildPrompt(input: SourcingRunInput): string {
  * the Phase 6B extraction.
  */
 export async function runSourcingAgent(deps: SourcingRunDeps, input: SourcingRunInput): Promise<AgentRunResult> {
+  // No knobs resolved (existing callers/tests) => the module constants, i.e. today's behaviour.
+  const maxWinners = input.knobs?.maxWinners ?? DEFAULT_MAX_WINNERS
+  const maxBudgetUsd = input.knobs?.maxBudgetUsd ?? SOURCING_MAX_BUDGET_USD
+  const outputSchema = sourcingOutputSchema(maxWinners)
+
   const result = await runAgentQuery<SourcingOutput>(
     { db: deps.db, alert: deps.alert, queryFn: deps.queryFn },
     input.runId,
-    buildPrompt(input),
+    buildPrompt(input, maxWinners),
     {
       model: SOURCING_MODEL,
       maxTurns: SOURCING_MAX_TURNS,
-      maxBudgetUsd: SOURCING_MAX_BUDGET_USD,
+      maxBudgetUsd,
       watchdogMs: SOURCING_WATCHDOG_MS,
-      systemPrompt: SYSTEM_PROMPT,
-      outputJsonSchema: SOURCING_OUTPUT_JSON_SCHEMA,
+      systemPrompt: buildSystemPrompt(maxWinners),
+      outputJsonSchema: sourcingOutputJsonSchema(maxWinners),
       // The availability layer: NEVER [] — that would strip WebSearch/WebFetch and allowedTools
       // cannot restore availability. MCP tools come from mcpServers and are unaffected by this list.
       tools: ['WebSearch', 'WebFetch'],
@@ -151,7 +164,7 @@ export async function runSourcingAgent(deps: SourcingRunDeps, input: SourcingRun
       alertKinds: { invalidOutput: 'sourcing_output_invalid', runFailed: 'sourcing_run_failed' },
     },
     (raw) => {
-      const parsed = SourcingOutputSchema.safeParse(raw)
+      const parsed = outputSchema.safeParse(raw)
       return parsed.success ? { success: true, data: parsed.data } : { success: false, issues: parsed.error.issues }
     },
   )

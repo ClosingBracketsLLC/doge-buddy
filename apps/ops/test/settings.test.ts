@@ -93,4 +93,19 @@ describe('settings', () => {
     expect(await s.get('scoring.max_refund_rate_bps')).toBe(1000)
     await s.set('scoring.max_refund_rate_bps', 2500) // restore default
   })
+
+  it('defaults the four catalog-build sourcing knobs to today behaviour (3/15/10/200c)', async () => {
+    const s = createSettings(db)
+    expect(await s.get('sourcing.max_winners')).toBe(3)
+    expect(await s.get('sourcing.candidate_target')).toBe(15)
+    expect(await s.get('sourcing.max_pages')).toBe(10)
+    expect(await s.get('sourcing.max_budget_cents')).toBe(200)
+  })
+
+  it('round-trips a number for sourcing.max_winners', async () => {
+    const s = createSettings(db)
+    await s.set('sourcing.max_winners', 8)
+    expect(await s.get('sourcing.max_winners')).toBe(8)
+    await s.set('sourcing.max_winners', 3) // restore default
+  })
 })

@@ -329,4 +329,60 @@ describe('runHarvest', () => {
 
     expect(result.pagesFetched).toBe(HARVEST_MAX_PAGES_TOTAL)
   })
+
+  // --- Catalog-build knobs (spec 2026-08-31 catalog-p0 §5) -----------------------------------
+  // The three constants above stay the DEFAULTS (every test in this file passes no knobs); these
+  // prove the injected values take over when the pipeline resolves them from settings/CLI.
+
+  it('injected keywords replace HARVEST_KEYWORDS entirely for that run', async () => {
+    const p = `h${uid()}`
+    const pid = `${p}-kw`
+    seededPids = [pid]
+
+    const adapter = makeAdapter({
+      'dog snuffle mat': [[summary(pid, { title: 'Snuffle Mat' })], []],
+      'dog toy': [[summary(`${p}-never`)], []],
+    })
+    const alert = vi.fn(async () => {})
+
+    const result = await runHarvest({ db, adapter, alert, keywords: ['dog snuffle mat'] })
+
+    const queried = new Set(adapter.searchProducts.mock.calls.map(([q]) => q.keyword))
+    expect([...queried]).toEqual(['dog snuffle mat'])
+    expect(result.candidates.map((c) => c.supplierProductId)).toEqual([pid])
+    expect(result.candidates[0]!.keyword).toBe('dog snuffle mat')
+  })
+
+  it('injected maxPages is the hard page cap for the run', async () => {
+    const p = `h${uid()}`
+    const pages: Record<string, SupplierProductSummary[][]> = {
+      'dog toy': Array.from({ length: 20 }, (_, i) => [summary(`${p}-p${i + 1}`, { listedCount: i + 1 })]),
+    }
+    seededPids = Object.values(pages)
+      .flat(2)
+      .map((s) => s.supplierProductId)
+
+    const adapter = makeAdapter(pages)
+    const alert = vi.fn(async () => {})
+
+    const result = await runHarvest({ db, adapter, alert, keywords: ['dog toy'], maxPages: 3 })
+
+    expect(result.pagesFetched).toBe(3)
+    expect(adapter.searchProducts.mock.calls).toHaveLength(3)
+  })
+
+  it('injected candidateTarget caps the returned candidate list', async () => {
+    const p = `h${uid()}`
+    const pids = Array.from({ length: 8 }, (_, i) => `${p}-c${i}`)
+    seededPids = pids
+    const summaries = pids.map((pid, i) => summary(pid, { title: `Rope Toy ${i}`, listedCount: 100 - i }))
+
+    const adapter = makeAdapter({ 'dog toy': [summaries, []] })
+    const alert = vi.fn(async () => {})
+
+    const result = await runHarvest({ db, adapter, alert, keywords: ['dog toy'], candidateTarget: 4 })
+
+    expect(result.candidates).toHaveLength(4)
+    expect(result.candidates.map((c) => c.listedNum)).toEqual([100, 99, 98, 97])
+  })
 })

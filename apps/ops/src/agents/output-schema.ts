@@ -16,12 +16,25 @@ export const SourcingWinnerSchema = z.object({
 })
 export type SourcingWinner = z.infer<typeof SourcingWinnerSchema>
 
-/** The agent's structured output: ≤3 winners plus optional free-text notes. */
-export const SourcingOutputSchema = z.object({
-  winners: z.array(SourcingWinnerSchema).max(3),
-  notes: z.string().max(2000).optional(),
-})
-export type SourcingOutput = z.infer<typeof SourcingOutputSchema>
+/** The cap the sourcing agent has always run with — the `sourcing.max_winners` setting default and
+ * what every caller that does not resolve knobs still gets. */
+export const DEFAULT_MAX_WINNERS = 3
+
+/**
+ * The agent's structured output: ≤ `maxWinners` winners plus optional free-text notes. A factory
+ * (spec 2026-08-31 catalog-p0 §5) because a catalog-build run raises the cap for that run only —
+ * the shape is identical at every cap, only `.max()` moves.
+ */
+export function sourcingOutputSchema(maxWinners: number) {
+  return z.object({
+    winners: z.array(SourcingWinnerSchema).max(maxWinners),
+    notes: z.string().max(2000).optional(),
+  })
+}
+
+/** The default-cap schema. Kept as a named export so untouched callers/tests keep compiling. */
+export const SourcingOutputSchema = sourcingOutputSchema(DEFAULT_MAX_WINNERS)
+export type SourcingOutput = z.infer<ReturnType<typeof sourcingOutputSchema>>
 
 /**
  * JSON Schema handed to the SDK as `outputFormat.schema`. Bridged from the zod schema via
@@ -36,4 +49,9 @@ export type SourcingOutput = z.infer<typeof SourcingOutputSchema>
  * and the zod `.refine`s that JSON Schema can't express drop out — harmless, since Stage 4
  * re-validates every winner against the full zod schema before anything is submitted.
  */
-export const SOURCING_OUTPUT_JSON_SCHEMA = z.toJSONSchema(SourcingOutputSchema, { target: 'draft-7' })
+export function sourcingOutputJsonSchema(maxWinners: number): Record<string, unknown> {
+  return z.toJSONSchema(sourcingOutputSchema(maxWinners), { target: 'draft-7' })
+}
+
+/** The default-cap JSON Schema. Kept as a named export for untouched callers/tests. */
+export const SOURCING_OUTPUT_JSON_SCHEMA = sourcingOutputJsonSchema(DEFAULT_MAX_WINNERS)

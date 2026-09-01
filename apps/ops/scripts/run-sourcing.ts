@@ -8,6 +8,7 @@ import { loadDotEnv } from '../src/load-env.ts'
 import type { NotifyOwner } from '../src/notify/notify.ts'
 import { createTelegramNotifier } from '../src/notify/telegram.ts'
 import { createSettings } from '../src/settings.ts'
+import { describeSourcingKnobs, parseRunSourcingArgs, resolveSourcingKnobs } from '../src/sourcing/knobs.ts'
 import { runSourcingPipeline, type SourcingPipelineDeps } from '../src/sourcing/pipeline.ts'
 import { createSerpApiTrends } from '../src/sourcing/trends.ts'
 import { DrizzleCjTokenStore } from '../src/stores/cj-token-store.ts'
@@ -20,15 +21,30 @@ import { DrizzleCjTokenStore } from '../src/stores/cj-token-store.ts'
  * and `verify-live.ts`: bootstrap mirrors `seed-proposal.ts`'s exactly (load `.env`, build
  * db/settings/alert/notify, real Telegram when configured else a console fallback).
  *
- * `pnpm --filter @doge-buddy/ops run-sourcing [--force]`
+ * Catalog-build knobs (spec 2026-08-31 catalog-p0 §5): the flags below override the `sourcing.*`
+ * settings for THIS run only — the Monday cron passes none and keeps the settings' defaults. Arg
+ * parsing itself is the pure `parseRunSourcingArgs`, unit-tested in `test/sourcing-knobs.test.ts`
+ * (it lives in `src/sourcing/knobs.ts` because importing this script would execute it).
+ *
+ * `pnpm --filter @doge-buddy/ops run-sourcing [--force] [--keywords "a,b,c"] [--max-winners N]
+ *   [--budget USD] [--candidates N] [--pages N]`
  */
+export { parseRunSourcingArgs } from '../src/sourcing/knobs.ts'
 
 if (loadDotEnv(import.meta.url)) {
   console.log('run-sourcing: loaded apps/ops/.env (existing environment variables take precedence)')
 }
 
 const config = loadConfig(process.env)
-const force = process.argv.includes('--force')
+
+let force: boolean
+let overrides: ReturnType<typeof parseRunSourcingArgs>['overrides']
+try {
+  ;({ force, overrides } = parseRunSourcingArgs(process.argv.slice(2)))
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err))
+  process.exit(1)
+}
 
 const MAX_ERROR_MESSAGE_LENGTH = 500
 
@@ -162,9 +178,12 @@ try {
   }
 
   const deps: SourcingPipelineDeps = {
-    db, adapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trendsFactory, force,
+    db, adapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trendsFactory, force, overrides,
   }
 
+  // Resolved here purely to PRINT what this run will do before it costs anything; the pipeline
+  // resolves the same knobs itself (one settings read each — no shared state to get out of sync).
+  console.log(`run-sourcing: knobs — ${describeSourcingKnobs(await resolveSourcingKnobs(settings, overrides))}`)
   console.log(`run-sourcing: starting${force ? ' (--force)' : ''}...`)
   const result = await runSourcingPipeline(deps)
 

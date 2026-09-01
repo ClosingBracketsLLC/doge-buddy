@@ -1,4 +1,4 @@
-import { agentRunEvents, agentRuns, auditLog, createDb, proposals, sourcingSignals } from '@doge-buddy/db'
+import { agentRunEvents, agentRuns, auditLog, createDb, proposals, settings as settingsTable, sourcingSignals } from '@doge-buddy/db'
 import type {
   ShippingOption,
   SupplierAdapter,
@@ -11,7 +11,8 @@ import type {
 } from '@doge-buddy/supplier'
 import { and, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { SOURCING_MODEL, type SourcingRunDeps } from '../src/agents/sourcing-run.ts'
+import { SOURCING_MAX_BUDGET_USD, SOURCING_MODEL, type SourcingRunDeps } from '../src/agents/sourcing-run.ts'
+import { sourcingWeeklyHandler } from '../src/jobs/sourcing-weekly.ts'
 import { createSettings } from '../src/settings.ts'
 import { HARVEST_KEYWORDS } from '../src/sourcing/harvest.ts'
 import { runSourcingPipeline, type SourcingPipelineDeps } from '../src/sourcing/pipeline.ts'
@@ -455,5 +456,138 @@ describe('runSourcingPipeline', () => {
     const failed = rows.filter((r) => r.status === 'failed')
     expect(failed.length).toBeGreaterThanOrEqual(1)
     expect(failed.every((r) => r.finishedAt !== null)).toBe(true)
+  })
+
+  // --- (h)-(j) catalog-build knobs (spec 2026-08-31 catalog-p0 §5) ---------------------------
+
+  /** Adapter whose keyword pass NEVER runs dry: every page of `keyword` returns the same specs
+   * (deduped by pid inside the harvest), so the only thing that can end the harvest loop is the
+   * page cap — which is exactly what the maxPages knob is asserted on below. */
+  function makeEveryPageAdapter(specs: ProductSpec[], keyword: string): SupplierAdapter {
+    const adapter = makeAdapter(specs)
+    adapter.searchProducts = vi.fn(async (q: { keyword?: string }): Promise<SupplierProductSummary[]> =>
+      q.keyword === keyword
+        ? specs.map((s) => ({
+            supplierProductId: s.pid,
+            title: s.title,
+            categoryName: s.categoryName,
+            sellPriceCents: s.sellPriceCents,
+            listedCount: s.listedNum,
+          }))
+        : [],
+    ) as SupplierAdapter['searchProducts']
+    return adapter
+  }
+
+  /** queryFn that records the prompt + options the runner passed, then streams `winners`. */
+  function capturingQueryFn(winners: ReturnType<typeof winnerFor>[]): {
+    queryFn: SourcingRunDeps['queryFn']
+    seen: { prompt?: string; options?: Record<string, unknown> }
+  } {
+    const seen: { prompt?: string; options?: Record<string, unknown> } = {}
+    const inner = fakeQueryFn(winners)
+    return {
+      seen,
+      queryFn: (args) => {
+        seen.prompt = args.prompt
+        seen.options = args.options
+        return inner!(args)
+      },
+    }
+  }
+
+  it('(h) CLI overrides thread through the whole run: keywords, maxPages, candidateTarget, maxWinners, budget', async () => {
+    // A FOURTH candidate so `candidateTarget: 3` (the knob's floor) visibly drops one.
+    const extra: ProductSpec = { pid: uid(), title: 'Chew Ring Toy', categoryName: 'Toys', sellPriceCents: 1599, listedNum: 250, liveCostCents: 800 }
+    createdPids.push(extra.pid)
+    const specs = [...candidateSpecs(), extra]
+    createdKeywords.push('dog snuffle mat')
+    const adapter = makeEveryPageAdapter(specs, 'dog snuffle mat')
+    const { queryFn, seen } = capturingQueryFn([winnerFor(specs[0]!)])
+
+    const result = await runSourcingPipeline(
+      baseDeps({
+        adapter,
+        force: true,
+        queryFn,
+        overrides: { keywords: ['dog snuffle mat'], maxPages: 2, candidateTarget: 3, maxWinners: 8, maxBudgetUsd: 6.5 },
+      }),
+    )
+    expect(result.outcome).toBe('completed')
+    createdRunIds.push(result.runId!)
+
+    // keywords: only the override keyword was ever searched.
+    const calls = (adapter.searchProducts as unknown as ReturnType<typeof vi.fn>).mock.calls.map(([q]) => q as { keyword?: string })
+    expect(new Set(calls.map((q) => q.keyword))).toEqual(new Set(['dog snuffle mat']))
+    // maxPages: the never-dry pass stopped at exactly 2 pages.
+    expect(calls).toHaveLength(2)
+    // candidateTarget: only 3 of the 4 harvested candidates reached the agent prompt.
+    const inPrompt = specs.filter((sp) => seen.prompt!.includes(sp.pid))
+    expect(inPrompt).toHaveLength(3)
+    // maxWinners + budget.
+    expect(seen.prompt).toContain('up to 8 winners')
+    expect(seen.options!.maxBudgetUsd).toBe(6.5)
+    expect(((seen.options!.outputFormat as { schema: { properties: { winners: { maxItems: number } } } }).schema).properties.winners.maxItems).toBe(8)
+  })
+
+  it('(i) settings drive the knobs when no override is given (max_budget_cents is cents)', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const { queryFn, seen } = capturingQueryFn([])
+    const s = createSettings(db)
+    await s.set('sourcing.max_winners', 6)
+    await s.set('sourcing.max_budget_cents', 450)
+
+    try {
+      const result = await runSourcingPipeline(baseDeps({ adapter, force: true, queryFn }))
+      expect(result.outcome).toBe('completed')
+      createdRunIds.push(result.runId!)
+
+      expect(seen.prompt).toContain('up to 6 winners')
+      expect(seen.options!.maxBudgetUsd).toBe(4.5)
+    } finally {
+      await db
+        .delete(settingsTable)
+        .where(inArray(settingsTable.key, ['sourcing.max_winners', 'sourcing.max_budget_cents']))
+    }
+  })
+
+  it('(i2) an out-of-range SETTING fails the run loudly, before the day is claimed', async () => {
+    const adapter = makeAdapter(candidateSpecs())
+    const s = createSettings(db)
+    await s.set('sourcing.max_winners', 99)
+
+    try {
+      await expect(runSourcingPipeline(baseDeps({ adapter, force: true }))).rejects.toThrow(/sourcing\.max_winners/)
+      // Nothing was claimed: a knob mistake must not burn the day's run slot.
+      const rows = await db.select().from(agentRuns).where(eq(agentRuns.workflow, 'sourcing.weekly'))
+      createdRunIds.push(...rows.map((r) => r.id))
+      expect(rows).toHaveLength(0)
+    } finally {
+      await db.delete(settingsTable).where(eq(settingsTable.key, 'sourcing.max_winners'))
+    }
+  })
+
+  it('(j) the weekly cron path passes NO overrides — constants stay in force', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const searchSpy = vi.fn(adapter.searchProducts.bind(adapter))
+    adapter.searchProducts = searchSpy
+    const { queryFn, seen } = capturingQueryFn([])
+    const deps = baseDeps({ adapter, force: true, queryFn })
+    expect(deps.overrides).toBeUndefined()
+
+    await sourcingWeeklyHandler(deps)()
+
+    const rows = await db.select().from(agentRuns).where(eq(agentRuns.workflow, 'sourcing.weekly'))
+    createdRunIds.push(...rows.map((r) => r.id))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.status).toBe('succeeded')
+
+    // The cron harvests the constant keyword list, and the agent gets the constant caps.
+    const queried = new Set(searchSpy.mock.calls.map(([q]) => q.keyword))
+    expect([...queried].sort()).toEqual([...HARVEST_KEYWORDS].sort())
+    expect(seen.prompt).toContain('up to 3 winners')
+    expect(seen.options!.maxBudgetUsd).toBe(SOURCING_MAX_BUDGET_USD)
   })
 })

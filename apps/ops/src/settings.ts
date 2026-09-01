@@ -32,6 +32,14 @@ export const SETTINGS_DEFAULTS = {
   'scoring.fail_cooldown_days': 7,
   'scoring.max_fail_attempts': 3,
   'support.agent_guidance': '',
+  // Catalog-build sourcing knobs (spec 2026-08-31 catalog-p0 §5). Defaults are exactly today's
+  // hardcoded behaviour — `sourcing/knobs.ts` resolves override > setting > constant, so the Monday
+  // cron keeps running a 3-winner / 15-candidate / 10-page / $2.00 run until the owner raises one
+  // of these on /admin/settings for a catalog-build week.
+  'sourcing.max_winners': 3,
+  'sourcing.candidate_target': 15,
+  'sourcing.max_pages': 10,
+  'sourcing.max_budget_cents': 200,
   // Pre-triage spam short-circuit (pre-publish anti-spam hardening). A ticket whose latest inbound
   // sat in Gmail's SPAM folder, from a sender with no order on file and no tripwire hit, is always
   // triaged AFTER real mail; with this false (default) it still gets a Haiku verdict while the

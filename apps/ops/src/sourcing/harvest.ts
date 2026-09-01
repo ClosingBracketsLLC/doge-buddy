@@ -13,7 +13,7 @@ export interface HarvestCandidate {
   sellPriceCents: number | null
   listedNum: number | null
   imageUrl: string | null
-  /** The HARVEST_KEYWORDS entry whose pass first fetched this product. */
+  /** The run's keyword whose pass first fetched this product. */
   keyword: string
 }
 
@@ -38,6 +38,14 @@ export interface HarvestDeps {
   adapter: Pick<SupplierAdapter, 'searchProducts'>
   alert: Alert
   now?: () => Date
+  // --- Catalog-build knobs (spec 2026-08-31 catalog-p0 §5). The constants above stay the
+  // documented defaults; `pipeline.ts` resolves these once per run via `resolveSourcingKnobs`. ---
+  /** Search terms for this run. Defaults to `HARVEST_KEYWORDS`. */
+  keywords?: readonly string[]
+  /** How many ranked candidates to return. Defaults to `CANDIDATE_TARGET`. */
+  candidateTarget?: number
+  /** Hard ceiling on total pages fetched across all passes. Defaults to `HARVEST_MAX_PAGES_TOTAL`. */
+  maxPages?: number
 }
 
 const PAGE_SIZE = 50
@@ -55,22 +63,25 @@ interface PassState {
 }
 
 /**
- * Runs one CJ searchProducts pass per HARVEST_KEYWORDS entry (round-robin, keyword search only —
+ * Runs one CJ searchProducts pass per keyword (`deps.keywords`, default HARVEST_KEYWORDS; round-robin, keyword search only —
  * never the global trending/new flags), records every fetched summary as an append-only
  * sourcing_signals row tagged with the keyword that fetched it, then filters (Stage 1:
  * supplier_variant_mappings dedupe, recent/live new_listing proposal dedupe, category exclusion
- * guard) and ranks survivors down to ~CANDIDATE_TARGET. Plain code, no LLM.
+ * guard) and ranks survivors down to ~`deps.candidateTarget` (default CANDIDATE_TARGET). Plain code, no LLM.
  */
 export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: HarvestCandidate[]; pagesFetched: number }> {
   const now = deps.now ?? (() => new Date())
+  const keywords = deps.keywords ?? HARVEST_KEYWORDS
+  const candidateTarget = deps.candidateTarget ?? CANDIDATE_TARGET
+  const maxPages = deps.maxPages ?? HARVEST_MAX_PAGES_TOTAL
 
-  const order: PassState[] = HARVEST_KEYWORDS.map((keyword) => ({ keyword, page: 1, ended: false }))
+  const order: PassState[] = keywords.map((keyword) => ({ keyword, page: 1, ended: false }))
 
   let pagesFetched = 0
   let turn = 0
   const fetchedByPid = new Map<string, { summary: SupplierProductSummary; keyword: string }>()
 
-  while (pagesFetched < HARVEST_MAX_PAGES_TOTAL && order.some((p) => !p.ended)) {
+  while (pagesFetched < maxPages && order.some((p) => !p.ended)) {
     const pass = order[turn % order.length]!
     turn += 1
     if (pass.ended) continue
@@ -180,5 +191,5 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
     return 0
   })
 
-  return { candidates: survivors.slice(0, CANDIDATE_TARGET), pagesFetched }
+  return { candidates: survivors.slice(0, candidateTarget), pagesFetched }
 }

@@ -11,6 +11,7 @@ import type { SubmitProposalDeps } from '../proposals/submit.ts'
 import { submitProposal } from '../proposals/submit.ts'
 import type { Settings } from '../settings.ts'
 import { MIN_CANDIDATES, runHarvest } from './harvest.ts'
+import { resolveSourcingKnobs, type SourcingOverrides } from './knobs.ts'
 import { validateAndSubmitWinners } from './submit-winners.ts'
 import type { TrendSignal, TrendsProvider } from './trends.ts'
 
@@ -40,6 +41,12 @@ export interface SourcingPipelineDeps {
   queryFn?: SourcingRunDeps['queryFn']
   /** Bypasses the same-day circuit breaker (`claimDailyRun`) — `--force` on the manual script. */
   force?: boolean
+  /**
+   * Per-run catalog-build knob overrides (spec 2026-08-31 catalog-p0 §5) — the manual
+   * `run-sourcing` script's flags. The Monday cron NEVER passes these, so it keeps running on the
+   * settings (whose defaults are the old constants).
+   */
+  overrides?: SourcingOverrides
 }
 
 export interface SourcingPipelineResult {
@@ -61,7 +68,12 @@ function errorMessage(err: unknown): string {
  * in try/catch as a last-resort net, but nothing in normal operation should ever reach it.
  */
 export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<SourcingPipelineResult> {
-  const { db, adapter, settings, alert, enqueue, notify, adminBaseUrl, trendsFactory, queryFn, force } = deps
+  const { db, adapter, settings, alert, enqueue, notify, adminBaseUrl, trendsFactory, queryFn, force, overrides } = deps
+
+  // --- Stage 0: resolve the run's knobs (override > setting > constant), ONCE ------------------
+  // Deliberately BEFORE the day-claim: an out-of-range override or setting throws, and a knob
+  // mistake must not burn the day's run slot on a run that never started.
+  const knobs = await resolveSourcingKnobs(settings, overrides)
 
   // --- Stage 1: claim the day's run (Task 11's atomic breaker) --------------------------------
   const claim = await claimDailyRun(db, alert, {
@@ -92,7 +104,14 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
   // never double-flip a succeeded/failed/aborted row.
   try {
     // --- Stage 2: harvest (Task 9) -------------------------------------------------------------
-    const { candidates, pagesFetched } = await runHarvest({ db, adapter, alert })
+    const { candidates, pagesFetched } = await runHarvest({
+      db,
+      adapter,
+      alert,
+      keywords: knobs.keywords,
+      candidateTarget: knobs.candidateTarget,
+      maxPages: knobs.maxPages,
+    })
     if (candidates.length < MIN_CANDIDATES) {
       await db
         .update(agentRuns)
@@ -136,7 +155,7 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
 
     // --- Stage 5: the agent run (Task 10 MCP server + Task 12 runner) -------------------------
     const mcpServer = createSourcingMcpServer({ adapter, allowance })
-    const agentResult = await runSourcingAgent({ db, alert, mcpServer, queryFn }, { runId, candidates, trendSignals })
+    const agentResult = await runSourcingAgent({ db, alert, mcpServer, queryFn }, { runId, candidates, trendSignals, knobs })
     if (agentResult.status !== 'succeeded' || !agentResult.output) {
       // The runner already recorded the row's terminal status/cost and fired its own alert.
       return { runId, outcome: 'agent_failed', submitted: 0 }
