@@ -90,6 +90,10 @@ describe('runSourcingAgent (fake SDK stream)', () => {
     return { db, alert: vi.fn().mockResolvedValue(undefined), mcpServer: mcpServer(), queryFn }
   }
 
+  async function* stream(): AsyncGenerator<Record<string, unknown>> {
+    yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
+  }
+
   it('prompt pins the US-stock hard rule: CN-only variants are disqualified, freight is not stock evidence', async () => {
     const runId = await claimRow('us-stock-rule')
     let capturedPrompt: string | undefined
@@ -160,9 +164,43 @@ describe('runSourcingAgent (fake SDK stream)', () => {
     expect(capturedOptions!.maxBudgetUsd).toBe(SOURCING_MAX_BUDGET_USD)
   })
 
+  it('armed: prompt carries the market-price HARD RULE with the resolved ratio and lookup contract', async () => {
+    const runId = await claimRow('market-armed')
+    let capturedPrompt = ''
+    let capturedSystem = ''
+    const d = deps((args) => {
+      capturedPrompt = args.prompt
+      capturedSystem = String(args.options?.systemPrompt ?? '')
+      return stream()
+    })
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: [], marketGateArmed: true })
+
+    expect(capturedPrompt).toContain('## Market price — HARD RULE')
+    expect(capturedPrompt).toContain('1.3×') // DEFAULT_MAX_PRICE_TO_MARKET_BPS rendered
+    expect(capturedPrompt).toContain('marketLookupId')
+    expect(capturedPrompt).toContain('fewer than 5 offers')
+    expect(capturedSystem).toContain('lookup_market_price')
+  })
+
+  it('unarmed (flag absent): advisory sentence, no HARD RULE, no marketLookupId contract', async () => {
+    const runId = await claimRow('market-unarmed')
+    let capturedPrompt = ''
+    const d = deps((args) => { capturedPrompt = args.prompt; return stream() })
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: [] })
+
+    expect(capturedPrompt).toContain('Market price lookup is unavailable this run')
+    expect(capturedPrompt).not.toContain('## Market price — HARD RULE')
+  })
+
+  it('a winner with marketLookupId parses; SOURCING_MAX_TURNS is 30', async () => {
+    const winner = { ...validWinner(), marketLookupId: 'mkt_1' }
+    expect(SourcingOutputSchema.safeParse({ winners: [winner] }).success).toBe(true)
+    expect(SOURCING_MAX_TURNS).toBe(30)
+  })
+
   it('constants match the spec Global Constraints', () => {
     expect(SOURCING_MODEL).toBe('claude-sonnet-5')
-    expect(SOURCING_MAX_TURNS).toBe(25)
+    expect(SOURCING_MAX_TURNS).toBe(30)
     expect(SOURCING_MAX_BUDGET_USD).toBe(2.0)
     expect(SOURCING_WATCHDOG_MS).toBe(15 * 60 * 1000)
   })

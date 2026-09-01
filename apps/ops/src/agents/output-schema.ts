@@ -13,6 +13,11 @@ export const SourcingWinnerSchema = z.object({
   rationale: z.string().min(1).max(2000),
   marginPct: z.number(),
   freightEstimateCents: z.number().int().nonnegative(),
+  /** The lookup_market_price lookupId backing this winner's pricing. Optional at the SCHEMA level
+   *  only because a SerpApi-less run has no tool to call — when the gate is armed, Stage 6 drops
+   *  winners without a conclusive, pid-matching lookup (spec Decision 5). UNTRUSTED like every
+   *  other field: it is a registry KEY, never a number. */
+  marketLookupId: z.string().min(1).optional(),
 })
 export type SourcingWinner = z.infer<typeof SourcingWinnerSchema>
 
