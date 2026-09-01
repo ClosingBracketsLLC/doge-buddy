@@ -4,6 +4,7 @@ import type { WarehouseStock } from '@doge-buddy/supplier'
 import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { backfillListings, type BackfillOps } from '../src/catalog/backfill.ts'
+import { INVENTORY_SYNC_QUEUE } from '../src/jobs/inventory-sync.ts'
 import { proposalHandle } from '../src/proposals/apply-shared.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
@@ -160,11 +161,25 @@ describe('backfillListings', () => {
       .returning({ id: products.id, handle: products.handle })
     createdProductIds.push(product!.id)
 
+    const variant = await addVariant(product!.id, opts)
+    return {
+      productId: product!.id,
+      productGid,
+      proposalId,
+      title,
+      oldHandle: product!.handle!,
+      ...variant,
+    }
+  }
+
+  /** One local `product_variants` row (+ its `supplier_variant_mappings` row unless
+   * `withMapping: false`), in the OLD-SCHEME shape: neither gid populated, inventory untracked. */
+  async function addVariant(productId: string, opts: SeedOpts = {}) {
     const sku = `${PREFIX}-sku-${uid()}`
     const [variant] = await db
       .insert(productVariants)
       .values({
-        productId: product!.id,
+        productId,
         shopifyVariantGid: opts.variantGid === undefined ? null : opts.variantGid,
         shopifyInventoryItemGid: opts.inventoryItemGid === undefined ? null : opts.inventoryItemGid,
         sku,
@@ -185,28 +200,24 @@ describe('backfillListings', () => {
         stockCheckedAt: opts.stockCheckedAt ?? null,
       })
     }
-    return {
-      productId: product!.id,
-      productGid,
-      proposalId,
-      title,
-      oldHandle: product!.handle!,
-      variantId: variant!.id,
-      sku,
-      supplierVariantId,
-    }
+    return { variantId: variant!.id, sku, supplierVariantId }
   }
 
   function deps(ops: BackfillOps, adapter: { getVariantStock: (id: string) => Promise<WarehouseStock[]> }) {
     const logs: string[] = []
     const alerts: { severity: string; kind: string; detail: Record<string, unknown> }[] = []
+    const enqueued: { name: string; data: object; opts?: unknown }[] = []
     return {
       logs,
       alerts,
+      enqueued,
       deps: {
         db,
         ops,
         adapter,
+        enqueue: async (name: string, data: object, opts?: unknown) => {
+          enqueued.push({ name, data, opts })
+        },
         alert: async (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => {
           alerts.push({ severity, kind, detail })
         },
@@ -225,7 +236,7 @@ describe('backfillListings', () => {
       },
     })
     const adapter = fakeAdapter({ [seeded.supplierVariantId]: 4 })
-    const { deps: d, logs } = deps(ops, adapter)
+    const { deps: d, logs, enqueued } = deps(ops, adapter)
 
     const result = await backfillListings(d, { dryRun: false })
 
@@ -234,10 +245,16 @@ describe('backfillListings', () => {
       {
         id: seeded.productGid,
         handle: expectedHandle,
+        // Without this the old `db-proposal-…` URL 404s instead of redirecting.
+        redirectNewHandle: true,
         tags: [categoryTagValue('toys')],
         productType: 'Dog Toys',
         seo: { title: seeded.title, description: 'A snuffle mat for slow feeding.' },
       },
+    ])
+    // A fully repaired product hands itself to the sync job — its inventory is tracked now.
+    expect(enqueued).toEqual([
+      { name: INVENTORY_SYNC_QUEUE, data: { productId: seeded.productId }, opts: expect.objectContaining({ singletonKey: seeded.productId }) },
     ])
     const [row] = await db.select().from(products).where(eq(products.id, seeded.productId))
     expect(row!.handle).toBe(expectedHandle)
@@ -300,22 +317,29 @@ describe('backfillListings', () => {
     expect(mapping!.stockCheckedAt).toEqual(NOW)
   })
 
-  it('(b) pushes 0 but keeps the cached stock when the CJ read fails', async () => {
+  it('(b) leaves inventory UNTOUCHED when the CJ read fails, and says so loudly', async () => {
     const checkedAt = new Date('2026-08-20T00:00:00.000Z')
     const seeded = await seedProduct({ lastKnownStock: 7, stockCheckedAt: checkedAt })
+    const second = await addVariant(seeded.productId)
     const { ops, calls } = fakeOps({
       [seeded.productGid]: {
         descriptionHtml: '<p>Mat.</p>',
-        variants: [{ id: 'gid://shopify/ProductVariant/78', sku: seeded.sku, inventoryItemId: 'gid://shopify/InventoryItem/78' }],
+        variants: [
+          { id: 'gid://shopify/ProductVariant/78', sku: seeded.sku, inventoryItemId: 'gid://shopify/InventoryItem/78' },
+          { id: 'gid://shopify/ProductVariant/79', sku: second.sku, inventoryItemId: 'gid://shopify/InventoryItem/79' },
+        ],
       },
     })
-    const adapter = fakeAdapter({ [seeded.supplierVariantId]: new Error('CJ 503') })
-    const { deps: d, alerts } = deps(ops, adapter)
+    const adapter = fakeAdapter({ [seeded.supplierVariantId]: new Error('CJ 503'), [second.supplierVariantId]: 5 })
+    const { deps: d, alerts, enqueued } = deps(ops, adapter)
 
-    await backfillListings(d, { dryRun: false })
+    const result = await backfillListings(d, { dryRun: false })
 
-    const push = calls.setQuantities.find((c) => c.key.includes(seeded.variantId))
-    expect((push!.input.quantities as { quantity: number }[])[0]!.quantity).toBe(0)
+    // The failed variant: NOT tracked, NOT pushed. Tracking it at a fabricated 0 would show the
+    // live product as Sold out, and the cache would agree with CJ next cycle so the sync job would
+    // never correct it.
+    expect(calls.inventoryItemUpdate.some((c) => c.inventoryItemId === 'gid://shopify/InventoryItem/78')).toBe(false)
+    expect(calls.setQuantities.some((c) => c.key.includes(seeded.variantId))).toBe(false)
     const [mapping] = await db
       .select()
       .from(supplierVariantMappings)
@@ -323,13 +347,70 @@ describe('backfillListings', () => {
     expect(mapping!.lastKnownStock).toBe(7)
     expect(mapping!.stockCheckedAt).toEqual(checkedAt)
     expect(alerts.some((a) => a.kind === 'listing_stock_read_failed')).toBe(true)
+    expect(
+      result.failures.some((f) => f.includes(seeded.sku) && f.includes('stock read failed') && f.includes('inventory left untouched')),
+    ).toBe(true)
+
+    // The healthy sibling is still repaired.
+    expect(calls.inventoryItemUpdate).toContainEqual({
+      inventoryItemId: 'gid://shopify/InventoryItem/79',
+      input: { tracked: true },
+    })
+    expect(calls.setQuantities.find((c) => c.key.includes(second.variantId))!.key).toBe(
+      `bf-${second.variantId}-5-${NOW_EPOCH_SECONDS}`,
+    )
+
+    // The product itself is `partial`, not `updated` — and a half-repaired product is NOT handed
+    // to the sync job.
+    expect(result.partial).toBe(1)
+    expect(result.updated).toBe(0)
+    expect(enqueued).toEqual([])
+    // The Shopify handle update DID land, so the local row must not desync from it.
+    const [row] = await db.select().from(products).where(eq(products.id, seeded.productId))
+    expect(row!.handle).toBe(proposalHandle(seeded.proposalId!, seeded.title!))
   })
 
-  it('(c) --dry-run makes no ops calls, writes nothing, and prints the plan', async () => {
+  it('(b) matches a single variant positionally when Shopify reports no sku', async () => {
+    const seeded = await seedProduct()
+    const { ops } = fakeOps({
+      [seeded.productGid]: {
+        descriptionHtml: '<p>Mat.</p>',
+        variants: [{ id: 'gid://shopify/ProductVariant/80', sku: undefined, inventoryItemId: 'gid://shopify/InventoryItem/80' }],
+      },
+    })
+    const { deps: d } = deps(ops, fakeAdapter({ [seeded.supplierVariantId]: 3 }))
+
+    const result = await backfillListings(d, { dryRun: false })
+
+    const [variant] = await db.select().from(productVariants).where(eq(productVariants.id, seeded.variantId))
+    expect(variant!.shopifyInventoryItemGid).toBe('gid://shopify/InventoryItem/80')
+    expect(variant!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/80')
+    expect(result.failures.filter((f) => f.includes(seeded.productId))).toEqual([])
+  })
+
+  it('(b) does NOT guess positionally when either side has more than one variant', async () => {
+    const seeded = await seedProduct()
+    await addVariant(seeded.productId)
+    const { ops } = fakeOps({
+      [seeded.productGid]: {
+        descriptionHtml: '<p>Mat.</p>',
+        variants: [{ id: 'gid://shopify/ProductVariant/81', sku: undefined, inventoryItemId: 'gid://shopify/InventoryItem/81' }],
+      },
+    })
+    const { deps: d } = deps(ops, fakeAdapter({}))
+
+    const result = await backfillListings(d, { dryRun: false })
+
+    const [variant] = await db.select().from(productVariants).where(eq(productVariants.id, seeded.variantId))
+    expect(variant!.shopifyInventoryItemGid).toBeNull()
+    expect(result.failures.some((f) => f.includes('no Shopify variant'))).toBe(true)
+  })
+
+  it('(c) --dry-run makes no ops calls, writes nothing, enqueues nothing, and prints the plan', async () => {
     const seeded = await seedProduct()
     const { ops, calls } = fakeOps({})
     const adapter = fakeAdapter({})
-    const { deps: d, logs } = deps(ops, adapter)
+    const { deps: d, logs, enqueued } = deps(ops, adapter)
 
     const result = await backfillListings(d, { dryRun: true })
 
@@ -340,6 +421,7 @@ describe('backfillListings', () => {
     expect(calls.setQuantities).toEqual([])
     expect(calls.locationCalls).toBe(0)
     expect(adapter.reads).toEqual([])
+    expect(enqueued).toEqual([])
     expect(result.failures).toEqual([])
 
     const [row] = await db.select().from(products).where(eq(products.id, seeded.productId))
@@ -358,7 +440,7 @@ describe('backfillListings', () => {
         variants: [{ id: 'gid://shopify/ProductVariant/9', sku: good.sku, inventoryItemId: 'gid://shopify/InventoryItem/9' }],
       },
     })
-    const { deps: d } = deps(ops, fakeAdapter({ [good.supplierVariantId]: 2 }))
+    const { deps: d, enqueued } = deps(ops, fakeAdapter({ [good.supplierVariantId]: 2 }))
 
     const result = await backfillListings(d, { dryRun: false })
 
@@ -368,6 +450,10 @@ describe('backfillListings', () => {
     expect(calls.productUpdate.some((c) => c.id === good.productGid)).toBe(true)
     const [goodRow] = await db.select().from(products).where(eq(products.id, good.productId))
     expect(goodRow!.handle).toBe(proposalHandle(good.proposalId!, 'Good Product'))
+    // Only the product that came through clean is handed to the sync job.
+    expect(enqueued).toEqual([
+      { name: INVENTORY_SYNC_QUEUE, data: { productId: good.productId }, opts: expect.objectContaining({ singletonKey: good.productId }) },
+    ])
   })
 
   it('(b) leaves an already-populated variant gid alone (coalesce-backfill, not overwrite)', async () => {

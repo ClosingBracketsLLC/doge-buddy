@@ -2,6 +2,8 @@ import { categoryByTag, categoryTagValue, slugify, type CategoryTag } from '@dog
 import { type createDb, products, productVariants, supplierVariantMappings } from '@doge-buddy/db'
 import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { and, asc, eq, isNotNull, sql } from 'drizzle-orm'
+import type { SendOpts } from '../fulfillment/types.ts'
+import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts } from '../jobs/inventory-sync.ts'
 import { readUsStock, seoDescription, seoTitle } from '../proposals/apply-new-listing.ts'
 import { proposalHandle } from '../proposals/apply-shared.ts'
 
@@ -21,6 +23,7 @@ export interface BackfillOps {
   productUpdate(input: {
     id: string
     handle?: string
+    redirectNewHandle?: boolean
     tags?: string[]
     productType?: string
     seo?: { title?: string; description?: string }
@@ -42,13 +45,26 @@ export interface BackfillDeps {
    * skip and every failure goes through it, because a human is watching this run. */
   log: (line: string) => void
   now?: () => Date
+  /**
+   * Optional queue producer. A fully repaired product is handed to `inventory.sync` so its
+   * now-tracked inventory starts being refreshed on the 6-hourly cadence instead of waiting for the
+   * next cron sweep to notice it. Optional because the dry run has nothing to enqueue and a test
+   * shouldn't have to stand up pg-boss; a repair without it is still complete, just not refreshed
+   * until the next cron.
+   */
+  enqueue?: (name: string, data: object, opts?: SendOpts) => Promise<void>
 }
 
 export interface BackfillResult {
   /** Candidate products the run considered (ACTIVE, with a Shopify gid). */
   products: number
-  /** Products fully repaired this run. */
+  /** Products fully repaired this run — every variant included. */
   updated: number
+  /** Products whose Shopify catalog fields landed but at least one of whose variants failed. Their
+   * local handle is still rewritten (the Shopify update DID happen, and a local row disagreeing
+   * with the live handle is worse than none), but they are NOT counted as repaired and are NOT
+   * handed to the sync job. Every one of them has a line in `failures`. */
+  partial: number
   /** Products deliberately left alone: no local category tag, or no local title — neither can be
    * invented, and both are inputs the repair cannot proceed without. */
   skipped: number
@@ -90,14 +106,25 @@ function idempotencyKey(variantId: string, quantity: number, at: Date): string {
  *    proposal (identical to what a re-listing would compute, so the repair is a no-op for anything
  *    already on the new scheme), else `slugify(title)-<8 of the local product id>` for a product
  *    with no proposal behind it.
- * 2. ONE `productUpdate` carrying handle + tags + productType + seo. Shopify keeps the old handle
- *    as a redirect, so no storefront link dies.
+ * 2. ONE `productUpdate` carrying handle + tags + productType + seo, with `redirectNewHandle: true`
+ *    so Shopify leaves a redirect from the old handle and no existing storefront link dies.
+ *    NOTE — `tags` and `seo` are REPLACED WHOLESALE, not merged: any tag added by hand in the
+ *    Shopify admin, and any hand-curated meta title/description, is discarded in favour of the
+ *    values derived from the local category and description. That is the intended behaviour for a
+ *    tool whose job is to make a product match the scheme, but it is destructive, and it is the
+ *    reason `--dry-run` exists.
  * 3. `productVariantsByProductId` → persist `shopify_inventory_item_gid` (and
  *    `shopify_variant_gid` when it's null) onto the local variant rows, matched by sku.
- * 4. Per variant that has a supplier mapping: `inventoryItemUpdate(tracked: true)`, read CJ's US
- *    stock, and one `inventorySetQuantities` with it.
+ * 4. Per variant that has a supplier mapping: read CJ's US stock FIRST, then — only on a real
+ *    reading — `inventoryItemUpdate(tracked: true)` and one `inventorySetQuantities` with it. A
+ *    failed read leaves the variant untouched and untracked (see the inline note: tracking a live
+ *    product at a fabricated 0 would strand it at Sold out, because the unchanged local cache
+ *    would make every later sync cycle call it "unchanged").
  * 5. The local `products.handle`, written LAST — so a crash anywhere above leaves the row still
  *    claiming the old handle and a rerun repeats the whole product rather than believing it done.
+ * 6. Only if EVERY variant came through: the product is counted `updated` and handed to
+ *    `inventory.sync`. A product with any failed variant is counted `partial` instead and left for
+ *    a rerun (its handle is still written — see `BackfillResult.partial`).
  *
  * **Idempotent by construction.** Every step is a full overwrite with a value derived from
  * immutable local state, so a product already on the new scheme simply gets the same tags/type/seo
@@ -125,6 +152,7 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
 
   const failures: string[] = []
   let updated = 0
+  let partial = 0
   let skipped = 0
 
   /**
@@ -207,18 +235,31 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
       await ops.productUpdate({
         id: productGid,
         handle,
+        // Shopify does NOT redirect a renamed handle unless asked. Without this, repairing the two
+        // live products would 404 every link that already points at their `db-proposal-…` URLs.
+        redirectNewHandle: true,
         tags: [categoryTagValue(product.categoryTag as CategoryTag)],
         productType: category.productType,
         seo: { title: seoTitle(title), description: seoDescription(descriptionHtml) },
       })
 
       const shopifyVariants = await ops.productVariantsByProductId(productGid)
+      // Positional fallback for the one unambiguous case: exactly one variant on each side. A
+      // single-variant product created by hand (or by an older `productSet`) can carry a NULL sku
+      // on Shopify, which no sku match can ever satisfy — leaving `shopify_inventory_item_gid`
+      // permanently null and the product permanently unsyncable. With one variant each there is
+      // only one possible pairing, so this is a deduction rather than a guess; with more on either
+      // side it IS a guess, and a wrong pairing would push one variant's stock onto another, so
+      // the match is left to fail loudly instead.
+      const positional = locals.length === 1 && shopifyVariants.length === 1
+      let variantFailures = 0
       for (const local of locals) {
-        const match = shopifyVariants.find((v) => v.sku === local.sku)
+        const match = shopifyVariants.find((v) => v.sku === local.sku) ?? (positional ? shopifyVariants[0] : undefined)
         if (!match) {
           // The local row claims a sku Shopify doesn't have on this product. Not fatal to the rest
           // of the product (the catalog fields above already landed), but it IS a real data
           // problem — recorded so the run exits non-zero and a human looks at it.
+          variantFailures += 1
           const message = `product ${product.id}: local variant ${local.sku} has no Shopify variant with that sku`
           failures.push(message)
           log(`FAILED ${message}`)
@@ -239,36 +280,67 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
         // an untracked inventory item is strictly better than one tracked at a made-up quantity.
         if (!local.mappingId || !local.supplierVariantId) continue
 
+        // STOCK FIRST, before anything is changed on Shopify. `null` = the CJ read itself failed
+        // (see `readUsStock`); 0 = CJ genuinely has none.
+        const observed = await readUsStock({ adapter: deps.adapter, alert: deps.alert }, local.supplierVariantId)
+        if (observed === null) {
+          // Leave this variant EXACTLY as it is: untracked and still selling. The tempting
+          // alternative — track it at 0 like a brand-new listing does — is safe there and actively
+          // harmful here, because the local cache keeps its old value: the next sync cycle reads
+          // CJ (say 7), compares it to the unchanged cache (7), calls it "unchanged" and pushes
+          // nothing, so a LIVE product would sit at Sold out indefinitely with no alert. A
+          // recorded failure and a rerun is the only correct outcome.
+          variantFailures += 1
+          const message = `product ${product.id} ${local.sku}: stock read failed — inventory left untouched`
+          failures.push(message)
+          log(`FAILED ${message}`)
+          continue
+        }
         // Shopify's own answer addresses the push, not the (possibly stale) local column: the gid
         // that came back from `productVariantsByProductId` is what this inventory item is TODAY.
         await ops.inventoryItemUpdate(match.inventoryItemId, { tracked: true })
-        // `null` = the CJ read itself failed (see `readUsStock`); 0 = CJ genuinely has none.
-        const observed = await readUsStock({ adapter: deps.adapter, alert: deps.alert }, local.supplierVariantId)
-        const quantity = observed ?? 0
         await ops.inventorySetQuantities(
           {
             name: 'available',
             reason: 'correction',
-            quantities: [{ inventoryItemId: match.inventoryItemId, locationId: await getLocationId(), quantity }],
+            quantities: [{ inventoryItemId: match.inventoryItemId, locationId: await getLocationId(), quantity: observed }],
           },
-          idempotencyKey(local.id, quantity, clock()),
+          idempotencyKey(local.id, observed, clock()),
         )
-        // Shopify gets 0 on a failed read (safe: it under-sells, and the sync job corrects it on
-        // its next pass), but the local cache must NOT — "CJ was unreachable" is not an
-        // observation that the warehouse is empty, and writing a confident 0 here would destroy a
-        // good value. The pair moves together or not at all.
-        if (observed !== null) {
-          await db
-            .update(supplierVariantMappings)
-            .set({ lastKnownStock: observed, stockCheckedAt: clock() })
-            .where(eq(supplierVariantMappings.id, local.mappingId))
-        }
+        // Strictly after the push: a crash between the two re-pushes the same value on a rerun
+        // (harmless), whereas caching first would record a push that never happened.
+        await db
+          .update(supplierVariantMappings)
+          .set({ lastKnownStock: observed, stockCheckedAt: clock() })
+          .where(eq(supplierVariantMappings.id, local.mappingId))
       }
 
-      // LAST — see the docstring: an unwritten handle means a rerun repeats this product, which is
-      // exactly what a half-applied repair needs.
+      // The handle write happens either way — the Shopify update above DID land, and a local row
+      // still claiming the old handle would desync from the live store. What a variant failure
+      // costs the product is the `updated` count and the sync enqueue below, not this.
       await db.update(products).set({ handle }).where(eq(products.id, product.id))
+      if (variantFailures > 0) {
+        partial += 1
+        log(`PARTIAL product ${product.id}: catalog fields updated, ${variantFailures} variant(s) failed — rerun`)
+        continue
+      }
       updated += 1
+
+      // Hand the repaired product to the sync job so its now-tracked inventory is refreshed on the
+      // 6-hourly cadence from here on. Best-effort, exactly as `applyNewListing` treats the same
+      // enqueue: the repair itself already landed, so a momentarily unreachable queue costs a
+      // refresh, never the repair — and the queue's `singletonKey` is the product id, so a rerun
+      // cannot pile up duplicates.
+      if (deps.enqueue) {
+        try {
+          await deps.enqueue(INVENTORY_SYNC_QUEUE, { productId: product.id }, inventorySyncSendOpts(product.id))
+        } catch (err) {
+          log(`WARN product ${product.id}: inventory.sync enqueue failed: ${formatError(err)}`)
+          await deps
+            .alert('warning', 'backfill_sync_enqueue_failed', { productId: product.id, error: formatError(err) })
+            .catch(() => {})
+        }
+      }
     } catch (err) {
       const message = `product ${product.id}: ${formatError(err)}`
       failures.push(message)
@@ -276,5 +348,5 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
     }
   }
 
-  return { products: candidates.length, updated, skipped, failures }
+  return { products: candidates.length, updated, partial, skipped, failures }
 }

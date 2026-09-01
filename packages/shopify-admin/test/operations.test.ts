@@ -525,7 +525,10 @@ describe('primaryLocationId', () => {
 })
 
 describe('productUpdate', () => {
-  const input = { id: 'gid://shopify/Product/9', handle: 'doge-tee', tags: ['a', 'b'], productType: 'Shirts', seo: { title: 'T', description: 'D' } }
+  const input = {
+    id: 'gid://shopify/Product/9', handle: 'doge-tee', redirectNewHandle: true,
+    tags: ['a', 'b'], productType: 'Shirts', seo: { title: 'T', description: 'D' },
+  }
   it('sends the input, resolves void', async () => {
     const { client, calls } = makeClient(() =>
       gql({ productUpdate: { product: { id: 'gid://shopify/Product/9' }, userErrors: [] } }))

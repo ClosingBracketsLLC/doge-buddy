@@ -10,9 +10,11 @@ import {
   ShopifyTokenManager,
 } from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdapter } from '@doge-buddy/supplier'
+import PgBoss from 'pg-boss'
 import { createAlerter } from '../src/alerts.ts'
 import { backfillListings, type BackfillOps } from '../src/catalog/backfill.ts'
 import { loadConfig } from '../src/config.ts'
+import type { SendOpts } from '../src/fulfillment/types.ts'
 import { loadDotEnv } from '../src/load-env.ts'
 import { DrizzleCjTokenStore } from '../src/stores/cj-token-store.ts'
 
@@ -87,9 +89,29 @@ if (config.fulfillmentSupplier === 'cj') {
 
 let failed = false
 
+/**
+ * Short-lived PgBoss so a repaired product can be handed to `inventory.sync`, mirroring
+ * run-sourcing.ts's `send` + `stop` idiom. Only for a real run: a dry run enqueues nothing, and
+ * starting pg-boss (which migrates its own schema on boot) to do nothing would be worse than
+ * pointless.
+ */
+const boss = dryRun ? null : new PgBoss(config.databaseUrl)
+if (boss) {
+  boss.on('error', (e) => console.error('[pg-boss]', e))
+  await boss.start()
+}
+
 try {
   const tokenManager = new ShopifyTokenManager({ shopDomain, clientId, clientSecret })
   const client = new ShopifyAdminClient({ shopDomain, tokenManager })
+
+  const enqueue = async (name: string, data: object, opts?: SendOpts): Promise<void> => {
+    if (opts) {
+      await boss!.send(name, data, opts)
+    } else {
+      await boss!.send(name, data)
+    }
+  }
 
   const ops: BackfillOps = {
     productUpdate: (input) => productUpdate(client, input),
@@ -101,10 +123,14 @@ try {
   }
 
   console.log(`backfill-listings: starting${dryRun ? ' (--dry-run: no Shopify calls, no writes)' : ''}...`)
-  const result = await backfillListings({ db, ops, adapter, alert, log: console.log }, { dryRun })
+  const result = await backfillListings(
+    { db, ops, adapter, alert, log: console.log, ...(boss ? { enqueue } : {}) },
+    { dryRun },
+  )
 
   console.log(
-    `backfill-listings: products=${result.products} updated=${result.updated} skipped=${result.skipped} failures=${result.failures.length}`,
+    `backfill-listings: products=${result.products} ${dryRun ? 'would-update' : 'updated'}=${result.updated}` +
+      ` partial=${result.partial} skipped=${result.skipped} failures=${result.failures.length}`,
   )
 
   if (result.failures.length > 0) {
@@ -118,6 +144,7 @@ try {
   failed = true
   console.error('backfill-listings: FAILED —', err instanceof Error ? err.message : String(err))
 } finally {
+  await boss?.stop()
   await pool.end()
 }
 

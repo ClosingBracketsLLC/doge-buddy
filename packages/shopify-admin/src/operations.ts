@@ -791,7 +791,18 @@ interface ProductUpdateData {
 
 export async function productUpdate(
   client: ShopifyAdminClient,
-  input: { id: string; handle?: string; tags?: string[]; productType?: string; seo?: { title?: string; description?: string } },
+  input: {
+    id: string
+    handle?: string
+    /** Ask Shopify to leave a redirect from the OLD handle to the new one. Off by default on
+     * Shopify's side, so renaming a live product's handle without it 404s every existing link to
+     * it — which is exactly what the `backfill-listings` repair would otherwise do to two products
+     * already on the storefront. */
+    redirectNewHandle?: boolean
+    tags?: string[]
+    productType?: string
+    seo?: { title?: string; description?: string }
+  },
 ): Promise<void> {
   const data = await client.graphql<ProductUpdateData>(PRODUCT_UPDATE_MUTATION, { product: input })
   assertNoUserErrors(data, 'productUpdate')
