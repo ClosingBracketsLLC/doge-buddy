@@ -118,11 +118,16 @@ describe('runSeed', () => {
         })
       }
       if (call.query.includes('PublishablePublish')) {
+        const id = call.variables?.id as string
         const input = call.variables?.input as { publicationId: string }[]
-        if (input[0]!.publicationId === 'gid://shopify/Publication/1') {
-          return gql({ publishablePublish: { userErrors: [{ message: 'not allowed' }] } })
+        // Collection publishes always succeed here — this test's "not allowed" failure is
+        // reserved for the product-publish assertions below, so collection-publish coverage
+        // (idempotent, unconditional every-collection publishing) doesn't get tangled up with
+        // the product-publish failure-containment coverage this test already exercises.
+        if (id.includes('Collection') || input[0]!.publicationId !== 'gid://shopify/Publication/1') {
+          return gql({ publishablePublish: { userErrors: [] } })
         }
-        return gql({ publishablePublish: { userErrors: [] } })
+        return gql({ publishablePublish: { userErrors: [{ message: 'not allowed' }] } })
       }
       throw new Error(`unexpected call: ${call.query}`)
     })
@@ -133,15 +138,24 @@ describe('runSeed', () => {
     expect(result.created).toEqual({ definitions: 0, collections: 0, products: 1 })
     expect(result.skipped).toEqual({ definitions: 3, collections: 4, products: 8 })
 
-    // (ii) both the failed create and the failed publish are surfaced, not swallowed.
-    expect(result.failures).toHaveLength(2)
-    expect(result.failures[0]).toContain('sample-tug-of-war-rope-toy')
-    expect(result.failures[1]).toContain('sample-squeaky-plush-fox')
-    expect(result.failures[1]).toContain('Online Store')
+    // (ii) both the failed create and the failed publish are surfaced, not swallowed — scoped to
+    // the product failures; collection publishing never fails in this fixture (see above).
+    const productFailures = result.failures.filter((f) => f.includes('sample-'))
+    expect(productFailures).toHaveLength(2)
+    expect(productFailures[0]).toContain('sample-tug-of-war-rope-toy')
+    expect(productFailures[1]).toContain('sample-squeaky-plush-fox')
+    expect(productFailures[1]).toContain('Online Store')
 
     // both publications were attempted for the surviving product despite the first one failing.
     const publishCalls = calls.filter((c) => c.query.includes('PublishablePublish'))
-    expect(publishCalls).toHaveLength(2)
+    const productPublishCalls = publishCalls.filter((c) => (c.variables?.id as string).includes('Product'))
+    expect(productPublishCalls).toHaveLength(2)
+
+    // every one of the seed's 4 collections is published to every one of the 2 publications,
+    // every run — unconditional, unlike products above (idempotent healing, spec'd in
+    // `seedCollections`/this loop's docstring in `run.ts`).
+    const collectionPublishCalls = publishCalls.filter((c) => (c.variables?.id as string).includes('Collection'))
+    expect(collectionPublishCalls).toHaveLength(8)
 
     expect(logLines.some((l) => l.includes('FAILED product') && l.includes('sample-tug-of-war-rope-toy'))).toBe(true)
     expect(logLines.some((l) => l.includes('FAILED publish') && l.includes('sample-squeaky-plush-fox'))).toBe(true)
