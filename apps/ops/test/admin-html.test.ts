@@ -71,6 +71,11 @@ describe('admin html helpers', () => {
     expect(detail).not.toContain('class="badge')
   })
 
+  it('Home tab is also current on /admin?… (a query string on the home route, not a sub-path)', () => {
+    const doc = layout('Home', html``, { path: '/admin?foo=bar', counts: { pendingProposals: 0, escalatedTickets: 0 } })
+    expect(doc).toMatch(/<a class="tab" href="\/admin" aria-current="page">/)
+  })
+
   it('chip maps states to tones and escapes the text', () => {
     expect(chipTone('pending')).toBe('warn')
     expect(chipTone('applied')).toBe('ok')

@@ -566,6 +566,8 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     expect(res.body).toContain('<input type="hidden" name="key" value="killswitch.global">')
     expect(res.body).toContain('<input type="hidden" name="returnTo" value="/admin">')
     expect(res.body).toContain('data-confirm="Turn the global kill switch ON? Every workflow stops."')
+    // Fulfillment defaults enabled: turning it OFF is the dangerous transition, so it asks too.
+    expect(res.body).toContain('data-confirm="Turn fulfillment OFF? New orders will not be placed with the supplier."')
     expect(res.body).toContain('<input type="hidden" name="key" value="workflow.sourcing.mode">')
     expect(res.body).toContain('<button type="submit" name="value" value="manual" aria-pressed="true">manual</button>')
     expect(res.body).toContain('<button type="submit" name="value" value="auto" aria-pressed="false">auto</button>')

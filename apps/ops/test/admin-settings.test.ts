@@ -124,8 +124,15 @@ describe('settings editor + manual-signal paste box', () => {
     // would otherwise render this as a number input, let a save coerce it to a number, and crash
     // every support run downstream.
     expect(res.body).not.toContain('support.agent_guidance')
-    // Booleans render as an unchecked checkbox by default (killswitch.global defaults false).
-    expect(res.body).toContain('<input type="checkbox" name="value">')
+    // Booleans render as an unchecked checkbox by default (killswitch.global defaults false), with
+    // an id the row's <label for> can target so the tap area includes the label text.
+    expect(res.body).toContain('<input type="checkbox" id="setting-killswitch-global" name="value">')
+    // Confirm-before-danger: NEW state is the dangerous one. killswitch.global defaults false, so
+    // turning it ON is the dangerous transition; workflow.fulfillment.enabled defaults true, so
+    // turning it OFF is the dangerous transition. Same literal strings as the dashboard's cards
+    // (DANGEROUS_SETTING_CONFIRMS in render-dashboard.ts), shared rather than duplicated.
+    expect(res.body).toContain('data-confirm="Turn the global kill switch ON? Every workflow stops."')
+    expect(res.body).toContain('data-confirm="Turn fulfillment OFF? New orders will not be placed with the supplier."')
     // Mode keys render as a manual/auto select, defaulted to manual.
     expect(res.body).toContain('<option value="manual" selected>manual</option>')
     expect(res.body).toContain('<option value="auto">auto</option>')

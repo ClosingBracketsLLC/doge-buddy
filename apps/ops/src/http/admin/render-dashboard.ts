@@ -1,7 +1,20 @@
 import { formatCents } from '@doge-buddy/core'
 import { SUPPORT_AGENT_MAX_RUNS_PER_DAY } from '../../jobs/support-agent-run.ts'
+import type { SettingKey } from '../../settings.ts'
 import type { HealthStrip } from './health.ts'
 import { chip, html, kv, raw, relativeTime, type RawHtml } from './html.ts'
+
+/**
+ * Confirm-before-danger copy for boolean settings, shared verbatim between the two surfaces that
+ * render a toggle for these keys: the dashboard's own switch cards (this file) and the generic
+ * /admin/settings catalog row (routes.ts's `renderSettingRow`). Rule: confirm when the NEW state
+ * is the dangerous one — kill switch turning ON (stops every workflow), fulfillment turning OFF
+ * (supplier orders silently stop being placed).
+ */
+export const DANGEROUS_SETTING_CONFIRMS: Partial<Record<SettingKey, { whenTurningOn?: string; whenTurningOff?: string }>> = {
+  'killswitch.global': { whenTurningOn: 'Turn the global kill switch ON? Every workflow stops.' },
+  'workflow.fulfillment.enabled': { whenTurningOff: 'Turn fulfillment OFF? New orders will not be placed with the supplier.' },
+}
 
 /**
  * Renders the dashboard's health strip: wallet balance (or 'n/a'), queue depth, last webhook
@@ -59,8 +72,14 @@ function walletCard(h: HealthStrip): RawHtml {
     <div class="empty">${footer}${h.pausedForFunds ? html` · ${chip('ON')} paused for funds` : html``}</div></div>`
 }
 
-function toggleCard(label: string, key: string, on: boolean, confirmWhenOn?: string): RawHtml {
-  const confirmAttr = confirmWhenOn && !on ? html` data-confirm="${confirmWhenOn}"` : html``
+function toggleCard(
+  label: string,
+  key: string,
+  on: boolean,
+  confirm?: { whenTurningOn?: string; whenTurningOff?: string },
+): RawHtml {
+  const confirmMsg = confirm ? (!on ? confirm.whenTurningOn : confirm.whenTurningOff) : undefined
+  const confirmAttr = confirmMsg ? html` data-confirm="${confirmMsg}"` : html``
   return html`<div class="card"><form method="post" action="/admin/settings" data-autosubmit${confirmAttr}>
     <input type="hidden" name="key" value="${key}"><input type="hidden" name="returnTo" value="/admin">
     <div class="toggle"><label for="sw-${raw(key.replaceAll('.', '-'))}">${label}</label>
@@ -90,8 +109,8 @@ export function renderDashboard(h: HealthStrip, now: Date = new Date()): RawHtml
     <div class="grid">${walletCard(h)}</div>
     <h2>Switches</h2>
     <div class="grid">
-      ${toggleCard('Global kill switch', 'killswitch.global', h.killswitch, 'Turn the global kill switch ON? Every workflow stops.')}
-      ${toggleCard('Fulfillment', 'workflow.fulfillment.enabled', h.fulfillmentEnabled)}
+      ${toggleCard('Global kill switch', 'killswitch.global', h.killswitch, DANGEROUS_SETTING_CONFIRMS['killswitch.global'])}
+      ${toggleCard('Fulfillment', 'workflow.fulfillment.enabled', h.fulfillmentEnabled, DANGEROUS_SETTING_CONFIRMS['workflow.fulfillment.enabled'])}
       ${modeCard('Sourcing', 'workflow.sourcing.mode', h.modes.sourcing)}
       ${modeCard('Support replies', 'workflow.support_reply.mode', h.modes.supportReply)}
       ${modeCard('Refunds', 'workflow.refund.mode', h.modes.refund)}

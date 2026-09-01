@@ -4,6 +4,11 @@
  * owner's Galaxy Z Fold 8: `< 640px` is the cover screen (bottom tab bar, single column),
  * `640–1023px` the inner screen (left rail, two columns), `>= 1024px` desktop (rail with labels,
  * three columns). Dark by default; light follows `prefers-color-scheme`.
+ *
+ * CSP note: both this stylesheet and ADMIN_JS below are inlined directly into the page (no
+ * external <link>/<script> src) — deliberate, for zero build steps. A future Content-Security-Policy
+ * on /admin will need 'unsafe-inline' (or a per-response nonce threaded through `layout()`) for
+ * style-src/script-src, since there is nothing else here to hash or host separately.
  */
 export const ADMIN_CSS = `
 :root {
@@ -15,11 +20,19 @@ export const ADMIN_CSS = `
   --font: -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
+/* Light-mode token contrast vs --surface #fffcf5 (WCAG 2.x relative-luminance formula), target
+   >= 4.5:1 for every one of these (used as both text and border color throughout the admin):
+     --ok    #157a43  5.26:1
+     --warn  #8f5500  5.91:1
+     --bad   #a81b23  7.20:1
+     --info  #145069  8.61:1
+     --muted #4a575c  7.30:1
+     --accent #9a5200 5.72:1 (and --accent-ink #fff on --accent: 5.86:1) */
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #fdf3e0; --surface: #fffcf5; --surface-2: #fff7e6; --line: #e6d9bd;
-    --ink: #10171a; --muted: #5b6a70; --accent: #bb6402; --accent-ink: #fff;
-    --ok: #1f8f52; --warn: #b36b00; --bad: #c8232c; --info: #145069;
+    --ink: #10171a; --muted: #4a575c; --accent: #9a5200; --accent-ink: #fff;
+    --ok: #157a43; --warn: #8f5500; --bad: #a81b23; --info: #145069;
   }
 }
 *, *::before, *::after { box-sizing: border-box; }
@@ -30,13 +43,15 @@ h1, h2, h3 { line-height: 1.2; margin: 0 0 12px; }
 h1 { font-size: 1.5rem; } h2 { font-size: 1.2rem; margin-top: 24px; } h3 { font-size: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 p { margin: 0 0 8px; }
 img { max-width: 100%; height: auto; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* --- shell -------------------------------------------------------------- */
 .topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 12px; padding: 8px 16px; padding-top: max(8px, env(safe-area-inset-top)); background: var(--surface); border-bottom: 1px solid var(--line); }
 .topbar .brand { font-weight: 700; text-decoration: none; color: var(--ink); white-space: nowrap; }
 .topbar .page-title { flex: 1; font-size: 1.1rem; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar form { margin: 0; }
-main { padding: 16px; max-width: 1200px; margin: 0 auto; overflow-x: hidden; }
+/* clip, not hidden: hidden forces overflow-y:auto and turns main into a scroll container, which kills position:sticky on .actions.sticky */
+main { padding: 16px; max-width: 1200px; margin: 0 auto; overflow-x: clip; }
 .tabs { display: flex; gap: 2px; background: var(--surface); border-top: 1px solid var(--line); }
 .tab { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 44px; padding: 6px 4px; font-size: .75rem; color: var(--muted); text-decoration: none; position: relative; }
 .tab .ico { font-size: 1.25rem; line-height: 1; }
@@ -47,7 +62,7 @@ main { padding: 16px; max-width: 1200px; margin: 0 auto; overflow-x: hidden; }
 .tab.more summary { list-style: none; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .tab.more summary::-webkit-details-marker { display: none; }
 .tab.more a { display: block; padding: 12px 16px; color: var(--ink); text-decoration: none; min-height: 44px; }
-@media (max-width: 639px) {
+@media (max-width: 639.98px) {
   .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; height: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); }
   main { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 16px); }
   .tab.more[open] .menu { position: absolute; bottom: 100%; right: 0; min-width: 160px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius) var(--radius) 0 0; box-shadow: 0 -8px 24px rgba(0,0,0,.35); }
@@ -63,7 +78,7 @@ main { padding: 16px; max-width: 1200px; margin: 0 auto; overflow-x: hidden; }
 }
 @media (min-width: 1024px) {
   :root { --rail-w: 200px; }
-  .tab, .tab.more .menu a { flex-direction: row; justify-content: flex-start; gap: 10px; padding: 10px 16px; font-size: .95rem; }
+  .tab { flex-direction: row; justify-content: flex-start; gap: 10px; padding: 10px 16px; font-size: .95rem; }
   .tab .badge { position: static; margin-left: auto; }
 }
 
@@ -88,8 +103,9 @@ details.card > summary { cursor: pointer; font-weight: 600; }
 .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .75rem; font-weight: 600; border: 1px solid currentColor; white-space: nowrap; }
 .chip-ok { color: var(--ok); } .chip-warn { color: var(--warn); } .chip-bad { color: var(--bad); } .chip-info { color: var(--info); } .chip-muted { color: var(--muted); }
 .chips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 12px; }
-.chips a { flex: 0 0 auto; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink); text-decoration: none; min-height: 40px; display: inline-flex; align-items: center; }
+.chips a { flex: 0 0 auto; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink); text-decoration: none; min-height: 44px; display: inline-flex; align-items: center; }
 .chips a[aria-current="page"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .7rem; border: 1px solid var(--line); color: var(--muted); }
 
 /* --- tables ----------------------------------------------------------- */
 .table-wrap { overflow-x: auto; }
@@ -99,7 +115,7 @@ table.rows th { color: var(--muted); font-size: .8rem; text-transform: uppercase
 .mono { font-family: var(--mono); font-size: .85rem; }
 td.mono { max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 td.wrap { white-space: normal; overflow-wrap: anywhere; }
-@media (max-width: 639px) {
+@media (max-width: 639.98px) {
   table.rows thead { display: none; }
   table.rows, table.rows tbody, table.rows tr, table.rows td { display: block; width: 100%; }
   table.rows tr { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 12px; margin-bottom: 10px; }
@@ -129,7 +145,7 @@ html.js .js-hide { display: none; }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .actions form { margin: 0; }
 .actions.sticky { position: sticky; bottom: 0; z-index: 10; background: var(--surface); border-top: 1px solid var(--line); margin: 16px -16px 0; padding: 12px 16px; }
-@media (max-width: 639px) { .actions.sticky { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); } }
+@media (max-width: 639.98px) { .actions.sticky { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); } }
 
 /* --- misc ------------------------------------------------------------- */
 pre { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; max-height: 50vh; font-family: var(--mono); font-size: .85rem; }

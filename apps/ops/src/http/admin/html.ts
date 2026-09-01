@@ -55,7 +55,9 @@ export const NAV_ITEMS = [
 const LOGOUT_FORM = html`<form method="post" action="/admin/logout"><button type="submit">Log out</button></form>`
 
 function isCurrent(href: string, path: string): boolean {
-  return href === '/admin' ? path === '/admin' : path === href || path.startsWith(`${href}/`) || path.startsWith(`${href}?`)
+  return href === '/admin'
+    ? path === '/admin' || path.startsWith('/admin?')
+    : path === href || path.startsWith(`${href}/`) || path.startsWith(`${href}?`)
 }
 
 function badgeFor(href: string, counts: NavCounts): RawHtml {
@@ -90,7 +92,7 @@ function renderTabs(shell: Shell): RawHtml {
  * The stylesheet and the tiny script are inlined: no static route, no CDN, no CSP to negotiate.
  */
 export function layout(title: string, body: RawHtml, shell?: Shell): string {
-  return html`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#10171a" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#fdf3e0" media="(prefers-color-scheme: light)"><title>${title}</title><style>${raw(ADMIN_CSS)}</style></head><body>
+  return html`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#10171a" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#fdf3e0" media="(prefers-color-scheme: light)"><title>${title}</title><style>${raw(ADMIN_CSS)}</style></head><body>
     <header class="topbar"><a class="brand" href="/admin">🐶 Doge Buddy</a><h1 class="page-title">${title}</h1>${shell ? LOGOUT_FORM : html``}</header>
     ${shell ? renderTabs(shell) : html``}
     <main>${body}</main>

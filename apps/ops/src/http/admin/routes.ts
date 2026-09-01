@@ -46,7 +46,7 @@ import { loadHealthStrip } from './health.ts'
 import { html, layout, raw, relativeTime, type RawHtml } from './html.ts'
 import { loadNavCounts } from './nav.ts'
 import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
-import { renderDashboard } from './render-dashboard.ts'
+import { DANGEROUS_SETTING_CONFIRMS, renderDashboard } from './render-dashboard.ts'
 import { renderProposalDetail, renderProposalRow, type ProposalDetailExtras, type ProposalRow } from './render-proposal.ts'
 import { renderRunDetail, renderRunRow } from './render-run.ts'
 import {
@@ -131,10 +131,15 @@ interface SettingRow {
  * render time instead of silently rendering (and truncating/coercing) as a number input.
  */
 function renderSettingRow(row: SettingRow): RawHtml {
+  // Shared with the dashboard's own switch cards: id the control so the row's <label> can carry a
+  // matching `for` (tap area includes the label text, not just the tiny checkbox/select), and so
+  // a boolean row's confirm-before-danger rule can key off the same DANGEROUS_SETTING_CONFIRMS map
+  // the dashboard uses — one literal string per key, not two copies that could drift.
+  const controlId = raw(`setting-${row.key.replaceAll('.', '-')}`)
   let control: RawHtml
   switch (row.kind) {
     case 'boolean':
-      control = html`<input type="checkbox" name="value"${raw(row.value ? ' checked' : '')}>`
+      control = html`<input type="checkbox" id="${controlId}" name="value"${raw(row.value ? ' checked' : '')}>`
       break
     case 'mode':
       control = html`<select name="value">
@@ -161,8 +166,16 @@ function renderSettingRow(row: SettingRow): RawHtml {
   const autosubmitAttr = row.kind === 'boolean' || row.kind === 'mode' ? raw(' data-autosubmit') : raw('')
   const saveClass = raw(row.kind === 'number' ? ' class="primary"' : ' class="js-hide"')
 
-  return html`<form class="card toggle-row" method="post" action="/admin/settings"${autosubmitAttr}>
-    <label>${row.key}</label>
+  // Confirm when the NEW state is the dangerous one: off -> whenTurningOn, on -> whenTurningOff.
+  // Only boolean rows have a checked/unchecked "on" state to key this off of.
+  const dangerConfirm = row.kind === 'boolean' ? DANGEROUS_SETTING_CONFIRMS[row.key] : undefined
+  const confirmMsg = dangerConfirm ? (!row.value ? dangerConfirm.whenTurningOn : dangerConfirm.whenTurningOff) : undefined
+  const confirmAttr = confirmMsg ? html` data-confirm="${confirmMsg}"` : html``
+
+  const labelFor = row.kind === 'boolean' ? html` for="${controlId}"` : html``
+
+  return html`<form class="card" method="post" action="/admin/settings"${autosubmitAttr}${confirmAttr}>
+    <label${labelFor}>${row.key}</label>
     <input type="hidden" name="key" value="${row.key}">
     ${control}
     <button type="submit"${saveClass}>Save</button>

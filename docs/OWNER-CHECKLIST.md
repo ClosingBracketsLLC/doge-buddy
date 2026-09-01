@@ -455,7 +455,7 @@ tell Claude — especially the credential items, so live verification can run.*
 
 **Next build session starts here →** **Catalog P0 is BUILT 2026-08-31 (branch `catalog-p0`,
 `docs/superpowers/specs/2026-08-31-catalog-p0-design.md`) — the live tier is the top of the
-remaining work: admin control center is on `main` (push it); then runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
+remaining work: admin control center: Claude merges the branch, then push `main`; then runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
 one manual `run-sourcing --max-winners 2` → force an `inventory.sync` check → flip
 `workflow.sourcing.mode` to `auto` for the build-week runs → back to `manual` after). Once the
 build-week runs land ~40+ products, next is `docs/LAUNCH-BACKLOG.md` **P1** (product page image

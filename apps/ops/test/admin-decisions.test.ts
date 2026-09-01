@@ -16,8 +16,15 @@ const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/dog
 const FORM_HEADERS = { 'content-type': 'application/x-www-form-urlencoded' }
 
 // SQL-leak guard assertions below scope to <main>…</main>: the inlined stylesheet legitimately
-// contains the `select` element selector, which would otherwise false-positive the guard.
-const mainOf = (body: string) => body.slice(body.indexOf('<main>'), body.indexOf('</main>'))
+// contains the `select` element selector, which would otherwise false-positive the guard. Fails
+// loudly (rather than silently slicing a garbage range from a -1 indexOf) when <main> is absent —
+// a missing <main> means the response isn't the page we think it is, and the guard should say so.
+const mainOf = (body: string) => {
+  const start = body.indexOf('<main>')
+  const end = body.indexOf('</main>')
+  if (start === -1 || end === -1) throw new Error('mainOf: no <main>...</main> found in response body')
+  return body.slice(start, end)
+}
 
 const VALID_NEW_LISTING_PAYLOAD = {
   type: 'new_listing' as const,

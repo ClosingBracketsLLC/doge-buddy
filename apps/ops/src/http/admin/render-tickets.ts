@@ -86,7 +86,7 @@ function renderTicketRow(row: TicketListRow): RawHtml {
     <td data-label="Category">${row.category ?? '—'}</td>
     <td data-label="Sentiment">${row.sentiment ?? '—'}</td>
     <td data-label="Customer">${row.customerEmail ?? '—'}</td>
-    <td data-label="Subject" class="wrap">${row.source === 'form' ? html`<span class="badge">via contact form</span> ` : html``}<a href="/admin/tickets/${row.id}">${row.subject ?? '(no subject)'}</a></td>
+    <td data-label="Subject" class="wrap">${row.source === 'form' ? html`<span class="tag">via contact form</span> ` : html``}<a href="/admin/tickets/${row.id}">${row.subject ?? '(no subject)'}</a></td>
     <td data-label="Order">${renderOrderCell(row)}</td>
     <td data-label="Last contact"><span title="${lastContact.toISOString()}">${relativeTime(lastContact)}</span></td>
   </tr>`
