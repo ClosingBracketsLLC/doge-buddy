@@ -13,6 +13,7 @@
     "replay-webhook": "tsx scripts/replay-webhook.ts",
     "seed-store": "tsx scripts/seed-store.ts",
     "seed-collections": "tsx scripts/seed-collections.ts",
+    "backfill-listings": "tsx scripts/backfill-listings.ts",
     "seed-proposal": "tsx scripts/seed-proposal.ts",
     "run-sourcing": "tsx scripts/run-sourcing.ts",
     "inspect-mailbox": "tsx scripts/inspect-mailbox.ts",

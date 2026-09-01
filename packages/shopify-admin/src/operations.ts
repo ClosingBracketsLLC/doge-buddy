@@ -736,6 +736,34 @@ export async function primaryLocationId(client: ShopifyAdminClient): Promise<str
 }
 
 // ---------------------------------------------------------------------------
+// productDescriptionHtml
+// ---------------------------------------------------------------------------
+
+// The `backfill-listings` repair script's one read: a product's `seo.description` is derived from
+// its description HTML, and for a product created under the OLD scheme that HTML lives ONLY on
+// Shopify (the local `products` row never stored it — only the proposal payload did, and a
+// hand-created product has no proposal). `Product.descriptionHtml` is a nullable `HTML` field on
+// the 2026-07 Admin API, so an empty description reads back as `null` and is normalized to `''`
+// here; a gid that resolves to no product at all is a real problem and throws.
+const PRODUCT_DESCRIPTION_HTML_QUERY = `#graphql
+  query ProductDescriptionHtml($id: ID!) {
+    product(id: $id) {
+      descriptionHtml
+    }
+  }
+`
+
+interface ProductDescriptionHtmlData {
+  product: { descriptionHtml: string | null } | null
+}
+
+export async function productDescriptionHtml(client: ShopifyAdminClient, productGid: string): Promise<string> {
+  const data = await client.graphql<ProductDescriptionHtmlData>(PRODUCT_DESCRIPTION_HTML_QUERY, { id: productGid })
+  if (!data.product) throw new Error(`productDescriptionHtml: no product ${productGid}`)
+  return data.product.descriptionHtml ?? ''
+}
+
+// ---------------------------------------------------------------------------
 // productUpdate
 // ---------------------------------------------------------------------------
 

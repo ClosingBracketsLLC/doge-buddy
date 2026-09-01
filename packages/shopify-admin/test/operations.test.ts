@@ -4,7 +4,7 @@ import {
   collectionCreate, findProductByHandle, fulfillmentCreate, fulfillmentTrackingInfoUpdate,
   inventoryItemUpdate, inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
   listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, orderRefundState,
-  ordersUpdatedSince, primaryLocationId, productDelete, productUpdate,
+  ordersUpdatedSince, primaryLocationId, productDelete, productDescriptionHtml, productUpdate,
   productSet, productVariantsByProductId, publishablePublish, publishableUnpublish, refundCreate, webhookSubscriptionCreate,
   webhookSubscriptionDelete,
 } from '@doge-buddy/shopify-admin'
@@ -484,6 +484,26 @@ describe('productVariantsByProductId', () => {
     expect(query).toMatch(/query[\s\S]*variants/)
     expect(query).toMatch(/inventoryItem\s*\{\s*id\s*\}/)
     expect(variables).toEqual({ id: 'gid://shopify/Product/9' })
+  })
+})
+
+describe('productDescriptionHtml', () => {
+  it('sends the product gid and returns the descriptionHtml', async () => {
+    const { client, calls } = makeClient(() => gql({ product: { descriptionHtml: '<p>Doge</p>' } }))
+    const result = await productDescriptionHtml(client, 'gid://shopify/Product/9')
+    expect(result).toBe('<p>Doge</p>')
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*product\(id: \$id\)/)
+    expect(query).toMatch(/descriptionHtml/)
+    expect(variables).toEqual({ id: 'gid://shopify/Product/9' })
+  })
+  it('returns an empty string when the product has no description', async () => {
+    const { client } = makeClient(() => gql({ product: { descriptionHtml: null } }))
+    await expect(productDescriptionHtml(client, 'gid://shopify/Product/9')).resolves.toBe('')
+  })
+  it('throws when the product gid does not resolve', async () => {
+    const { client } = makeClient(() => gql({ product: null }))
+    await expect(productDescriptionHtml(client, 'gid://shopify/Product/9')).rejects.toThrow(/no product/)
   })
 })
 

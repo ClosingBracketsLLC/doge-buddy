@@ -1,5 +1,6 @@
 import { categoryByTag, categoryTagValue, centsToUsd, NewListingPayloadSchema } from '@doge-buddy/core'
 import { auditLog, products, productVariants, supplierVariantMappings } from '@doge-buddy/db'
+import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { eq, sql } from 'drizzle-orm'
 import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts, usQuantity } from '../jobs/inventory-sync.ts'
 import { applyProposalTransition } from './transitions.ts'
@@ -33,16 +34,37 @@ async function getLocationId(shopify: ProposalShopifyOps): Promise<string> {
 }
 
 /**
+ * `seo.title` from the product title: capped, nothing else.
+ *
+ * Exported alongside `seoDescription` below so the `backfill-listings` repair script
+ * (`catalog/backfill.ts`) computes the SEO pair the SAME way a new listing does. A repaired
+ * product and a freshly-listed one must not end up with two different notions of what their SEO
+ * fields are, which is exactly what a second copy of these two rules would guarantee over time.
+ */
+export function seoTitle(title: string): string {
+  return title.slice(0, SEO_TITLE_MAX)
+}
+
+/**
  * `seo.description` from the listing's own description HTML: tags out, whitespace collapsed,
  * capped. Entities are left exactly as they are — `&amp;` in a meta description renders as `&`,
  * and a half-hearted decode is how you get `&lt;script` back out the other side.
+ *
+ * Exported for the backfill — see `seoTitle` above.
  */
-function seoDescription(descriptionHtml: string): string {
+export function seoDescription(descriptionHtml: string): string {
   return descriptionHtml
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, SEO_DESCRIPTION_MAX)
+}
+
+/** The two deps `readUsStock` below actually uses — see its docstring for why it is a structural
+ * subset of `ApplyProposalDeps` rather than the interface itself. */
+export interface StockReadDeps {
+  adapter: Pick<SupplierAdapter, 'getVariantStock'>
+  alert: (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
 }
 
 /**
@@ -56,8 +78,14 @@ function seoDescription(descriptionHtml: string): string {
  * "CJ was unreachable for 30 seconds" is not an observation that the warehouse is empty. Writing a
  * confident 0 there would silently destroy a good value on every retry of a listing whose apply
  * happened to coincide with a supplier hiccup.
+ *
+ * Takes a STRUCTURAL subset of `ApplyProposalDeps` rather than the whole thing: the
+ * `backfill-listings` repair script (`catalog/backfill.ts`) needs exactly this read, with exactly
+ * this null-on-failure contract, and has no proposal pipeline behind it to satisfy the full deps
+ * interface with. `ApplyProposalDeps` structurally satisfies `StockReadDeps`, so the call sites
+ * below are unchanged.
  */
-async function readUsStock(deps: ApplyProposalDeps, supplierVariantId: string): Promise<number | null> {
+export async function readUsStock(deps: StockReadDeps, supplierVariantId: string): Promise<number | null> {
   try {
     return usQuantity(await deps.adapter.getVariantStock(supplierVariantId))
   } catch (err) {
@@ -110,7 +138,7 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     tags: [categoryTagValue(payload.categoryTag)],
     productType: category.productType,
     seo: {
-      title: payload.title.slice(0, SEO_TITLE_MAX),
+      title: seoTitle(payload.title),
       description: seoDescription(payload.descriptionHtml),
     },
   }
