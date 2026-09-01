@@ -30,17 +30,25 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 14. [ ] 🔴 **Catalog P0 go-live (Claude + Robert, ~30 min).** The catalog-p0 branch is built and
     tested (see `docs/LAUNCH-BACKLOG.md` P0 1–5) but never run against the real store. Live-tier
     steps, in order:
-    (a) **Claude merges `catalog-p0` into `main` locally, then you push** — `git push origin main`
-    (no migration this time). Railway redeploys ops; Oxygen redeploys the storefront.
-    (b) From the main checkout: `pnpm --filter @doge-buddy/ops seed-collections` (reads
+    (a) ✅ 2026-08-31 merged (`db5096b`) and pushed. Railway redeployed ops; Oxygen the storefront.
+    (b) ✅ 2026-08-31 — all four collections live, rules `TAG EQUALS category:<tag>`, published to
+    all 4 publications (verified by Admin API probe). Original step: From the main checkout: `pnpm --filter @doge-buddy/ops seed-collections` (reads
     `apps/ops/.env`) → expect `created=4 skipped=0 published=16` (16 = 4 collections × 4
     publications: Online Store, Shop, POS, `doge-buddy`). Then on the storefront preview URL:
     `/collections/toys-play`, `/walks-travel`, `/beds-comfort`, `/grooming-care` all return 200
     (empty — no products tagged yet) and `/collections` shows four tiles.
-    (c) `pnpm --filter @doge-buddy/ops backfill-listings --dry-run` first (prints the plan, zero
-    writes), then the same command **without** `--dry-run` → expect `products=2 updated=2
-    partial=0 failures=0`. **NOTE:** `FULFILLMENT_SUPPLIER=cj` must already be set in
-    `apps/ops/.env` — the script refuses to push inventory otherwise. The two live products get
+    (c) ⚠️ **Must run against the RAILWAY database, not localhost.** The script walks the DB's
+    product rows and writes each variant's `shopify_inventory_item_gid` back — the deployed
+    `inventory.sync` reads that column on Railway. `apps/ops/.env` has `DATABASE_URL=localhost`
+    (only the Snuff Pad row exists there), so a plain run touches 1 product and stores the gid in
+    the wrong DB. Prefix the Railway URL (an env var set on the command line beats `.env`):
+    `DATABASE_URL='<railway postgres url>' pnpm --filter @doge-buddy/ops backfill-listings --dry-run`
+    → expect `2 active product(s)`; then the same command **without** `--dry-run` → expect
+    `products=2 updated=2 partial=0 failures=0`. Use the Railway Postgres service's public/proxy
+    URL (Variables → `DATABASE_PUBLIC_URL`) — the internal `railway.internal` host is not reachable
+    from your laptop. `FULFILLMENT_SUPPLIER=cj` is already set in `apps/ops/.env` (checked) — the
+    script refuses to push inventory otherwise. Don't run it in the minute after a `:00` 6-hourly
+    sync tick (00/06/12/18 UTC) — the two are not serialized. The two live products get
     human URLs (`/products/dog-snuff-pad-<8hex>`, `/products/low-noise-pet-hair-clipper-<8hex>`),
     land in the right category (Grooming & Care for the clipper, etc.), and show tracked stock.
     (d) Verify: the four `/collections/*` pages now list the products; each product page shows
