@@ -52,6 +52,7 @@ describe('admin html helpers', () => {
     // fires no `submit` event and would silently skip data-confirm on autosubmit+confirm forms.
     expect(ADMIN_JS).not.toContain('requestSubmit')
     expect(ADMIN_JS).toContain("'autosubmit' in f.dataset")
+    expect(ADMIN_JS).toContain('defaultSelected')
   })
 
   it('escalated badge uses the bad tone; /admin is current only on an exact match; detail paths match their list tab', () => {

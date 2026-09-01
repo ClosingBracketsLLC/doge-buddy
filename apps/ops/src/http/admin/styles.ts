@@ -160,7 +160,9 @@ document.addEventListener('change', function (e) {
   var el = e.target, f = el && el.form;
   if (!f || !f.dataset || !('autosubmit' in f.dataset)) return;
   if (f.dataset.confirm && !window.confirm(f.dataset.confirm)) {
-    if (el.type === 'checkbox' || el.type === 'radio') el.checked = !el.checked; else el.value = el.defaultValue;
+    if (el.type === 'checkbox' || el.type === 'radio') el.checked = !el.checked;
+    else if (el.options) { for (var i = 0; i < el.options.length; i++) el.options[i].selected = el.options[i].defaultSelected; }
+    else el.value = el.defaultValue;
     return;
   }
   f.submit();
