@@ -4,7 +4,9 @@ import type { WarehouseStock } from '@doge-buddy/supplier'
 import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SendOpts } from '../src/fulfillment/types.ts'
-import { INVENTORY_SYNC_QUEUE, usQuantity } from '../src/jobs/inventory-sync.ts'
+import {
+  executeInventorySync, INVENTORY_SYNC_QUEUE, type InventorySyncShopifyOps, usQuantity,
+} from '../src/jobs/inventory-sync.ts'
 import { resetLocationCache } from '../src/proposals/apply-new-listing.ts'
 import {
   deadLetterApplyProposal, executeApplyProposal, proposalHandle, type ProposalShopifyOps,
@@ -1140,5 +1142,115 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       .where(eq(supplierVariantMappings.variantId, variantRow!.id))
     expect(mapping!.lastKnownStock).toBe(7)
     expect(mapping!.stockCheckedAt).toEqual(priorCheckedAt)
+  })
+  // ---------------------------------------------------------------------------
+  // 22./23. C1 (whole-branch review): the RESUME path must not refresh the stock cache.
+  //
+  // Only the CREATE branch's `productSet` ever writes a Shopify quantity. A reading taken on a
+  // resumed apply therefore cannot reach Shopify — but it WOULD land in `last_known_stock`, which
+  // is precisely what `inventory.sync` compares its own fresh reading against. Attempt 1 fails its
+  // read and ships Shopify a 0; attempt 2 reads 7 and caches 7; the next sync sees 7 == 7, calls it
+  // "unchanged", pushes nothing — and the product is Sold out forever (or, for 7 -> 5, oversells
+  // forever) with no alert anywhere. So: no read, no cache write, and the enqueued `inventory.sync`
+  // is left as the single writer of that product's Shopify inventory.
+  // ---------------------------------------------------------------------------
+
+  /** Attempt 1 with CJ down (product created, Shopify quantity 0, nothing cached), then the
+   * crash-retry re-entry with CJ healthy again. Returns what both tests below assert on. */
+  async function crashedThenResumed() {
+    const row = await seedProposal({ status: 'approved' })
+    const payload = row.payload as ReturnType<typeof newListingPayload>
+    const alert = vi.fn(async () => {})
+
+    const first = fakeShopify()
+    await executeApplyProposal(
+      {
+        db, alert, shopify: first,
+        adapter: fakeAdapter({
+          getVariantStock: async () => {
+            throw new Error('cj stock unavailable')
+          },
+        }),
+        ...baseDeps(),
+      },
+      row.id,
+    )
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, payload.variants[0]!.sku))
+
+    await db.update(proposals).set({ status: 'applying' }).where(eq(proposals.id, row.id))
+    const second = fakeShopify({
+      productVariantsByProductId: async () => [
+        {
+          id: variantRow!.shopifyVariantGid!,
+          sku: payload.variants[0]!.sku,
+          inventoryItemId: variantRow!.shopifyInventoryItemGid!,
+        },
+      ],
+    })
+    const productSetSpy = vi.spyOn(second, 'productSet')
+    const adapter = fakeAdapter()
+    await executeApplyProposal({ db, alert, shopify: second, adapter, ...baseDeps() }, row.id)
+
+    return { row, payload, productRow: productRow!, variantRow: variantRow!, second, productSetSpy, adapter, alert }
+  }
+
+  it('22. re-entry after a failed-read create neither re-reads CJ nor caches a quantity Shopify never got', async () => {
+    const { row, variantRow, second, productSetSpy, adapter } = await crashedThenResumed()
+
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+    // No CJ read at all on the resume path — the reading would have nowhere to go.
+    expect(adapter.stockReads).toEqual([])
+    // And no second inventory push: the only `productSet` is the ACTIVE flip, which carries
+    // neither `variants` nor the `inventoryQuantities` that live on them.
+    expect(second.calls.filter((c) => c.startsWith('productSet:'))).toEqual(['productSet:ACTIVE'])
+    for (const [input] of productSetSpy.mock.calls) {
+      expect((input as Record<string, unknown>).variants).toBeUndefined()
+    }
+    // The cache stays empty, so the enqueued sync below is guaranteed to see a difference and push.
+    const [mapping] = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantRow.id))
+    expect(mapping!.lastKnownStock).toBeNull()
+    expect(mapping!.stockCheckedAt).toBeNull()
+  })
+
+  it('23. the inventory.sync enqueued by that re-entry is what pushes the fresh quantity to Shopify', async () => {
+    const { productRow, variantRow } = await crashedThenResumed()
+
+    const pushes: { input: Record<string, unknown>; key: string }[] = []
+    const syncShopify: InventorySyncShopifyOps = {
+      inventorySetQuantities: async (input, key) => {
+        pushes.push({ input, key })
+      },
+      primaryLocationId: async () => FIXTURE_LOCATION_ID,
+    }
+
+    const result = await executeInventorySync(
+      { db, adapter: fakeAdapter(), shopify: syncShopify, alert: vi.fn(async () => {}) },
+      { productId: productRow.id },
+    )
+
+    expect(result).toEqual({ updated: 1, unchanged: 0, failed: 0, skipped: 0 })
+    expect(pushes).toHaveLength(1)
+    expect(pushes[0]!.input).toEqual({
+      name: 'available',
+      reason: 'correction',
+      // No `changeFromQuantity`: the cache is null, so there is nothing to compare-and-swap
+      // against and this is the unconditional first real push for the variant.
+      quantities: [
+        { inventoryItemId: variantRow.shopifyInventoryItemGid, locationId: FIXTURE_LOCATION_ID, quantity: FIXTURE_US_STOCK },
+      ],
+    })
+    const [mapping] = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantRow.id))
+    expect(mapping!.lastKnownStock).toBe(FIXTURE_US_STOCK)
+    expect(mapping!.stockCheckedAt).not.toBeNull()
+
+    await db.delete(auditLog).where(eq(auditLog.entityId, productRow.id))
   })
 })

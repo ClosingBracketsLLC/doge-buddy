@@ -103,7 +103,14 @@ Also fixes `runSeed` so its collection step publishes the same way (today it pub
   `inventory.sync` job for that product (singletonKey = product id) so the quantity is exact even
   when the listing-time read failed.
 - `supplier_variant_mappings.last_known_stock` / `stock_checked_at` are written at listing time and by
-  every sync (today they're never written).
+  every sync (today they're never written). Review ruling 2026-08-31 (whole-branch, C1): the CJ read
+  happens ONLY on the create path. A RESUME (the product already exists, so no `productSet` with
+  `variants` runs and no Shopify quantity is written) reads nothing and writes the mapping pair as
+  `null`/`null` — the `coalesce` upsert keeps any existing good value — so the enqueued
+  `inventory.sync` is the single writer of that product's Shopify inventory on that path. Caching a
+  reading the resume path could never push is what strands a product: Shopify holds attempt 1's 0,
+  the cache holds attempt 2's 7, and every later sync cycle reads 7, calls it "unchanged" and pushes
+  nothing — Sold out (or overselling) forever, silently.
 
 **Backfill** for the two live products: `pnpm --filter @doge-buddy/ops backfill-listings` — for every
 `products` row with an active Shopify gid: `productUpdate` handle/tags/productType/seo from the local

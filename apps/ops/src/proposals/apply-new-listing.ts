@@ -143,26 +143,42 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     },
   }
 
-  // 0. CJ's US stock per payload variant, read BEFORE the product is resolved so both paths below
-  // get it: the create path seeds Shopify's inventory levels with it, and every path — create or
-  // resume — records it on the mapping row. Doing this only inside the create branch would leave
-  // a resumed listing's `last_known_stock` permanently null, which is exactly the class of
-  // resume-path hole the variant-gid backfill in step 3 below already had to be fixed for.
-  const stockCheckedAt = new Date()
-  // `null` = the read failed (see `readUsStock`); 0 = CJ genuinely has none.
-  const stockBySku = new Map<string, number | null>()
-  for (const v of payload.variants) {
-    stockBySku.set(v.sku, await readUsStock(deps, v.supplierVariantId))
-  }
-
-  // 1. Resolve the Shopify product exactly once, across crashes: local row first, then handle probe.
+  // 1. Resolve the Shopify product exactly once, across crashes: local row first, then handle
+  // probe. Deliberately BEFORE the CJ stock read below, because which of the two paths this apply
+  // is on decides whether that read may happen at all — see step 2.
   const [existing] = await db.select().from(products).where(eq(products.createdFromProposalId, proposalId))
   let productGid = existing?.shopifyProductGid ?? null
   if (!productGid) {
     productGid = (await deps.shopify.findProductByHandle(handle))?.id ?? null
   }
+
+  /**
+   * 2. CJ's US stock per payload variant — read ONLY on the CREATE path. That asymmetry is a
+   * correctness requirement, not an optimisation (whole-branch review, C1).
+   *
+   * The `productSet` in the create branch below is the ONLY place this function ever writes a
+   * Shopify quantity. A reading taken on the RESUME path therefore has nowhere to go — but it
+   * would still land in `last_known_stock` in step 4, and that cache is exactly what
+   * `inventory.sync` compares its own fresh reading against. Caching a number Shopify never
+   * received is how a product gets stranded: attempt 1's read fails so Shopify is seeded with 0,
+   * attempt 1 then crashes; attempt 2 resumes, reads 7 and caches 7; the next sync cycle reads 7,
+   * sees 7 == 7, calls it "unchanged" and pushes nothing — Sold out forever (or, for a 7 -> 5
+   * move, overselling forever), with no alert anywhere.
+   *
+   * So a resumed apply reads nothing and records nothing: `stockBySku` stays empty, step 4 writes
+   * `lastKnownStock: null` / `stockCheckedAt: null` (its `coalesce` keeps any existing good value
+   * rather than regressing it), and the `inventory.sync` enqueued in step 4b is left as the SINGLE
+   * writer of this product's Shopify inventory on that path — one that always reads CJ and, with
+   * nothing cached to match, always pushes.
+   */
+  const stockCheckedAt = new Date()
+  // `null` = the read failed (see `readUsStock`); 0 = CJ genuinely has none.
+  const stockBySku = new Map<string, number | null>()
   let variantGids: { id: string; sku?: string; inventoryItemId: string }[] = []
   if (!productGid) {
+    for (const v of payload.variants) {
+      stockBySku.set(v.sku, await readUsStock(deps, v.supplierVariantId))
+    }
     // The location every `inventoryQuantities` entry below is addressed to. Resolved lazily, and
     // only on this branch: a resumed apply that finds its product already created never touches
     // Shopify inventory, so it must not pay (or fail on) a location lookup it has no use for.
@@ -211,13 +227,13 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     // own doc comment for why "permanently" is the actual failure mode without this.
     variantGids = await deps.shopify.productVariantsByProductId(productGid)
   }
-  // 2. Local products row — gid lands before anything else can crash.
+  // 3. Local products row — gid lands before anything else can crash.
   await db.insert(products).values({
     shopifyProductGid: productGid, handle, title: payload.title, status: 'active',
     categoryTag: payload.categoryTag, createdFromProposalId: proposalId,
   }).onConflictDoNothing({ target: products.shopifyProductGid })
   const [productRow] = await db.select().from(products).where(eq(products.shopifyProductGid, productGid))
-  // 3. product_variants + supplier_variant_mappings (idempotent; matched by sku). The gid column
+  // 4. product_variants + supplier_variant_mappings (idempotent; matched by sku). The gid column
   // is a coalesce-backfill on conflict — not a plain onConflictDoNothing — specifically so a row
   // that landed with a null `shopifyVariantGid` on an earlier run (the exact resume scenario this
   // just guarded against getting introduced going forward) can still self-heal on a later re-apply
@@ -254,12 +270,19 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
       throw new Error(`sku collision: ${v.sku} already belongs to another product`)
     }
     // Unlike the identity columns above, the stock pair is NOT first-write-wins: it is a
-    // timestamped observation, and a re-applied listing that took a FRESH one should overwrite —
-    // a stale `last_known_stock` is worse than the new reading. But only a real reading counts:
-    // when the read failed (`null`), both columns go in null and the `coalesce(excluded, existing)`
-    // on conflict keeps whatever was already there, so a supplier hiccup during a retry can never
-    // regress a good value to 0. The pair moves together — a quantity without its timestamp, or a
-    // timestamp implying a reading that never happened, is worse than either alone.
+    // timestamped observation, and a listing that took a FRESH one should overwrite — a stale
+    // `last_known_stock` is worse than the new reading. But only a reading THIS RUN ALSO PUSHED TO
+    // SHOPIFY counts, which is why there are exactly two ways for `observed` to be null here and
+    // both write the pair as null:
+    //   - the create path's read failed (`readUsStock` returned null) — Shopify got 0, and "CJ was
+    //     unreachable for 30 seconds" is not an observation that the warehouse is empty;
+    //   - this is the RESUME path, which by step 2's ruling never reads CJ at all — there is no
+    //     `productSet` on this path, so any number cached here would be one Shopify never got.
+    // In both cases `coalesce(excluded, existing)` on conflict keeps whatever was already there,
+    // so neither can regress a good value; and a null cache is what guarantees the `inventory.sync`
+    // enqueued below finds a difference and actually pushes. The pair moves together — a quantity
+    // without its timestamp, or a timestamp implying a reading that never happened, is worse than
+    // either alone.
     const observed = stockBySku.get(v.sku) ?? null
     await db.insert(supplierVariantMappings).values({
       variantId: variantRow!.id, supplier: v.supplier,
@@ -274,7 +297,7 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     })
   }
 
-  // 3b. Hand the product to the inventory sync job (Task 5). Strictly after the local rows exist —
+  // 4b. Hand the product to the inventory sync job (Task 5). Strictly after the local rows exist —
   // the job resolves the product by its local id. The product is still DRAFT at this point (step 4
   // flips it), which changes nothing about the argument: the sync job is a *refresher* of an
   // inventory the create call already seeded correctly, so a queue that is momentarily unreachable
@@ -290,7 +313,7 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
       error: err instanceof Error ? err.message : String(err),
     }).catch(() => {})
   }
-  // 4. ACTIVE + publish. Online Store success is required for 'applied'; others alert-and-continue.
+  // 5. ACTIVE + publish. Online Store success is required for 'applied'; others alert-and-continue.
   await deps.shopify.productSet({ id: productGid, status: 'ACTIVE', ...catalogFields })
   const publications = await deps.shopify.listPublications()
   for (const pub of publications) {
@@ -313,7 +336,7 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     detail: { productGid },
   })
 
-  // 5. Apply-time CJ product-webhook subscribe (Task 16). Strictly AFTER the applied transition
+  // 6. Apply-time CJ product-webhook subscribe (Task 16). Strictly AFTER the applied transition
   // committed above — never before, and never allowed to affect the apply's own success: a
   // subscribe failure here must not roll back or retry the apply that already landed, so each
   // call is wrapped in its own best-effort catch (alert, never throw). A resumed/retried apply
