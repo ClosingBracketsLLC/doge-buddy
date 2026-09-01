@@ -177,7 +177,8 @@ app.log.info(contactDeps ? 'contact form endpoint ARMED' : 'contact form endpoin
 app.log.info({ supplier: supplierAdapter.key }, 'fulfillment supplier adapter')
 if (supplierAdapter.key === 'mock' && config.shopify) {
   app.log.warn(
-    'FULFILLMENT_SUPPLIER=mock with Shopify configured — real paid orders would be mock-fulfilled',
+    'FULFILLMENT_SUPPLIER=mock with Shopify configured — real paid orders would be mock-fulfilled; '
+      + 'inventory.sync is DISABLED for the same reason (mock stock must never reach a real store)',
   )
 }
 
@@ -262,7 +263,14 @@ const refundOps: RefundOps | null = shopifyClient
 // is unconfigured, same stance as `refundOps` just above and for a related reason: a dev boot
 // without creds must make the sync a loud-once no-op (one `inventory_sync_no_shopify` info alert
 // per cycle, no CJ points burned), not fail every variant of every cycle forever.
-const inventorySyncShopify: InventorySyncShopifyOps | null = shopifyClient
+//
+// ALSO null unless the supplier adapter is the real CJ one (whole-branch review, I3). The sync
+// pushes `adapter.getVariantStock` straight into a live store's inventory levels, so with
+// `FULFILLMENT_SUPPLIER` anything but `cj` and Shopify creds present — a staging box pointed at
+// the real store, a local run with a copied .env — it would overwrite every tracked variant's
+// quantity with `MockSupplierAdapter`'s fixture numbers, silently and every six hours. The same
+// `null` path covers it: registered, inert, one info alert per cycle.
+const inventorySyncShopify: InventorySyncShopifyOps | null = shopifyClient && supplierAdapter.key === 'cj'
   ? {
       inventorySetQuantities: (input, idempotencyKey) => inventorySetQuantities(shopifyClient, input, idempotencyKey),
       primaryLocationId: () => primaryLocationId(shopifyClient),
@@ -359,7 +367,9 @@ await registerCron(queue.boss, 'inventory.sync-cron', '0 */6 * * *', async () =>
 app.log.info(
   inventorySyncShopify
     ? `${INVENTORY_SYNC_QUEUE} ARMED — stately worker + 6-hourly catalog cron`
-    : `${INVENTORY_SYNC_QUEUE} worker/cron registered but INERT: Shopify not configured (one info alert per cycle)`,
+    : `${INVENTORY_SYNC_QUEUE} worker/cron registered but INERT: `
+      + `${config.shopify ? `FULFILLMENT_SUPPLIER=${supplierAdapter.key} (not cj)` : 'Shopify not configured'}`
+      + ' (one info alert per cycle)',
 )
 
 // `proposal.expire-sweep` (Task 7): daily proposal expiry sweep — transitions any pending
