@@ -72,8 +72,7 @@ instead of their hardcoded copies. `apps/ops/src/seed/sample-data.ts` rewrites i
 ## 2. Collections on the store
 
 A new credential-gated script `pnpm --filter @doge-buddy/ops seed-collections` (`apps/ops/scripts/
-seed-collections.ts` → `src/seed/collections.ts`): for each `CATEGORIES` entry, `collectionCreate`
-if `listCollections` lacks the handle (rule `TAG EQUALS category:<tag>`, `descriptionHtml` = blurb),
+seed-collections.ts` → `src/seed/collections.ts`): for each `CATEGORIES` entry, `collectionCreate` if `listCollections` lacks the handle (2026-07 shape, live-verified 2026-08-31: `collection: CollectionCreateInput` with a `sources[].source.inclusion.conditions[].productTag { relation: TAGGED_WITH, values: ['category:<tag>'] }` rule — the `ruleSet` form the seed used before does not exist on this API version, which is why the store never got its collections; `descriptionHtml` = blurb),
 then `publishablePublish` the collection to EVERY publication from `listPublications` (Online Store,
 Shop, POS, `doge-buddy`) — publishing is idempotent, so a rerun heals a half-published collection.
 Prints created/skipped/published counts; a failure on one collection is logged and the run continues
@@ -119,8 +118,7 @@ on-demand via `enqueue('inventory.sync', { productId? })` (queue policy `stately
 productId or `'all'`). One cycle: select every `product_variants` row joined to an ACTIVE product with
 a `supplier_variant_mappings` row and a non-null `shopify_inventory_item_gid`; for each (bounded: 200
 variants/cycle, alert if more) call `adapter.getVariantStock`, sum US quantity, clamp ≥ 0; if it
-differs from `last_known_stock`, `inventorySetQuantities({ name:'available', reason:'correction',
-ignoreCompareQuantity:true, quantities:[{ inventoryItemId, locationId, quantity }] }, idempotencyKey)`
+differs from `last_known_stock`, `inventorySetQuantities({ name:'available', reason:'correction', quantities:[{ inventoryItemId, locationId, quantity }] }, idempotencyKey)` (2026-07 has no `ignoreCompareQuantity`; the optional per-entry `changeFromQuantity` CAS is omitted on purpose)
 (key = `inv-<variantId>-<yyyymmddhh>`), then update `last_known_stock`/`stock_checked_at`. Per-variant
 errors are logged + counted, never abort the cycle; ≥ 25% failures in a cycle → one warning alert
 `inventory_sync_degraded`. Variants whose product isn't active, or with no inventory item gid, are
