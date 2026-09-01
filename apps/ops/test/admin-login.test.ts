@@ -170,7 +170,7 @@ describe('admin login (magic link) + session gate', () => {
     const cookiePair = cookieHeader.split(';')[0]!
     const dashRes = await app.inject({ method: 'GET', url: '/admin', headers: { cookie: cookiePair } })
     expect(dashRes.statusCode).toBe(200)
-    expect(dashRes.body).toContain('<nav>')
+    expect(dashRes.body).toContain('<nav class="tabs"')
 
     await cleanupLoginSends()
     await app.close()

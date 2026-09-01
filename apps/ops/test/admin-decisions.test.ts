@@ -15,6 +15,10 @@ const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/dog
 
 const FORM_HEADERS = { 'content-type': 'application/x-www-form-urlencoded' }
 
+// SQL-leak guard assertions below scope to <main>…</main>: the inlined stylesheet legitimately
+// contains the `select` element selector, which would otherwise false-positive the guard.
+const mainOf = (body: string) => body.slice(body.indexOf('<main>'), body.indexOf('</main>'))
+
 const VALID_NEW_LISTING_PAYLOAD = {
   type: 'new_listing' as const,
   title: 'Squeaky Widget',
@@ -430,8 +434,8 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.body).toContain('Something went wrong.')
-    expect(res.body.toLowerCase()).not.toContain('select')
-    expect(res.body.toLowerCase()).not.toContain('invalid input syntax')
+    expect(mainOf(res.body).toLowerCase()).not.toContain('select')
+    expect(mainOf(res.body).toLowerCase()).not.toContain('invalid input syntax')
 
     expect(deps.enqueue).not.toHaveBeenCalled()
     expect(deps.alert).toHaveBeenCalledWith(
@@ -457,8 +461,8 @@ describe('session-authed proposal decisions (+ edit-then-approve)', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.body).toContain('Something went wrong.')
-    expect(res.body.toLowerCase()).not.toContain('select')
-    expect(res.body.toLowerCase()).not.toContain('invalid input syntax')
+    expect(mainOf(res.body).toLowerCase()).not.toContain('select')
+    expect(mainOf(res.body).toLowerCase()).not.toContain('invalid input syntax')
 
     expect(deps.enqueue).not.toHaveBeenCalled()
     expect(deps.alert).toHaveBeenCalledWith(

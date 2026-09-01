@@ -45,6 +45,7 @@ import {
 } from './auth.ts'
 import { loadHealthStrip, type HealthStrip } from './health.ts'
 import { html, layout, raw, type RawHtml } from './html.ts'
+import { loadNavCounts } from './nav.ts'
 import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
 import { renderProposalDetail, renderProposalRow, type ProposalDetailExtras, type ProposalRow } from './render-proposal.ts'
 import { renderRunDetail, renderRunRow } from './render-run.ts'
@@ -408,10 +409,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         }
       })
 
-      authed.get('/admin', async (_request, reply) => {
+      authed.get('/admin', async (request, reply) => {
         return safeHandle('dashboard', reply, async () => {
           const health = await loadHealthStrip(deps)
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Dashboard', renderHealthStrip(health)))
+          return reply.code(200).type('text/html; charset=utf-8').send(await page('Dashboard', renderHealthStrip(health), request.url))
         })
       })
 
@@ -463,7 +464,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             )
             .limit(100)
 
-          const body = layout('Tickets', renderTicketsList(rows, status))
+          const body = await page('Tickets', renderTicketsList(rows, status), request.url)
           return reply.code(200).type('text/html; charset=utf-8').send(body)
         })
       })
@@ -473,7 +474,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         return safeHandle(id, reply, async () => {
           const [ticket] = await deps.db.select().from(supportTickets).where(eq(supportTickets.id, id))
           if (!ticket) {
-            return reply.code(200).type('text/html; charset=utf-8').send(layout('Ticket', html`<p>Not found.</p>`))
+            return reply.code(200).type('text/html; charset=utf-8').send(await page('Ticket', html`<p>Not found.</p>`, request.url))
           }
 
           const messages = await deps.db
@@ -525,7 +526,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           return reply
             .code(200)
             .type('text/html; charset=utf-8')
-            .send(layout('Ticket', renderTicketDetail(ticket, messages, linkedOrder, ticketProposals, ticketAgentRuns)))
+            .send(await page('Ticket', renderTicketDetail(ticket, messages, linkedOrder, ticketProposals, ticketAgentRuns), request.url))
         })
       })
 
@@ -581,7 +582,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         })
       }
 
-      authed.get('/admin/runs', async (_request, reply) => {
+      authed.get('/admin/runs', async (request, reply) => {
         return safeHandle('runs', reply, async () => {
           const rows = await deps.db
             .select({
@@ -607,7 +608,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                   </tbody>
                 </table>`
 
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Runs', body))
+          return reply.code(200).type('text/html; charset=utf-8').send(await page('Runs', body, request.url))
         })
       })
 
@@ -621,7 +622,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         return safeHandle(id, reply, async () => {
           const [run] = await deps.db.select().from(agentRuns).where(eq(agentRuns.id, id))
           if (!run) {
-            return reply.code(200).type('text/html; charset=utf-8').send(layout('Run', html`<p>Not found.</p>`))
+            return reply.code(200).type('text/html; charset=utf-8').send(await page('Run', html`<p>Not found.</p>`, request.url))
           }
 
           const events = await deps.db
@@ -630,7 +631,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             .where(eq(agentRunEvents.runId, id))
             .orderBy(asc(agentRunEvents.seq))
 
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Run', renderRunDetail(run, events)))
+          return reply.code(200).type('text/html; charset=utf-8').send(await page('Run', renderRunDetail(run, events), request.url))
         })
       })
 
@@ -693,8 +694,17 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           await deps.alert('warning', 'admin_route_error', { proposalId: entityId, error: message }).catch(() => {})
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Something went wrong.</p>`))
+          return reply.code(200).type('text/html; charset=utf-8').send(await page('Proposal', html`<p>Something went wrong.</p>`, '/admin'))
         }
+      }
+
+      /**
+       * Every authed page goes through here so the tab shell (current path + badge counts) is on
+       * all of them. `path` is the tab-matching path — pass the request's `url` (query string and
+       * `/:id` suffixes are handled by `layout`'s prefix match).
+       */
+      async function page(title: string, body: RawHtml, path: string): Promise<string> {
+        return layout(title, body, { path, counts: await loadNavCounts(deps.db) })
       }
 
       // Queue + detail pages (Task 5). Both run the lazy-expiry sweep above for exactly what
@@ -726,13 +736,14 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             .orderBy(desc(proposals.createdAt))
             .limit(100)
 
-          const body = layout(
+          const body = await page(
             'Proposals',
             html`<table>
               <tbody>
                 ${rows.map(renderProposalRow)}
               </tbody>
             </table>`,
+            request.url,
           )
           return reply.code(200).type('text/html; charset=utf-8').send(body)
         })
@@ -837,11 +848,11 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
 
           const row = await lookupProposal(id)
           if (!row) {
-            return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Not found.</p>`))
+            return reply.code(200).type('text/html; charset=utf-8').send(await page('Proposal', html`<p>Not found.</p>`, request.url))
           }
 
           const extras = await loadProposalDetailExtras(row)
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', renderProposalDetail(row, extras)))
+          return reply.code(200).type('text/html; charset=utf-8').send(await page('Proposal', renderProposalDetail(row, extras), request.url))
         })
       })
 
@@ -876,14 +887,14 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
               return reply
                 .code(200)
                 .type('text/html; charset=utf-8')
-                .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
+                .send(await page('Proposal', html`<p>Already handled or expired.</p>`, request.url))
             }
 
             if (!row || row.status !== 'pending') {
               return reply
                 .code(200)
                 .type('text/html; charset=utf-8')
-                .send(layout('Proposal', html`<p>Already handled or expired.</p>`))
+                .send(await page('Proposal', html`<p>Already handled or expired.</p>`, request.url))
             }
 
             // Edit-then-approve: an optional form field carries a replacement for the proposal's
@@ -907,12 +918,13 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                     .code(400)
                     .type('text/html; charset=utf-8')
                     .send(
-                      layout(
+                      await page(
                         'Proposal',
                         html`<p>Invalid payload:</p>
                           <ul>
                             ${issues.map((issue) => html`<li>${issue}</li>`)}
                           </ul>`,
+                        request.url,
                       ),
                     )
                 }
@@ -929,7 +941,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                   return reply
                     .code(400)
                     .type('text/html; charset=utf-8')
-                    .send(layout('Proposal', html`<p>Invalid JSON: ${message}</p>`))
+                    .send(await page('Proposal', html`<p>Invalid JSON: ${message}</p>`, request.url))
                 }
 
                 const schema = PAYLOAD_SCHEMAS[row.type]
@@ -940,12 +952,13 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                     .code(400)
                     .type('text/html; charset=utf-8')
                     .send(
-                      layout(
+                      await page(
                         'Proposal',
                         html`<p>Invalid payload:</p>
                           <ul>
                             ${issues.map((issue) => html`<li>${issue}</li>`)}
                           </ul>`,
+                        request.url,
                       ),
                     )
                 }
@@ -974,7 +987,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                 return reply
                   .code(400)
                   .type('text/html; charset=utf-8')
-                  .send(layout('Proposal', html`<p>Validation failed: ${validation.code} — ${validation.detail}</p>`))
+                  .send(await page('Proposal', html`<p>Validation failed: ${validation.code} — ${validation.detail}</p>`, request.url))
               }
               payloadToStore = validation.payload
             }
@@ -1002,9 +1015,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                   .code(400)
                   .type('text/html; charset=utf-8')
                   .send(
-                    layout(
+                    await page(
                       'Proposal',
                       html`<p>Reason too long (max 2000 characters) — nothing was changed. Go back and shorten it.</p>`,
+                      request.url,
                     ),
                   )
               }
@@ -1078,7 +1092,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
               }
             } catch (err) {
               if (err instanceof StaleProposalStatusError) {
-                return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Already handled.</p>`))
+                return reply.code(200).type('text/html; charset=utf-8').send(await page('Proposal', html`<p>Already handled.</p>`, request.url))
               }
               throw err
             }
@@ -1097,9 +1111,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                   .code(200)
                   .type('text/html; charset=utf-8')
                   .send(
-                    layout(
+                    await page(
                       'Proposal',
                       html`<p>Approved, but queueing the apply FAILED — use the Re-send button on this proposal.</p>`,
+                      request.url,
                     ),
                   )
               }
@@ -1124,7 +1139,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         return safeHandle(id, reply, async () => {
           const row = await lookupProposal(id)
           if (!row || row.status !== 'approved') {
-            return reply.code(200).type('text/html; charset=utf-8').send(layout('Proposal', html`<p>Already handled.</p>`))
+            return reply.code(200).type('text/html; charset=utf-8').send(await page('Proposal', html`<p>Already handled.</p>`, request.url))
           }
 
           await enqueueProposalApply(deps.enqueue, id)
@@ -1146,7 +1161,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       // createdAt desc. `pinnedRows` is passed to `renderNeedsAttentionSection` as an explicit
       // list rather than that function reading the DB itself — see that function's doc comment
       // for why (Phase 7's canary-hold seam).
-      authed.get('/admin/orders', async (_request, reply) => {
+      authed.get('/admin/orders', async (request, reply) => {
         return safeHandle('orders-list', reply, async () => {
           const columns = {
             id: supplierOrders.id,
@@ -1175,9 +1190,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             .orderBy(desc(supplierOrders.createdAt))
             .limit(100)
 
-          const body = layout(
+          const body = await page(
             'Orders',
             html`${renderNeedsAttentionSection(pinnedRows)}${renderOtherOrdersSection(otherRows)}`,
+            request.url,
           )
           return reply.code(200).type('text/html; charset=utf-8').send(body)
         })
@@ -1218,14 +1234,15 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         }
       }
 
-      function reSendFailedPage(reply: FastifyReply, target: string): FastifyReply {
+      async function reSendFailedPage(reply: FastifyReply, target: string, path: string): Promise<FastifyReply> {
         return reply
           .code(200)
           .type('text/html; charset=utf-8')
           .send(
-            layout(
+            await page(
               'Orders',
               html`<p>Recovered to ${target}, but the re-send FAILED — submit this form again to retry the re-send.</p>`,
+              path,
             ),
           )
       }
@@ -1241,7 +1258,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         return safeHandle(id, reply, async () => {
           const { target } = (request.body ?? {}) as { target?: string }
           if (!target || !(RECOVERY_TARGETS as readonly string[]).includes(target)) {
-            return reply.code(400).type('text/html; charset=utf-8').send(layout('Orders', html`<p>Invalid target.</p>`))
+            return reply.code(400).type('text/html; charset=utf-8').send(await page('Orders', html`<p>Invalid target.</p>`, request.url))
           }
           const recoveryTarget = target as (typeof RECOVERY_TARGETS)[number]
 
@@ -1263,7 +1280,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           if (current && current.status === recoveryTarget && (recoveryTarget === 'pending' || recoveryTarget === 'confirmed')) {
             const sent = await reSendPlaceOrder(id, recoveryTarget)
             if (!sent) {
-              return reSendFailedPage(reply, recoveryTarget)
+              return await reSendFailedPage(reply, recoveryTarget, request.url)
             }
 
             await deps.db.insert(auditLog).values({
@@ -1281,7 +1298,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             await applyTransition(deps.db, id, 'needs_attention', recoveryTarget)
           } catch (err) {
             if (err instanceof IllegalTransitionError || err instanceof StaleStatusError) {
-              return reply.code(200).type('text/html; charset=utf-8').send(layout('Orders', html`<p>${NOT_RECOVERABLE_COPY}</p>`))
+              return reply.code(200).type('text/html; charset=utf-8').send(await page('Orders', html`<p>${NOT_RECOVERABLE_COPY}</p>`, request.url))
             }
             throw err
           }
@@ -1297,7 +1314,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           if (recoveryTarget !== 'cancelled') {
             const sent = await reSendPlaceOrder(id, recoveryTarget)
             if (!sent) {
-              return reSendFailedPage(reply, recoveryTarget)
+              return await reSendFailedPage(reply, recoveryTarget, request.url)
             }
           }
 
@@ -1308,7 +1325,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       // Settings editor (SETTINGS_DEFAULTS catalog, typed per key) + the manual-signal paste box
       // (parent §admin) share this page: both write through owner-attributed audit rows, and the
       // paste box's own POST target renders back here.
-      authed.get('/admin/settings', async (_request, reply) => {
+      authed.get('/admin/settings', async (request, reply) => {
         return safeHandle('settings', reply, async () => {
           // String-valued settings (e.g. support.agent_guidance) are excluded from this generic
           // catalog: they're free text, not one of this page's boolean/mode/number controls, and
@@ -1331,9 +1348,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             content: snapshotContent(r.snapshot),
           }))
 
-          const body = layout(
+          const body = await page(
             'Settings',
             html`${renderSettingsSection(rows)}${renderSignalPasteBox()}${renderRecentSignals(recent)}`,
+            request.url,
           )
           return reply.code(200).type('text/html; charset=utf-8').send(body)
         })
@@ -1341,10 +1359,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
 
       authed.post('/admin/settings', async (request, reply) => {
         return safeHandle('settings', reply, async () => {
-          const body = (request.body ?? {}) as { key?: string; value?: string }
+          const body = (request.body ?? {}) as { key?: string; value?: string; returnTo?: string }
           const rawKey = body.key
           if (!rawKey || !Object.prototype.hasOwnProperty.call(SETTINGS_DEFAULTS, rawKey)) {
-            return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Unknown setting.</p>`))
+            return reply.code(400).type('text/html; charset=utf-8').send(await page('Settings', html`<p>Unknown setting.</p>`, request.url))
           }
           const key = rawKey as SettingKey
           const kind = settingKind(key)
@@ -1352,7 +1370,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             // String-valued settings (e.g. support.agent_guidance) are edited only via their own
             // dedicated page (/admin/guidance), never through this generic numeric/boolean/mode
             // path — treat the key as unknown here rather than silently accepting and coercing it.
-            return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Unknown setting.</p>`))
+            return reply.code(400).type('text/html; charset=utf-8').send(await page('Settings', html`<p>Unknown setting.</p>`, request.url))
           }
 
           let coerced: boolean | WorkflowMode | number
@@ -1362,7 +1380,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             coerced = body.value === 'on'
           } else if (kind === 'mode') {
             if (body.value !== 'manual' && body.value !== 'auto') {
-              return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Invalid mode.</p>`))
+              return reply.code(400).type('text/html; charset=utf-8').send(await page('Settings', html`<p>Invalid mode.</p>`, request.url))
             }
             coerced = body.value
           } else {
@@ -1370,11 +1388,11 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             // otherwise sail through the isSafeInteger/>=0 checks below and silently zero out a
             // real setting (e.g. the spend cap) from a blank/whitespace form submission.
             if (typeof body.value !== 'string' || body.value.trim() === '') {
-              return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Invalid number.</p>`))
+              return reply.code(400).type('text/html; charset=utf-8').send(await page('Settings', html`<p>Invalid number.</p>`, request.url))
             }
             const n = Number(body.value)
             if (!Number.isSafeInteger(n) || n < 0) {
-              return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Invalid number.</p>`))
+              return reply.code(400).type('text/html; charset=utf-8').send(await page('Settings', html`<p>Invalid number.</p>`, request.url))
             }
             coerced = n
           }
@@ -1390,7 +1408,11 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
             detail: { key, from, to: coerced },
           })
 
-          return reply.code(303).header('location', '/admin/settings').send()
+          // Allow-listed: `/admin` is honoured (a per-row form on the dashboard's health strip,
+          // say), anything else — absent, or an attacker-supplied external URL — falls back to
+          // this page rather than becoming an open redirect.
+          const returnTo = body.returnTo === '/admin' ? '/admin' : '/admin/settings'
+          return reply.code(303).header('location', returnTo).send()
         })
       })
 
@@ -1401,11 +1423,11 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       // note rather than an unbounded blob a run could balloon on.
       const GUIDANCE_MAX_CHARS = 8000
 
-      authed.get('/admin/guidance', async (_request, reply) => {
+      authed.get('/admin/guidance', async (request, reply) => {
         return safeHandle('guidance', reply, async () => {
           const current = await deps.settings.get('support.agent_guidance')
           return reply.code(200).type('text/html; charset=utf-8').send(
-            layout(
+            await page(
               'Agent guidance',
               html`<h1>Support agent operating guidance</h1>
                 <p>
@@ -1416,6 +1438,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                   <textarea name="guidance" rows="18" cols="90">${current}</textarea>
                   <div><button type="submit">Save</button></div>
                 </form>`,
+              request.url,
             ),
           )
         })
@@ -1430,9 +1453,10 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
               .code(400)
               .type('text/html; charset=utf-8')
               .send(
-                layout(
+                await page(
                   'Agent guidance',
                   html`<p>Too long (${String(value.length)} chars; max ${GUIDANCE_MAX_CHARS}). Not saved.</p>`,
+                  request.url,
                 ),
               )
           }
@@ -1457,7 +1481,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           const body = (request.body ?? {}) as { content?: string; keyword?: string }
           const content = body.content ?? ''
           if (content.trim().length === 0) {
-            return reply.code(400).type('text/html; charset=utf-8').send(layout('Settings', html`<p>Paste some content first.</p>`))
+            return reply.code(400).type('text/html; charset=utf-8').send(await page('Settings', html`<p>Paste some content first.</p>`, request.url))
           }
 
           const [inserted] = await deps.db

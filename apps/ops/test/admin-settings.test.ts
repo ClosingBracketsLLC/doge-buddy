@@ -420,4 +420,34 @@ describe('settings editor + manual-signal paste box', () => {
 
     await app.close()
   })
+
+  it('POST /admin/settings honours returnTo=/admin and falls back to /admin/settings for anything else', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const home = await app.inject({ method: 'POST', url: '/admin/settings', headers: { ...FORM_HEADERS, cookie }, payload: 'key=killswitch.global&value=on&returnTo=%2Fadmin' })
+    expect(home.statusCode).toBe(303)
+    expect(home.headers.location).toBe('/admin')
+    const evil = await app.inject({ method: 'POST', url: '/admin/settings', headers: { ...FORM_HEADERS, cookie }, payload: 'key=killswitch.global&returnTo=https%3A%2F%2Fevil.example' })
+    expect(evil.statusCode).toBe(303)
+    expect(evil.headers.location).toBe('/admin/settings')
+
+    await app.close()
+  })
+
+  it('every authed page carries the tab shell with badge counts; login pages do not', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: '/admin/settings', headers: { cookie } })
+    expect(res.body).toContain('class="tabs"')
+    expect(res.body).toMatch(/<a class="tab" href="\/admin\/settings" aria-current="page">/)
+    const loginPage = await app.inject({ method: 'GET', url: '/admin/login' })
+    expect(loginPage.body).not.toContain('class="tabs"')
+    expect(loginPage.body).toContain('<style>')
+
+    await app.close()
+  })
 })
