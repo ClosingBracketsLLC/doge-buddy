@@ -93,8 +93,7 @@ Also fixes `runSeed` so its collection step publishes the same way (today it pub
   `productSet` call (all three are `ProductSetInput` fields; verify by live introspection on the
   first credential-gated run, the house rule).
 - **Inventory**: `inventoryItem: { tracked: true }` and `inventoryQuantities: [{ locationId,
-  name: 'available', quantity: <CJ US stock> }]` per variant, where the quantity is
-  `adapter.getVariantStock(supplierVariantId)` summed over `countryCode === 'US'` entries (0 if the
+  name: 'available', quantity: <CJ US stock> }]` per variant, where the quantity is the LARGEST single US-warehouse entry of `adapter.getVariantStock(supplierVariantId)` (not the sum — `fulfillment/plan.ts` needs one warehouse to cover an order) (0 if the
   call fails — a listing never blocks on a stock read; the sync fixes it within 6 h and the
   post-listing sync below fixes it within a minute). `locationId` comes from a new
   `primaryLocationId(client)` op (`locations(first:1, query:"active:true")`), memoized per process.
@@ -117,7 +116,7 @@ Run once against the real store; the same script is the repair tool if a future 
 on-demand via `enqueue('inventory.sync', { productId? })` (queue policy `stately`, singletonKey =
 productId or `'all'`). One cycle: select every `product_variants` row joined to an ACTIVE product with
 a `supplier_variant_mappings` row and a non-null `shopify_inventory_item_gid`; for each (bounded: 200
-variants/cycle, alert if more) call `adapter.getVariantStock`, sum US quantity, clamp ≥ 0; if it
+variants/cycle, alert if more) call `adapter.getVariantStock`, take the largest single US-warehouse quantity, clamp ≥ 0; if it
 differs from `last_known_stock`, `inventorySetQuantities({ name:'available', reason:'correction', quantities:[{ inventoryItemId, locationId, quantity }] }, idempotencyKey)` (2026-07 has no `ignoreCompareQuantity`; the optional per-entry `changeFromQuantity` CAS is omitted on purpose)
 (key = `inv-<variantId>-<yyyymmddhh>`), then update `last_known_stock`/`stock_checked_at`. Per-variant
 errors are logged + counted, never abort the cycle; ≥ 25% failures in a cycle → one warning alert
