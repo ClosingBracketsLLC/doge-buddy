@@ -90,6 +90,9 @@ export interface InventorySyncDeps {
    * unset, each cycle constructs its own fresh allowance below.
    */
   points?: PointsBudget
+  /** Variants read per cycle. Defaults to `INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE`; injectable so a
+   * test can prove the rotation the ordering below promises without seeding 201 rows. */
+  maxVariantsPerCycle?: number
 }
 
 /** One cycle's scope: a single local product (the post-listing job) or the whole active catalog
@@ -128,11 +131,23 @@ export function usQuantity(stock: WarehouseStock[]): number {
   return us.length === 0 ? 0 : Math.max(0, ...us)
 }
 
-/** `yyyymmddHH` in UTC — the hour bucket of an idempotency key. Sliced off the ISO string rather
- * than built from `getUTCMonth()`-style parts so there's no off-by-one/zero-padding to get wrong. */
-function hourStamp(now: Date): string {
-  const iso = now.toISOString()
-  return `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}${iso.slice(11, 13)}`
+/**
+ * The idempotency key for one push: `inv-<variantRowId>-<quantity>-<unix seconds>`.
+ *
+ * The QUANTITY is in the key on purpose, and it is the whole point (spec §4, amended 2026-08-31).
+ * An hour-bucketed key (`inv-<variantId>-<yyyymmddHH>`, the first cut) is actively dangerous:
+ * cycle A pushes 4 at :05 and cycle B pushes 2 at :40 under the SAME key, so Shopify replays A's
+ * result — the store stays at 4 — while this job writes `last_known_stock = 2` and every later
+ * cycle then sees "unchanged" and never corrects it. That failure is in the oversell direction and
+ * is self-perpetuating. Keying on the quantity (plus the second) means a real change can never
+ * replay; only an identical push repeated inside the same second dedupes, which is exactly the
+ * retry case a key is for.
+ *
+ * Length: `inv-` (4) + uuid (36) + separators (2) + quantity + 10-digit epoch — ~58 worst case,
+ * inside Shopify's 64-char `[A-Za-z0-9_-]` limit.
+ */
+function idempotencyKey(variantId: string, quantity: number, at: Date): string {
+  return `inv-${variantId}-${quantity}-${Math.floor(at.getTime() / 1000)}`
 }
 
 /**
@@ -162,7 +177,9 @@ async function auditVariantFailure(db: Db, variantId: string, err: unknown): Pro
  * counted `skipped`, not silently dropped: "how many variants can this job NOT keep honest" is the
  * number that tells an operator to run the backfill. The eligible set is inherently small (one row
  * per listed, inventory-tracked variant), so it's read whole and sliced in memory — the
- * `INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE` bound exists to cap CJ calls per cycle, not memory.
+ * `INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE` bound exists to cap CJ calls per cycle, not memory. It is
+ * ordered LEAST-RECENTLY-CHECKED FIRST so that bound rotates: a variant deferred by the cap has the
+ * oldest `stock_checked_at` next cycle and is served first, so no tail can starve.
  *
  * **Per variant.** Read CJ stock, take `usQuantity`, and compare with `last_known_stock`:
  * unchanged means NO Shopify call at all (the common case by far — most variants don't move in six
@@ -183,7 +200,11 @@ export async function executeInventorySync(
   scope: InventorySyncScope,
 ): Promise<InventorySyncResult> {
   const { db } = deps
-  const now = deps.now?.() ?? new Date()
+  // Read fresh at every use, never once per cycle: a cycle that walks 200 variants can run for
+  // minutes, and a `stock_checked_at` stamped with the cycle's START would claim every variant was
+  // checked at a moment most of them weren't.
+  const clock = (): Date => deps.now?.() ?? new Date()
+  const cap = deps.maxVariantsPerCycle ?? INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE
   const points = deps.points ?? new PointsAllowance(INVENTORY_SYNC_POINTS_ALLOWANCE)
   const scopeFilter: SQL | undefined = scope.productId ? eq(productVariants.productId, scope.productId) : undefined
 
@@ -199,9 +220,13 @@ export async function executeInventorySync(
     .innerJoin(products, eq(products.id, productVariants.productId))
     .innerJoin(supplierVariantMappings, eq(supplierVariantMappings.variantId, productVariants.id))
     .where(and(eq(products.status, 'active'), isNotNull(productVariants.shopifyInventoryItemGid), scopeFilter))
-    // Oldest variant first so the per-cycle cap is spent in a stable order across cycles rather
-    // than on whatever the planner happens to return first.
-    .orderBy(asc(productVariants.createdAt), asc(productVariants.id))
+    // LEAST-RECENTLY-CHECKED FIRST (never-checked first of all), with the variant's own
+    // created_at/id as a stable tiebreak. Ordering by created_at alone — the first cut — is stable
+    // but does NOT rotate: with more eligible variants than the cap, the same first N are picked
+    // every cycle and the tail is never synced at all while the cap alert fires forever. Sorting on
+    // the column this job itself advances on every pass makes the cap a round-robin: whatever got
+    // skipped this cycle has the oldest `stock_checked_at` next cycle and goes first.
+    .orderBy(sql`${supplierVariantMappings.stockCheckedAt} asc nulls first`, asc(productVariants.createdAt), asc(productVariants.id))
 
   // A variant could in principle carry mappings for two suppliers (the unique index is on
   // (variant, supplier)), which would yield two rows here for one inventory item — and both would
@@ -265,17 +290,12 @@ export async function executeInventorySync(
     return finish()
   }
 
-  const batch = eligible.slice(0, INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE)
+  const batch = eligible.slice(0, cap)
   if (eligible.length > batch.length) {
+    // Deferred, not dropped: the ordering above guarantees these go first next cycle.
     const deferred = eligible.length - batch.length
     skipped += deferred
-    await deps
-      .alert('warning', 'inventory_sync_cap_exceeded', {
-        cap: INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE,
-        eligible: eligible.length,
-        deferred,
-      })
-      .catch(() => {})
+    await deps.alert('warning', 'inventory_sync_cap_exceeded', { cap, eligible: eligible.length, deferred }).catch(() => {})
   }
 
   /**
@@ -288,7 +308,6 @@ export async function executeInventorySync(
   let locationId: string | null = null
   const getLocationId = async (): Promise<string> => (locationId ??= await shopify.primaryLocationId())
 
-  const stamp = hourStamp(now)
   for (const [index, row] of batch.entries()) {
     // Points first, and BEFORE the read it pays for — a spend that would cross the cap is rejected
     // without consuming any of the allowance, so the cycle stops on the boundary rather than
@@ -316,7 +335,7 @@ export async function executeInventorySync(
         // an operator tells "CJ says 4" from "nobody has looked since Tuesday".
         await db
           .update(supplierVariantMappings)
-          .set({ stockCheckedAt: now })
+          .set({ stockCheckedAt: clock() })
           .where(eq(supplierVariantMappings.id, row.mappingId))
         unchanged += 1
         continue
@@ -331,11 +350,11 @@ export async function executeInventorySync(
           // want: CJ is the source of truth here, not whatever Shopify last held.
           quantities: [{ inventoryItemId: row.inventoryItemGid, locationId: await getLocationId(), quantity }],
         },
-        `inv-${row.variantId}-${stamp}`,
+        idempotencyKey(row.variantId, quantity, clock()),
       )
       await db
         .update(supplierVariantMappings)
-        .set({ lastKnownStock: quantity, stockCheckedAt: now })
+        .set({ lastKnownStock: quantity, stockCheckedAt: clock() })
         .where(eq(supplierVariantMappings.id, row.mappingId))
       updated += 1
     } catch (err) {

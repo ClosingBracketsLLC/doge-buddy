@@ -27,10 +27,10 @@ function uid(): string {
 /** The single active location every `primaryLocationId()` in this file resolves to. */
 const LOCATION_ID = 'gid://shopify/Location/inv-sync-test'
 
-/** Frozen clock: fixes both the `stock_checked_at` writes and the `yyyymmddHH` half of every
+/** Frozen clock: fixes both the `stock_checked_at` writes and the unix-seconds tail of every
  * idempotency key this file asserts on. */
 const NOW = new Date('2026-09-01T14:22:33.000Z')
-const NOW_STAMP = '2026090114'
+const NOW_EPOCH_SECONDS = Math.floor(NOW.getTime() / 1000)
 
 /** Two US warehouses plus a CN one — the largest SINGLE US entry (4) is the sellable quantity,
  * never the sum (7) and never CN's 99. Same fixture shape as the listing worker's tests. */
@@ -67,8 +67,15 @@ function fakeShopify(overrides: Partial<InventorySyncShopifyOps> = {}): Inventor
   return self
 }
 
-/** `getVariantStock` over a per-supplier-variant-id script: a number answers with that US
- * quantity, an Error rejects with it. Records every id it was asked for, in call order. */
+/**
+ * `getVariantStock` over a per-supplier-variant-id script: a number answers with that US quantity,
+ * an Error rejects with it. Records every id it was asked for, in call order.
+ *
+ * An UNSCRIPTED id throws rather than answering a default. The whole-catalog test below runs an
+ * unscoped cycle against the shared dev database, and any eligible variant this file didn't seed
+ * (the backfill will create some) must not have its real `last_known_stock` overwritten by a
+ * fixture number — a throw is counted `failed` and touches nothing.
+ */
 function fakeAdapter(script: Record<string, number | Error>) {
   const reads: string[] = []
   return {
@@ -76,8 +83,9 @@ function fakeAdapter(script: Record<string, number | Error>) {
     getVariantStock: async (supplierVariantId: string): Promise<WarehouseStock[]> => {
       reads.push(supplierVariantId)
       const answer = script[supplierVariantId]
+      if (answer === undefined) throw new Error(`fakeAdapter: unscripted supplier variant ${supplierVariantId}`)
       if (answer instanceof Error) throw answer
-      return stock(answer ?? 0)
+      return stock(answer)
     },
   }
 }
@@ -103,6 +111,10 @@ describe('executeInventorySync', () => {
     // entity a whole-catalog cycle belongs to) — those rows carry no created-id to delete by, so
     // they're cleaned by their action + sentinel instead.
     await db.delete(auditLog).where(and(eq(auditLog.action, 'inventory.synced'), eq(auditLog.entityId, 'all')))
+    // The unscoped cycle in (a) reads every eligible variant in the shared database, not just the
+    // seeded ones; any it can't answer for is counted failed and audited under an id this file
+    // never tracked. Clear the action wholesale rather than leaking those rows.
+    await db.delete(auditLog).where(eq(auditLog.action, 'inventory_sync.variant_failed'))
     createdVariantIds = []
     createdProductIds = []
     vi.restoreAllMocks()
@@ -182,14 +194,14 @@ describe('executeInventorySync', () => {
     const shopify = fakeShopify()
     const { deps } = makeDeps(adapter, shopify)
 
-    // Whole-catalog cycle: the only eligible variant anywhere is `live`, so updated/unchanged/
-    // failed are exact here regardless of what else the shared test DB holds.
+    // Whole-catalog cycle. Exactness is scoped to the rows this file seeded (by prefix): the
+    // shared database may hold other eligible variants — the backfill will create some — and this
+    // test must keep meaning what it says when it does.
     const result = await executeInventorySync(deps, {})
-    expect({ updated: result.updated, unchanged: result.unchanged, failed: result.failed }).toEqual({
-      updated: 1, unchanged: 0, failed: 0,
-    })
-    expect(adapter.reads).toEqual([live.supplierVariantId])
-    expect(shopify.calls).toHaveLength(1)
+    expect(result.updated).toBeGreaterThanOrEqual(1)
+    expect(adapter.reads.filter((id) => id.includes(PREFIX))).toEqual([live.supplierVariantId])
+    expect(shopify.calls.filter((c) => JSON.stringify(c.input).includes(PREFIX))).toHaveLength(1)
+    expect((await mappingRow(live.variantId))!.lastKnownStock).toBe(4)
 
     // Scoped runs pin the exact `skipped` count per product without depending on the rest of the DB.
     expect(await executeInventorySync(deps, { productId: draftId })).toEqual({ updated: 0, unchanged: 0, failed: 0, skipped: 1 })
@@ -197,8 +209,8 @@ describe('executeInventorySync', () => {
     expect(await executeInventorySync(deps, { productId: noMappingProductId })).toEqual({ updated: 0, unchanged: 0, failed: 0, skipped: 1 })
     // The active product still has its one gid-less variant skipped alongside the synced one.
     const activeAgain = await executeInventorySync(deps, { productId: activeId })
-    expect(activeAgain.skipped).toBe(1)
-    expect(adapter.reads).toEqual([live.supplierVariantId, live.supplierVariantId])
+    expect(activeAgain).toEqual({ updated: 0, unchanged: 1, failed: 0, skipped: 1 })
+    expect(adapter.reads.filter((id) => id.includes(PREFIX))).toEqual([live.supplierVariantId, live.supplierVariantId])
   })
 
   // (b) -------------------------------------------------------------------------------------
@@ -239,12 +251,25 @@ describe('executeInventorySync', () => {
     // omitted on purpose — this is an unconditional set.
     const quantity = (shopify.calls[0]!.input as { quantities: Record<string, unknown>[] }).quantities[0]!
     expect(Object.keys(quantity).sort()).toEqual(['inventoryItemId', 'locationId', 'quantity'])
-    expect(shopify.calls[0]!.key).toBe(`inv-${v.variantId}-${NOW_STAMP}`)
+    // `inv-<variantRowId>-<quantity>-<unix seconds>`: the quantity is in the key so a real change
+    // can never replay a previous push's result (an hour-bucketed key would let a :40 push of 2
+    // replay a :05 push of 4 — the store stays wrong, in the oversell direction, forever).
+    expect(shopify.calls[0]!.key).toBe(`inv-${v.variantId}-4-${NOW_EPOCH_SECONDS}`)
+    expect(shopify.calls[0]!.key).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
     expect(shopify.locationCalls).toBe(1)
 
     const row = await mappingRow(v.variantId)
     expect(row!.lastKnownStock).toBe(4)
     expect(row!.stockCheckedAt?.toISOString()).toBe(NOW.toISOString())
+
+    // Same variant, same frozen second, different quantity ⇒ different key. (This is the property
+    // the hour-bucketed key lacked: there, this second push would have replayed the first's result
+    // while we recorded the new number locally.)
+    const shopifyAgain = fakeShopify()
+    const { deps: depsAgain } = makeDeps(fakeAdapter({ [v.supplierVariantId]: 7 }), shopifyAgain)
+    await executeInventorySync(depsAgain, { productId })
+    expect(shopifyAgain.calls[0]!.key).toBe(`inv-${v.variantId}-7-${NOW_EPOCH_SECONDS}`)
+    expect(shopifyAgain.calls[0]!.key).not.toBe(shopify.calls[0]!.key)
   })
 
   // (d) -------------------------------------------------------------------------------------
@@ -374,6 +399,33 @@ describe('executeInventorySync', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]!.detail).toMatchObject({ updated: 1, unchanged: 1, failed: 1, skipped: 1, productId })
     expect(rows[0]!.actor).toBe('system')
+  })
+
+  // (k) -------------------------------------------------------------------------------------
+  it('k. the per-cycle cap rotates — least-recently-checked variants go first', async () => {
+    const productId = await seedProduct('active')
+    const never = await seedVariant(productId, { lastKnownStock: 1, stockCheckedAt: null })
+    const old = await seedVariant(productId, { lastKnownStock: 1, stockCheckedAt: new Date('2026-08-01T00:00:00.000Z') })
+    const recent = await seedVariant(productId, { lastKnownStock: 1, stockCheckedAt: new Date('2026-08-15T00:00:00.000Z') })
+    const script = { [never.supplierVariantId]: 4, [old.supplierVariantId]: 4, [recent.supplierVariantId]: 4 }
+
+    const adapterOne = fakeAdapter(script)
+    const one = makeDeps(adapterOne, fakeShopify(), { maxVariantsPerCycle: 2 })
+    const firstCycle = await executeInventorySync(one.deps, { productId })
+    expect(firstCycle).toEqual({ updated: 2, unchanged: 0, failed: 0, skipped: 1 })
+    // Never-checked first, then the oldest check; the newest-checked variant is deferred.
+    expect(adapterOne.reads).toEqual([never.supplierVariantId, old.supplierVariantId])
+    expect(one.alert.mock.calls.filter((c) => c[1] === 'inventory_sync_cap_exceeded')).toHaveLength(1)
+
+    // Next cycle the deferred variant is the least-recently-checked, so it is served FIRST — the
+    // cap rotates instead of starving the tail forever.
+    const adapterTwo = fakeAdapter(script)
+    const two = makeDeps(adapterTwo, fakeShopify(), { maxVariantsPerCycle: 2 })
+    const secondCycle = await executeInventorySync(two.deps, { productId })
+    expect(adapterTwo.reads[0]).toBe(recent.supplierVariantId)
+    expect(adapterTwo.reads).toHaveLength(2)
+    expect(secondCycle).toEqual({ updated: 1, unchanged: 1, failed: 0, skipped: 1 })
+    expect((await mappingRow(recent.variantId))!.lastKnownStock).toBe(4)
   })
 
   // (j) -------------------------------------------------------------------------------------
