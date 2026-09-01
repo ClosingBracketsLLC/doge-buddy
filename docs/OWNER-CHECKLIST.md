@@ -453,9 +453,11 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 is its live tier — canary is still next after that). When you complete an item, check it off and
 tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** **Catalog P0 is BUILT 2026-08-31 (branch `catalog-p0`,
-`docs/superpowers/specs/2026-08-31-catalog-p0-design.md`) — the live tier is the top of the
-remaining work: admin control center: Claude merges the branch, then push `main`; then runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
+**Next build session starts here →** **Sourcing upgrade 1 (market-price tool + 1.3× gate) spec
+written 2026-09-01 — `docs/superpowers/specs/2026-09-01-sourcing-market-price-design.md`; Robert
+reviews, then Claude writes the plan and builds on a branch. Owner items it needs before its live
+tier: `SERPAPI_KEY` present on the Railway ops service, and the SerpApi plan's monthly search quota
+(design assumed 250; if 100, lower the per-run cap to 15).** Still queued behind it: runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
 one manual `run-sourcing --max-winners 2` → force an `inventory.sync` check → flip
 `workflow.sourcing.mode` to `auto` for the build-week runs → back to `manual` after). Once the
 build-week runs land ~40+ products, next is `docs/LAUNCH-BACKLOG.md` **P1** (product page image

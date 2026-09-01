@@ -68,7 +68,11 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
 
 ## P1
 
-- [ ] **Sourcing agent upgrades (brainstorm AFTER the admin control center — owner ruling 2026-08-31).**
+- [ ] **Sourcing agent upgrades (brainstormed 2026-09-01; all three approved on the recommended
+  options — Google Shopping via SerpApi for (1), Google Trends rising related queries for (2),
+  advisory performance brief + harvest keyword ordering for (3)).** Spec (1) written:
+  `docs/superpowers/specs/2026-09-01-sourcing-market-price-design.md` — plan next. (2) and (3) get
+  their own specs after (1) ships.
   Three specs, in this order: (1) competitor-price tool for the agent (Amazon / Google Shopping
   lookup on the top candidates, rule "price ≤ 1.3× market" enforced in Stage 6, not just advised);
   (2) a demand-signal harvest source beyond CJ keyword search (Amazon movers-and-shakers / Google
