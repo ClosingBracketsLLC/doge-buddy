@@ -40,6 +40,11 @@ export const SETTINGS_DEFAULTS = {
   'sourcing.candidate_target': 15,
   'sourcing.max_pages': 10,
   'sourcing.max_budget_cents': 200,
+  // Price-to-market ceiling for sourcing winners (spec 2026-09-01 market-price Decision 6):
+  // median variant price must be <= this many bps of the Google Shopping market median. 13000 =
+  // 1.3x. Enforced in Stage 6 only when SERPAPI_KEY is configured; the default is pinned to
+  // DEFAULT_MAX_PRICE_TO_MARKET_BPS by sourcing-knobs.test.ts.
+  'sourcing.max_price_to_market_bps': 13000,
   // Pre-triage spam short-circuit (pre-publish anti-spam hardening). A ticket whose latest inbound
   // sat in Gmail's SPAM folder, from a sender with no order on file and no tripwire hit, is always
   // triaged AFTER real mail; with this false (default) it still gets a Haiku verdict while the

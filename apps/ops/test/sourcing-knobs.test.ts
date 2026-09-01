@@ -3,6 +3,7 @@ import { SOURCING_MAX_BUDGET_USD } from '../src/agents/sourcing-run.ts'
 import { DEFAULT_MAX_WINNERS } from '../src/agents/output-schema.ts'
 import { SETTINGS_DEFAULTS, type SettingKey, type Settings } from '../src/settings.ts'
 import { CANDIDATE_TARGET, HARVEST_KEYWORDS, HARVEST_MAX_PAGES_TOTAL } from '../src/sourcing/harvest.ts'
+import { DEFAULT_MAX_PRICE_TO_MARKET_BPS } from '../src/sourcing/market-price.ts'
 import { MAX_OVERRIDE_KEYWORDS, parseRunSourcingArgs, resolveSourcingKnobs } from '../src/sourcing/knobs.ts'
 
 /** DB-free `Settings` double: `knobs.ts` is pure logic over `Settings.get`, so the precedence
@@ -122,6 +123,24 @@ describe('resolveSourcingKnobs', () => {
     )
     await expect(resolveSourcingKnobs(fakeSettings({ 'sourcing.max_budget_cents': 5000 }))).rejects.toThrow(
       /sourcing\.max_budget_cents/,
+    )
+  })
+
+  it('max_price_to_market default is pinned to the code constant (13000 bps)', async () => {
+    expect(SETTINGS_DEFAULTS['sourcing.max_price_to_market_bps']).toBe(DEFAULT_MAX_PRICE_TO_MARKET_BPS)
+    const knobs = await resolveSourcingKnobs(fakeSettings())
+    expect(knobs.maxPriceToMarketBps).toBe(13000)
+  })
+
+  it('max_price_to_market setting beats the constant and is range-checked (10000-20000, integer)', async () => {
+    const knobs = await resolveSourcingKnobs(fakeSettings({ 'sourcing.max_price_to_market_bps': 15000 }))
+    expect(knobs.maxPriceToMarketBps).toBe(15000)
+
+    await expect(resolveSourcingKnobs(fakeSettings({ 'sourcing.max_price_to_market_bps': 9999 }))).rejects.toThrow(
+      /maxPriceToMarketBps \(setting sourcing\.max_price_to_market_bps\) must be between 10000 and 20000/,
+    )
+    await expect(resolveSourcingKnobs(fakeSettings({ 'sourcing.max_price_to_market_bps': 20001 }))).rejects.toThrow(
+      /must be between 10000 and 20000/,
     )
   })
 })
