@@ -358,7 +358,7 @@ await registerCron(queue.boss, 'cj.dispute-poll', '0 */6 * * *', cjDisputePollHa
 //
 // `inventorySyncDeps` deliberately omits `points`: each cycle builds its own fresh
 // `PointsAllowance`, because one shared instance would accumulate across cycles and permanently
-// trip (see the dep's own doc comment, and `trendsFactory`'s identical fix above).
+// trip (see the dep's own doc comment, and `providersFactory`'s identical fix above).
 const inventorySyncDeps: InventorySyncDeps = {
   db, adapter: supplierAdapter, shopify: inventorySyncShopify, alert, now: () => new Date(),
 }

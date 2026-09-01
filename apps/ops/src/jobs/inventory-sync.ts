@@ -88,7 +88,7 @@ export interface InventorySyncDeps {
    * Optional per-cycle CJ points budget. OMITTED BY PRODUCTION WIRING ON PURPOSE: a
    * `PointsAllowance` accumulates for the life of the instance, so a single one shared by every
    * cycle would permanently trip after ~one cycle's worth of reads and silently no-op the sync
-   * forever (the exact bug the sourcing pipeline's `trendsFactory` had to be fixed for). Left
+   * forever (the exact bug the sourcing pipeline's `providersFactory` had to be fixed for). Left
    * unset, each cycle constructs its own fresh allowance below.
    */
   points?: PointsBudget

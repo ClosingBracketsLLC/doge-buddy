@@ -83,7 +83,7 @@ function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
   const signalLines = input.trendSignals.map((s) => JSON.stringify(s)).join('\n')
 
   const bps = input.knobs?.maxPriceToMarketBps ?? DEFAULT_MAX_PRICE_TO_MARKET_BPS
-  const ratio = (bps / 10_000).toFixed(1)
+  const ratio = String(bps / 10_000)
   const exampleCeiling = (Math.floor(2499 * bps / 10_000) / 100).toFixed(2)
   const marketSection = input.marketGateArmed
     ? [

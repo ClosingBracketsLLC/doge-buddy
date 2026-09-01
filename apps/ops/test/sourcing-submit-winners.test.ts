@@ -373,7 +373,7 @@ describe('validateAndSubmitWinners', () => {
     expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'claims_scrubbed' }])
   })
 
-  it('step 6 — sourcing_winner_unverifiable: live cost drifts beyond COST_TOLERANCE_BPS', async () => {
+  it('step 7 — sourcing_winner_unverifiable: live cost drifts beyond COST_TOLERANCE_BPS', async () => {
     const alert = vi.fn(async () => {})
     const adapter = makeAdapter({
       getProduct: async (pid) => ({
@@ -402,7 +402,7 @@ describe('validateAndSubmitWinners', () => {
     )
   })
 
-  it('step 6 — sourcing_winner_unverifiable: unknown supplierVariantId at CJ', async () => {
+  it('step 7 — sourcing_winner_unverifiable: unknown supplierVariantId at CJ', async () => {
     const deps = makeDeps({
       adapter: makeAdapter({
         getProduct: async (pid) => ({
@@ -426,7 +426,7 @@ describe('validateAndSubmitWinners', () => {
     expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_unverifiable' }])
   })
 
-  it('step 6 — sourcing_winner_unverifiable: no US stock with quantity >= 1', async () => {
+  it('step 7 — sourcing_winner_unverifiable: no US stock with quantity >= 1', async () => {
     const deps = makeDeps({
       adapter: makeAdapter({
         getVariantStock: async () => [
@@ -448,7 +448,7 @@ describe('validateAndSubmitWinners', () => {
     expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_unverifiable' }])
   })
 
-  it('step 7 — sourcing_winner_margin_below_floor: freight-inclusive margin under the floor', async () => {
+  it('step 8 — sourcing_winner_margin_below_floor: freight-inclusive margin under the floor', async () => {
     const alert = vi.fn(async () => {})
     const adapter = makeAdapter({
       getProduct: async (pid) => ({
@@ -484,7 +484,7 @@ describe('validateAndSubmitWinners', () => {
     )
   })
 
-  it('step 7 — sourcing_winner_margin_below_floor: no freight option lands within deliveryMaxDays', async () => {
+  it('step 8 — sourcing_winner_margin_below_floor: no freight option lands within deliveryMaxDays', async () => {
     const deps = makeDeps({
       adapter: makeAdapter({
         quoteShipping: async () => [{ name: 'Slow Boat', priceCents: 100, minDays: 10, maxDays: 20 }], // deliveryMaxDays is 7
@@ -503,7 +503,7 @@ describe('validateAndSubmitWinners', () => {
     expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_margin_below_floor' }])
   })
 
-  it('step 8 — sourcing_winner_submit_failed: submitProposal throws', async () => {
+  it('step 9 — sourcing_winner_submit_failed: submitProposal throws', async () => {
     const alert = vi.fn(async () => {})
     const submit = vi.fn(async () => {
       throw new Error('insert failed')

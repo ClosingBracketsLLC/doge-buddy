@@ -327,6 +327,7 @@ describe('agents/mcp-tools', () => {
       // The SDK server exposes registered tools through instance._registeredTools (object keyed by tool name)
       const getToolNames = (server: Record<string, unknown>): string[] => {
         const inst = server.instance as Record<string, unknown> | undefined
+        // Private SDK surface — expect this assertion to be the first casualty of an @anthropic-ai/claude-agent-sdk bump.
         const registeredTools = inst?._registeredTools as Record<string, unknown> | undefined
         return Object.keys(registeredTools ?? {})
       }
