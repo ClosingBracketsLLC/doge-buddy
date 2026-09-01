@@ -71,6 +71,13 @@
       "when": 1788139660771,
       "tag": "0009_third_shaman",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788293621477,
+      "tag": "0010_gifted_galactus",
+      "breakpoints": true
     }
   ]
 }

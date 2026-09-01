@@ -25,7 +25,7 @@ export const proposalStatus = pgEnum('proposal_status', [
 ])
 export const scoreVerdict = pgEnum('score_verdict', ['keep', 'watch', 'deprecate'])
 export const agentRunStatus = pgEnum('agent_run_status', ['running', 'succeeded', 'failed', 'aborted'])
-export const signalSource = pgEnum('signal_source', ['cj_trending', 'web_search', 'google_trends', 'owner_manual'])
+export const signalSource = pgEnum('signal_source', ['cj_trending', 'web_search', 'google_trends', 'owner_manual', 'market_price'])
 
 // -- Catalog --
 export const products = pgTable('products', {

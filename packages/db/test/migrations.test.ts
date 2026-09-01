@@ -81,4 +81,12 @@ describe('migrations', () => {
       await pool.end()
     }
   })
+
+  it('signal_source enum includes market_price (migration 0010)', async () => {
+    const c = new Client({ connectionString: testUrl })
+    await c.connect()
+    const res = await c.query(`SELECT unnest(enum_range(NULL::signal_source))::text AS v`)
+    await c.end()
+    expect(res.rows.map((r) => r.v)).toContain('market_price')
+  })
 })
