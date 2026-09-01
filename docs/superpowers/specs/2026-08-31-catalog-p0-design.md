@@ -1,6 +1,6 @@
 # Catalog P0 — categories that work, products that land in them, CJ stock as Shopify inventory, catalog-build knobs
 
-**Date:** 2026-08-31 · **Status:** approved in chat (Robert, 2026-08-31), building · **Parent:**
+**Date:** 2026-08-31 · **Status:** BUILT 2026-08-31 (branch `catalog-p0`); live tier pending · **Parent:**
 `docs/LAUNCH-BACKLOG.md` P0 items 1–5 · **Owner goal:** ≥40 products on the store by Friday
 2026-09-04, every one in a working nav category, never overselling CJ's US stock.
 

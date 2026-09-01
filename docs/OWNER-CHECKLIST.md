@@ -27,13 +27,54 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 11. [ ] **Store-transfer re-verification** (only if you transfer the store to the LLC's merchant account before launch) — after the transfer: `pnpm --filter @doge-buddy/ops verify-live` must still print `SHOPIFY OK` (app + Admin API token survived), `dogebuddy.com` still points at Oxygen, Shopify Payments still active. If the app didn't survive, re-create `doge-buddy` in the Dev Dashboard and re-issue credentials → **Claude updates `.env` + Railway vars with you.**
 12. [ ] **DMARC tightening (in ~2 weeks)** — once the daily aggregate reports to support@ have shown clean alignment for about two weeks: DNS `_dmarc.dogebuddy.com` → `v=DMARC1; p=quarantine; rua=mailto:support@dogebuddy.com`. Helps Outlook.com deliverability (see the 🟡 item below). → **Ask Claude to read the reports first** (they're zip attachments in the mailbox; I can parse them).
 13. [ ] *(cosmetic, optional)* FunkyDori webfont license — Lilita One is the stand-in until then.
+14. [ ] 🔴 **Catalog P0 go-live (Claude + Robert, ~30 min).** The catalog-p0 branch is built and
+    tested (see `docs/LAUNCH-BACKLOG.md` P0 1–5) but never run against the real store. Live-tier
+    steps, in order:
+    (a) **Claude merges `catalog-p0` into `main` locally, then you push** — `git push origin main`
+    (no migration this time). Railway redeploys ops; Oxygen redeploys the storefront.
+    (b) From the main checkout: `pnpm --filter @doge-buddy/ops seed-collections` (reads
+    `apps/ops/.env`) → expect `created=4 skipped=0 published=16` (16 = 4 collections × 4
+    publications: Online Store, Shop, POS, `doge-buddy`). Then on the storefront preview URL:
+    `/collections/toys-play`, `/walks-travel`, `/beds-comfort`, `/grooming-care` all return 200
+    (empty — no products tagged yet) and `/collections` shows four tiles.
+    (c) `pnpm --filter @doge-buddy/ops backfill-listings --dry-run` first (prints the plan, zero
+    writes), then the same command **without** `--dry-run` → expect `products=2 updated=2
+    partial=0 failures=0`. **NOTE:** `FULFILLMENT_SUPPLIER=cj` must already be set in
+    `apps/ops/.env` — the script refuses to push inventory otherwise. The two live products get
+    human URLs (`/products/dog-snuff-pad-<8hex>`, `/products/low-noise-pet-hair-clipper-<8hex>`),
+    land in the right category (Grooming & Care for the clipper, etc.), and show tracked stock.
+    (d) Verify: the four `/collections/*` pages now list the products; each product page shows
+    its new URL; in Shopify admin → the product, confirm the `category:<tag>` tag, `productType`,
+    and SEO title/description are set.
+    (e) One manual-mode sourcing run, proving exit criterion 3: `pnpm --filter @doge-buddy/ops
+    run-sourcing --force --max-winners 2 --keywords "dog chew toy"` → approve the winner on your
+    phone (Telegram or `/admin/proposals`) → the new product arrives slugged, tagged, typed, with
+    tracked inventory equal to CJ's largest single US-warehouse stock.
+    (f) Force a sync check: watch the Railway ops logs for `inventory.synced` right after that
+    listing (the post-listing job enqueues automatically) — or wait for the next 6-hourly cron. A
+    variant whose CJ stock is 0 should show "Sold out" on the storefront within one cycle.
+    (g) **Build-week runs:** on `/admin/settings`, flip `workflow.sourcing.mode` to `auto` and set
+    `sourcing.max_winners` = 8, `sourcing.candidate_target` = 40, `sourcing.max_pages` = 20,
+    `sourcing.max_budget_cents` = 500 (or skip the settings and just pass the CLI flags below —
+    overrides beat settings). Then run the block below, Tue–Thu, ~10 min apart (each run costs
+    ≈$3–5 CJ points + Anthropic spend; Claude watches `/admin` and the wallet). **Flip
+    `workflow.sourcing.mode` back to `manual` after the last run.**
+    ```
+    pnpm --filter @doge-buddy/ops run-sourcing --force --keywords "dog chew toy,dog plush toy,dog puzzle toy,dog fetch ball" --max-winners 8 --budget 5 --candidates 40 --pages 20
+    pnpm --filter @doge-buddy/ops run-sourcing --force --keywords "dog harness,dog leash,dog travel bowl,dog car seat cover" --max-winners 8 --budget 5 --candidates 40 --pages 20
+    pnpm --filter @doge-buddy/ops run-sourcing --force --keywords "orthopedic dog bed,calming dog bed,dog blanket,dog crate mat" --max-winners 8 --budget 5 --candidates 40 --pages 20
+    pnpm --filter @doge-buddy/ops run-sourcing --force --keywords "dog nail grinder,dog brush,dog shampoo,dog clipper" --max-winners 8 --budget 5 --candidates 40 --pages 20
+    # repeat a category with fresh keywords if it came back short; Claude watches /admin and the wallet.
+    ```
+    (h) *(optional polish)* Upload one image per collection: Shopify admin → Products →
+    Collections → each collection → Image.
 
 **C. Launch day**
-14. [ ] **Publish the storefront** — Shopify admin → **Online Store → Preferences** (or the Hydrogen channel's storefront settings) → remove the visitor password → confirm `https://dogebuddy.com` loads in a private window without a login wall.
-15. [ ] **Swap off the test gateway** — Settings → **Payments** → deactivate "(for testing) Bogus Gateway"; Shopify Payments must be the active provider.
-16. [ ] **Canary guardrails** — `https://doge-buddyops-production.up.railway.app/admin/settings`: set `fulfillment.spend_cap_per_order_cents` to `3000` (per-order ~$30, parent-spec risk #8), leave `fulfillment.wallet_alert_threshold_cents` at `2000`, keep every `workflow.*.mode` on **manual** for the first ~10 real orders.
-17. [ ] **Self-purchase** — one real order from your own (non-test) address with a real card → tell Claude before you place it → **Claude watches** `orders/paid` → CJ order placed → tracking synced to Shopify → the package arrives (the physical loop). While that supplier order exists, **Claude closes Tier-2 #4** (`openCjDispute` against a real supplier order) and live-validates scoring's order→variant join.
-18. [ ] **After ~10 clean real orders** — flip `workflow.sourcing.mode`, `workflow.support_reply.mode`, `workflow.deprecation.mode` to **auto** one at a time on `/admin/settings` (refunds stay manual — hard-locked in code). Before flipping deprecation to auto, ask Claude to build the auto-mode digest FYI (deferred on purpose).
+15. [ ] **Publish the storefront** — Shopify admin → **Online Store → Preferences** (or the Hydrogen channel's storefront settings) → remove the visitor password → confirm `https://dogebuddy.com` loads in a private window without a login wall.
+16. [ ] **Swap off the test gateway** — Settings → **Payments** → deactivate "(for testing) Bogus Gateway"; Shopify Payments must be the active provider.
+17. [ ] **Canary guardrails** — `https://doge-buddyops-production.up.railway.app/admin/settings`: set `fulfillment.spend_cap_per_order_cents` to `3000` (per-order ~$30, parent-spec risk #8), leave `fulfillment.wallet_alert_threshold_cents` at `2000`, keep every `workflow.*.mode` on **manual** for the first ~10 real orders.
+18. [ ] **Self-purchase** — one real order from your own (non-test) address with a real card → tell Claude before you place it → **Claude watches** `orders/paid` → CJ order placed → tracking synced to Shopify → the package arrives (the physical loop). While that supplier order exists, **Claude closes Tier-2 #4** (`openCjDispute` against a real supplier order) and live-validates scoring's order→variant join.
+19. [ ] **After ~10 clean real orders** — flip `workflow.sourcing.mode`, `workflow.support_reply.mode`, `workflow.deprecation.mode` to **auto** one at a time on `/admin/settings` (refunds stay manual — hard-locked in code). Before flipping deprecation to auto, ask Claude to build the auto-mode digest FYI (deferred on purpose).
 
 ---
 
@@ -361,6 +402,25 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 
 ---
 
-*Maintained by Claude; last updated 2026-08-30 late evening (Tier-2 SIGNED OFF; canary is next). When you complete an item, check it off and tell Claude — especially the credential items, so live verification can run.*
+*Maintained by Claude; last updated 2026-08-31 (catalog P0 BUILT, branch `catalog-p0`; runway B14
+is its live tier — canary is still next after that). When you complete an item, check it off and
+tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** **Nothing code-side is pending — the "Launch runway" at the top of this file is the whole remaining list, and every item is owner-side.** Claude's next jobs are reactive: print `POLICY_COPY` as plain text when asked (runway B6), parse the DMARC aggregate reports before the `p=quarantine` flip (B12), watch the self-purchase end-to-end and close Tier-2 #4 (`openCjDispute` on the real supplier order) during the canary (C17), and build the auto-mode deprecation digest FYI before C18. Tools on hand: `inspect-mailbox`, `seed-refund-proposal`, `read-refund-state`, `redeliver-apply` (all `pnpm --filter @doge-buddy/ops …`); Claude's raw writes to the Railway DB are classifier-blocked — hand Robert the SQL. Test-address rule: repeat-complainant counts tickets (the form too), so from any test address only ever reply on existing threads; Outlook.com silently drops first-contact mail from support@ until reputation builds. Contact form: LIVE 2026-08-31 (spec `2026-08-31-contact-form-design.md`, findings A/B/C at its end).
+**Next build session starts here →** **Catalog P0 is BUILT 2026-08-31 (branch `catalog-p0`,
+`docs/superpowers/specs/2026-08-31-catalog-p0-design.md`) — the live tier is the top of the
+remaining work: runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
+one manual `run-sourcing --max-winners 2` → force an `inventory.sync` check → flip
+`workflow.sourcing.mode` to `auto` for the build-week runs → back to `manual` after). Once the
+build-week runs land ~40+ products, next is `docs/LAUNCH-BACKLOG.md` **P1** (product page image
+gallery + structured content, related products, home page category tiles, kill the skeleton
+blog, SEO fields at listing time, About page). Older reactive jobs still pending in the
+meantime: print `POLICY_COPY` as plain text when asked (runway B6), parse the DMARC aggregate
+reports before the `p=quarantine` flip (B12), watch the self-purchase end-to-end and close
+Tier-2 #4 (`openCjDispute` on the real supplier order) during the canary (C18), and build the
+auto-mode deprecation digest FYI before C19. Tools on hand: `inspect-mailbox`,
+`seed-refund-proposal`, `read-refund-state`, `redeliver-apply` (all `pnpm --filter
+@doge-buddy/ops …`); Claude's raw writes to the Railway DB are classifier-blocked — hand Robert
+the SQL. Test-address rule: repeat-complainant counts tickets (the form too), so from any test
+address only ever reply on existing threads; Outlook.com silently drops first-contact mail from
+support@ until reputation builds. Contact form: LIVE 2026-08-31 (spec
+`2026-08-31-contact-form-design.md`, findings A/B/C at its end).

@@ -28,34 +28,43 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
 
 ## P0 — unshoppable without these
 
-1. **Create + publish the four category collections** — *Claude* (script), ~1 task. Extend
-   `seed-store` (or a new `seed-collections` script) so it creates the 4 automated collections from
-   `sample-data.ts` (rule `tag equals category:<handle>`) AND publishes each to the `doge-buddy`
-   publication + Online Store (today the seed publishes products only), with a collection image and a
-   one-line description each. Idempotent; run against the real store. Fixes the nav, the hero CTA,
-   and `/collections` in one go.
-2. **Tag products at listing time** — *Claude*, small. `apply-new-listing.ts` sets
-   `tags: ['category:<categoryTag>']` and `productType` from the proposal; backfill the 2 live products
-   (one-off script or Robert in admin: Products → product → Tags). Without this, #1's collections are
-   empty.
-3. **Human product URLs** — *Claude*, small but touches the resume path. Handle = slugified title
-   (+ a short suffix on collision) instead of `db-proposal-<uuid>`; the worker's crash-resume looks the
-   product up by the handle it computed, so the slug must be derived deterministically from the
-   payload (title + proposal-id suffix is the safe form, e.g. `low-noise-pet-hair-clipper-d28b3cb8`).
-   Backfill the 2 live products (Shopify keeps a redirect from the old handle for the Online Store;
-   Hydrogen doesn't need one pre-launch).
-4. **Catalog depth — decision for Robert.** Two products across four categories is not a store. A
-   sensible opening bar is 4–6 products per category (16–24 total). Today's supply is the weekly
-   sourcing run (~2 proposals/run, ~$0.60/run, owner-approved). Options, cheapest first:
-   (a) run `run-sourcing` by hand several times this week, one category keyword each (Claude drives,
-   Robert taps Approve on the phone); (b) raise the per-run proposal count (a setting + prompt change);
-   (c) hand-pick CJ products and let Claude seed them through the same proposal path. Pick one; (a)
-   needs nothing built.
-5. **Inventory policy — decision for Robert.** Both variants show quantity 0/-1 (untracked) and still
-   sell. That's fine for dropshipping IF we're comfortable selling on CJ's stock without a local
-   count; the CJ stock sync exists in the DB (`last_known_stock`) but is not pushed to Shopify
-   inventory. Decide: leave untracked (simplest, current behaviour) or have the listing worker set a
-   tracked quantity from CJ stock and re-sync (Claude, medium).
+1. **Create + publish the four category collections** — *Claude* (script), ~1 task. **BUILT
+   2026-08-31 (branch `catalog-p0`, code+tests green; live tier pending).** `pnpm --filter
+   @doge-buddy/ops seed-collections` creates the 4 collections from the new `CATEGORIES` source of
+   truth (`packages/core/src/catalog.ts`) with a `TAGGED_WITH category:<tag>` rule (the live
+   2026-07 schema's actual rule shape — the seed's old `ruleSet` form doesn't exist on this API
+   version, which is why the store never had collections) and publishes every one to every
+   publication, every run (idempotent healing, not just create-if-missing). Owner runs it — see
+   `OWNER-CHECKLIST.md` runway B14(b).
+2. **Tag products at listing time** — *Claude*, small. **BUILT 2026-08-31.** The listing worker
+   (`apply-new-listing.ts`) now sets `tags: ['category:<tag>']`, `productType`, and `seo` from
+   `CATEGORIES` in the same `productSet` call. The 2 live products are repaired by
+   `backfill-listings`, not a separate one-off script (see #3 below — same tool does both).
+3. **Human product URLs** — *Claude*, small but touches the resume path. **BUILT 2026-08-31.**
+   Handle = `slugify(title) + '-' + <first 8 hex of the proposal id>` (deterministic, so
+   crash-resume by handle still works; the suffix makes collisions practically impossible). The 2
+   live products are repaired by the new `backfill-listings` script (`productUpdate` with
+   `redirectNewHandle: true`, so the old `db-proposal-<uuid>` handle 301s on the Online Store —
+   more conservative than the "no redirect needed" original plan, decided 2026-08-31 review since
+   it costs nothing and the old handle may already be indexed/bookmarked). Decision taken: a
+   product with any variant whose CJ stock read fails during backfill counts as `partial`, not
+   `updated`, and NEVER has its inventory zeroed (the untracked/selling state is left alone and
+   `inventory.sync` heals it later) — a failed read must never make a live product look
+   out-of-stock.
+4. **Catalog depth — decision for Robert.** **Decision taken 2026-08-31: option (a) plus knobs.**
+   Rather than raising the per-run cap globally, `run-sourcing` gained CLI overrides
+   (`--keywords`, `--max-winners`, `--budget`, `--candidates`, `--pages`) and matching settings
+   (`sourcing.max_winners|candidate_target|max_pages|max_budget_cents`), so the Monday cron stays
+   at today's conservative defaults while a manual "build week" (four ~10-minutes-apart runs,
+   `--max-winners 8` each, `workflow.sourcing.mode = auto`) can reach ≥40 products fast. Runbook is
+   in `OWNER-CHECKLIST.md` runway B14(g). Robert runs it; nothing further to decide.
+5. **Inventory policy — decision for Robert.** **Decision taken 2026-08-31: tracked, from CJ's
+   stock.** The listing worker now sets `inventoryItem.tracked: true` with a quantity equal to the
+   **largest single US-warehouse entry** from `adapter.getVariantStock` (not the cross-warehouse
+   sum — `fulfillment/plan.ts` needs one warehouse able to cover the whole order). A failed stock
+   read at listing time never blocks the listing (quantity falls back to 0, healed within a minute
+   by a post-listing `inventory.sync` job and every 6 h after that by the cron). The 2 live
+   products get tracked quantities via `backfill-listings`.
 
 ## P1 — before the official launch
 
@@ -96,6 +105,10 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
     Turnstile-gated pattern as `/contact` if wanted.
 
 ## Suggested order
+
+**Week 1 status (2026-08-31): #1–#5 BUILT on branch `catalog-p0` — code + tests green, live tier
+pending (see `OWNER-CHECKLIST.md` runway B14).** Once B14 runs and the build-week block lands
+≥40 products, next up is Week 2 below.
 
 Week 1: #1 → #2 → #3 (all Claude, one branch) while Robert runs sourcing for #4 and decides #5.
 Week 2: #6 → #7 → #8 → #9 → #10 → #14 (one branch), #11 + #12 (Robert). Then #13, then launch day.
