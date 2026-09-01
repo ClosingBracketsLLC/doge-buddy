@@ -245,12 +245,14 @@ describe('executeInventorySync', () => {
     expect(shopify.calls[0]!.input).toEqual({
       name: 'available',
       reason: 'correction',
-      quantities: [{ inventoryItemId: v.inventoryItemGid, locationId: LOCATION_ID, quantity: 4 }],
+      // `changeFromQuantity` is the cached value: 2026-07 has no `ignoreCompareQuantity`, and this
+      // optional per-entry field is the API's compare-and-swap. It is what stops the cron cycle
+      // and an on-demand post-listing cycle — two producers on two queues, unserialized by design
+      // — from silently clobbering each other's push with a stale number.
+      quantities: [{ inventoryItemId: v.inventoryItemGid, locationId: LOCATION_ID, quantity: 4, changeFromQuantity: 1 }],
     })
-    // 2026-07 has no `ignoreCompareQuantity`, and the per-entry CAS `changeFromQuantity` is
-    // omitted on purpose — this is an unconditional set.
     const quantity = (shopify.calls[0]!.input as { quantities: Record<string, unknown>[] }).quantities[0]!
-    expect(Object.keys(quantity).sort()).toEqual(['inventoryItemId', 'locationId', 'quantity'])
+    expect(Object.keys(quantity).sort()).toEqual(['changeFromQuantity', 'inventoryItemId', 'locationId', 'quantity'])
     // `inv-<variantRowId>-<quantity>-<unix seconds>`: the quantity is in the key so a real change
     // can never replay a previous push's result (an hour-bucketed key would let a :40 push of 2
     // replay a :05 push of 4 — the store stays wrong, in the oversell direction, forever).
@@ -270,6 +272,48 @@ describe('executeInventorySync', () => {
     await executeInventorySync(depsAgain, { productId })
     expect(shopifyAgain.calls[0]!.key).toBe(`inv-${v.variantId}-7-${NOW_EPOCH_SECONDS}`)
     expect(shopifyAgain.calls[0]!.key).not.toBe(shopify.calls[0]!.key)
+    // The CAS follows the cache, which the first push above advanced to 4.
+    expect((shopifyAgain.calls[0]!.input as { quantities: { changeFromQuantity?: number }[] }).quantities[0]!.changeFromQuantity)
+      .toBe(4)
+  })
+
+  // (c2) ------------------------------------------------------------------------------------
+  it('c2. a null cache omits changeFromQuantity entirely (nothing to compare against)', async () => {
+    const productId = await seedProduct('active')
+    const v = await seedVariant(productId, { lastKnownStock: null })
+    const shopify = fakeShopify()
+    const { deps } = makeDeps(fakeAdapter({ [v.supplierVariantId]: 4 }), shopify)
+
+    expect(await executeInventorySync(deps, { productId })).toEqual({ updated: 1, unchanged: 0, failed: 0, skipped: 0 })
+    const quantity = (shopify.calls[0]!.input as { quantities: Record<string, unknown>[] }).quantities[0]!
+    expect(Object.keys(quantity).sort()).toEqual(['inventoryItemId', 'locationId', 'quantity'])
+  })
+
+  // (c3) ------------------------------------------------------------------------------------
+  it('c3. a userError from the CAS counts the variant failed and leaves the cache untouched', async () => {
+    const productId = await seedProduct('active')
+    const v = await seedVariant(productId, { lastKnownStock: 1, stockCheckedAt: new Date('2026-08-01T00:00:00.000Z') })
+    // What the real op does with a non-empty `userErrors` (`assertNoUserErrors`): it throws.
+    const shopify = fakeShopify({
+      inventorySetQuantities: async () => {
+        throw new Error('inventorySetQuantities: Quantity does not match the compare quantity')
+      },
+    })
+    const { deps } = makeDeps(fakeAdapter({ [v.supplierVariantId]: 4 }), shopify)
+
+    // A lost CAS is a real miss, not noise: it is counted `failed` and therefore counts toward the
+    // degraded ratio, exactly like a supplier read that fell over.
+    expect(await executeInventorySync(deps, { productId })).toEqual({ updated: 0, unchanged: 0, failed: 1, skipped: 0 })
+    // No cache write: the other producer's value is what Shopify holds, and next cycle re-reads
+    // CJ and retries against the row it finds then.
+    const row = await mappingRow(v.variantId)
+    expect(row!.lastKnownStock).toBe(1)
+    expect(row!.stockCheckedAt?.toISOString()).toBe('2026-08-01T00:00:00.000Z')
+    const failedAudit = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, 'inventory_sync.variant_failed'), eq(auditLog.entityId, v.variantId)))
+    expect(failedAudit).toHaveLength(1)
   })
 
   // (d) -------------------------------------------------------------------------------------

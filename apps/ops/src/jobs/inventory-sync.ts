@@ -184,16 +184,20 @@ async function auditVariantFailure(db: Db, variantId: string, err: unknown): Pro
  * **Per variant.** Read CJ stock, take `usQuantity`, and compare with `last_known_stock`:
  * unchanged means NO Shopify call at all (the common case by far — most variants don't move in six
  * hours) but still a fresh `stock_checked_at`, so "we looked" and "it changed" stay separable.
- * Changed means one `inventorySetQuantities` — an unconditional set of the `available` quantity at
- * the store's one active location — followed by the local cache write. That ordering is
- * deliberate: a crash between the two re-pushes the same value next cycle (harmless, and the
- * hourly idempotency key collapses it), whereas writing the cache first would record a push that
- * never happened and leave the storefront stale until CJ's number moves again.
+ * Changed means one `inventorySetQuantities` setting the `available` quantity at the store's one
+ * active location — compare-and-swapped against `last_known_stock` via the optional
+ * `changeFromQuantity` whenever there is one to swap against — followed by the local cache write.
+ * That ordering is deliberate: a crash between the two re-pushes the same value next cycle
+ * (harmless), whereas writing the cache first would record a push that never happened and leave the
+ * storefront stale until CJ's number moves again.
  *
  * **Isolation.** Every variant's work is wrapped: a throw is counted `failed`, audit-logged, and
  * the cycle moves on — one flaky supplier read must never cost the other 199 variants their sync.
  * A failed variant's `last_known_stock` is left exactly as it was; "CJ was unreachable" is not an
- * observation that the warehouse is empty.
+ * observation that the warehouse is empty. A LOST CAS arrives here as a throw too (the op turns
+ * `userErrors` into one) and is treated identically — counted `failed`, cache untouched, retried
+ * next cycle — and it DOES count toward the degraded ratio below, because a push that did not land
+ * is a real miss however it was lost.
  */
 export async function executeInventorySync(
   deps: InventorySyncDeps,
@@ -229,10 +233,10 @@ export async function executeInventorySync(
     .orderBy(sql`${supplierVariantMappings.stockCheckedAt} asc nulls first`, asc(productVariants.createdAt), asc(productVariants.id))
 
   // A variant could in principle carry mappings for two suppliers (the unique index is on
-  // (variant, supplier)), which would yield two rows here for one inventory item — and both would
-  // share this hour's idempotency key, so the second push would be silently swallowed by Shopify
-  // rather than winning. Only ever one supplier per variant today; take the first deterministically
-  // rather than leaving that to chance.
+  // (variant, supplier)), which would yield two rows here for one inventory item — two pushes of
+  // two different numbers at the same inventory item, the second of which would also lose the CAS
+  // against a cache the first just advanced. Only ever one supplier per variant today; take the
+  // first deterministically rather than leaving that to chance.
   const byVariant = new Map<string, (typeof selected)[number]>()
   for (const row of selected) {
     if (!byVariant.has(row.variantId)) byVariant.set(row.variantId, row)
@@ -345,10 +349,29 @@ export async function executeInventorySync(
           name: 'available',
           reason: 'correction',
           // LIVE-VERIFIED 2026-08-31 against the 2026-07 Admin API: there is no
-          // `ignoreCompareQuantity` field on `InventorySetQuantitiesInput`, and omitting the
-          // per-entry `changeFromQuantity` CAS makes this an unconditional set — which is what we
-          // want: CJ is the source of truth here, not whatever Shopify last held.
-          quantities: [{ inventoryItemId: row.inventoryItemGid, locationId: await getLocationId(), quantity }],
+          // `ignoreCompareQuantity` field on `InventorySetQuantitiesInput`; the optional per-entry
+          // `changeFromQuantity` is its compare-and-swap, and it is SENT whenever this variant has
+          // a cached value to swap against (whole-branch review, I1).
+          //
+          // The two producers of this job — the 6-hourly cron and the on-demand post-listing job —
+          // sit on two different queue names by design, so pg-boss's `stately` singleton cannot
+          // serialize them against each other. Without the CAS their read -> push -> cache
+          // sequences interleave into a plain lost update: A reads 7, B reads 5 and pushes 5, A
+          // pushes 7 and caches 7 while CJ says 5 — and every later cycle agrees with the cache and
+          // never corrects the oversell. With it, the loser's push is rejected by Shopify (a
+          // userError, which the op turns into a throw), the variant is counted `failed`, its cache
+          // is left alone, and the next cycle retries from whatever is true then.
+          //
+          // Omitted when the cache is null: there is nothing to compare against (a brand-new or
+          // resume-path listing), and sending nothing makes that push unconditional on purpose.
+          quantities: [
+            {
+              inventoryItemId: row.inventoryItemGid,
+              locationId: await getLocationId(),
+              quantity,
+              ...(row.lastKnownStock === null ? {} : { changeFromQuantity: row.lastKnownStock }),
+            },
+          ],
         },
         idempotencyKey(row.variantId, quantity, clock()),
       )
