@@ -12,12 +12,18 @@ import { submitProposal } from '../proposals/submit.ts'
 import type { Settings } from '../settings.ts'
 import { MIN_CANDIDATES, runHarvest } from './harvest.ts'
 import { resolveSourcingKnobs, type SourcingOverrides } from './knobs.ts'
+import { MarketLookups, type MarketLookup, type MarketPriceProvider } from './market-price.ts'
 import { validateAndSubmitWinners } from './submit-winners.ts'
 import type { TrendSignal, TrendsProvider } from './trends.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
 type Enqueue = (name: string, data: object, opts?: SendOpts) => Promise<void>
+
+export interface SourcingProviders {
+  trends: TrendsProvider | null
+  marketPrice: MarketPriceProvider | null
+}
 
 export interface SourcingPipelineDeps {
   db: Db
@@ -28,15 +34,13 @@ export interface SourcingPipelineDeps {
   notify: NotifyOwner
   adminBaseUrl?: string
   /**
-   * Produces a FRESH TrendsProvider per pipeline run (returns null when SERPAPI_KEY is absent → the
-   * trends stage is skipped, spec §Stage 2). A factory, not a constructed instance, because
-   * `createSerpApiTrends` enforces its `SERPAPI_MAX_REQUESTS_PER_RUN` cap via a per-instance closure
-   * counter that never resets (trends.ts:20-26 — "one instance = one run"): a single instance baked
-   * in at boot and reused across weekly runs would accumulate that counter and permanently trip
-   * (~week 4), after which the trends stage silently returns all-null signals (FIX C2). Calling the
-   * factory once per run guarantees each run starts with a fresh counter.
+   * Produces FRESH providers per pipeline run (both null when SERPAPI_KEY is absent — trends stage
+   * skipped per spec §Stage 2, market gate skipped per market-price spec Decision 5). A factory,
+   * not instances, for the same reason trendsFactory was (Phase 5 FIX C2): both providers share
+   * ONE SerpApiClient whose per-run request cap never resets — composition roots build
+   * client + both providers fresh inside this factory so every run starts with a zero counter.
    */
-  trendsFactory: () => TrendsProvider | null
+  providersFactory: () => SourcingProviders
   /** Test seam, threaded straight through to `runSourcingAgent`. */
   queryFn?: SourcingRunDeps['queryFn']
   /** Bypasses the same-day circuit breaker (`claimDailyRun`) — `--force` on the manual script. */
@@ -83,7 +87,7 @@ function errorMessage(err: unknown): string {
  * stage error (a transient DB/trends failure) after flipping the claimed row terminal.
  */
 export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<SourcingPipelineResult> {
-  const { db, adapter, settings, alert, enqueue, notify, adminBaseUrl, trendsFactory, queryFn, force, overrides } = deps
+  const { db, adapter, settings, alert, enqueue, notify, adminBaseUrl, providersFactory, queryFn, force, overrides } = deps
 
   // --- Stage 0: resolve the run's knobs (override > setting > constant), ONCE ------------------
   // Deliberately BEFORE the day-claim: an out-of-range override or setting throws, and a knob
@@ -137,8 +141,9 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
     }
 
     // --- Stage 3: trends (Task 7) — best-effort, never blocks the run --------------------------
-    // Construct a FRESH provider per run (FIX C2) so its per-run SerpApi request counter resets.
-    const trends = trendsFactory()
+    // Construct FRESH providers per run (FIX C2) so their shared per-run SerpApi request counter
+    // resets.
+    const { trends, marketPrice } = providersFactory()
     let trendSignals: TrendSignal[] = []
     if (!trends) {
       await alert('warning', 'trends_stage_skipped', {}).catch(() => {})
@@ -169,8 +174,20 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
     allowance.spend(pagesFetched * 50, 'harvest')
 
     // --- Stage 5: the agent run (Task 10 MCP server + Task 12 runner) -------------------------
-    const mcpServer = createSourcingMcpServer({ adapter, allowance })
-    const agentResult = await runSourcingAgent({ db, alert, mcpServer, queryFn }, { runId, candidates, trendSignals, knobs })
+    const marketLookups = new MarketLookups()
+    if (!marketPrice) {
+      await alert('warning', 'market_price_stage_skipped', {}).catch(() => {})
+    }
+    const mcpServer = createSourcingMcpServer({ adapter, allowance, marketPrice, marketLookups })
+    const agentResult = await runSourcingAgent(
+      { db, alert, mcpServer, queryFn },
+      { runId, candidates, trendSignals, knobs, marketGateArmed: marketPrice !== null },
+    )
+
+    // --- Stage 5b: persist the run's market lookups, whatever the agent's status --------------
+    // (a failed run's lookups are the most useful ones to have on record; spec §7). Never blocks.
+    await persistMarketLookups(db, alert, marketLookups.all())
+
     if (agentResult.status !== 'succeeded' || !agentResult.output) {
       // The runner already recorded the row's terminal status/cost and fired its own alert.
       return { runId, outcome: 'agent_failed', submitted: 0 }
@@ -182,8 +199,17 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
     const submitDeps: SubmitProposalDeps = { db, settings, notify, enqueue, alert, adminBaseUrl }
 
     const outcomes = await validateAndSubmitWinners(
-      { db, adapter, allowance, submit: submitProposal, submitDeps, settings, alert },
-      { runId, candidateIds, candidatesByPid, winners: agentResult.output.winners },
+      {
+        db,
+        adapter,
+        allowance,
+        submit: submitProposal,
+        submitDeps,
+        settings,
+        alert,
+        marketLookups: marketPrice ? marketLookups : null,
+      },
+      { runId, candidateIds, candidatesByPid, winners: agentResult.output.winners, maxPriceToMarketBps: knobs.maxPriceToMarketBps },
     )
 
     const submitted = outcomes.filter((o) => o.outcome === 'submitted').length
@@ -209,5 +235,26 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
       .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, 'running')))
       .catch(() => {})
     throw err
+  }
+}
+
+/** Stage 5b: one insert for the run's recorded market lookups (source 'market_price'). Its own
+ *  try/catch — a persist failure warns and moves on; the in-memory registry is what the gate
+ *  reads, so submission must never hinge on this insert (spec §7). */
+export async function persistMarketLookups(db: Db, alert: Alert, lookups: MarketLookup[]): Promise<void> {
+  if (lookups.length === 0) return
+  try {
+    await db.insert(sourcingSignals).values(
+      lookups.map((l) => ({
+        source: 'market_price' as const,
+        keyword: l.query,
+        supplierProductId: l.supplierProductId,
+        score: l.medianCents != null ? String(l.medianCents) : null,
+        evidenceUrl: l.offers[0]?.url ?? null,
+        snapshot: l.snapshot,
+      })),
+    )
+  } catch (err) {
+    await alert('warning', 'market_price_persist_failed', { error: errorMessage(err) }).catch(() => {})
   }
 }

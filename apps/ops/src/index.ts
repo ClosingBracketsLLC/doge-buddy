@@ -57,7 +57,9 @@ import { runDeprecationJudge } from './scoring/judge.ts'
 import { createQueueRetrying, registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
-import type { SourcingPipelineDeps } from './sourcing/pipeline.ts'
+import { createSerpApiMarketPrice } from './sourcing/market-price.ts'
+import type { SourcingPipelineDeps, SourcingProviders } from './sourcing/pipeline.ts'
+import { createSerpApiClient } from './sourcing/serpapi.ts'
 import { createSerpApiTrends } from './sourcing/trends.ts'
 import { DrizzleCjTokenStore } from './stores/cj-token-store.ts'
 import { createAnthropicTriageCall } from './support/triage.ts'
@@ -185,8 +187,8 @@ if (supplierAdapter.key === 'mock' && config.shopify) {
 
 if (config.anthropic) app.log.info('sourcing agent: ANTHROPIC_API_KEY configured')
 else app.log.warn('sourcing agent DISABLED: ANTHROPIC_API_KEY not set — sourcing.weekly cron will not register')
-if (config.serpapi) app.log.info('sourcing agent: SERPAPI_KEY configured (trends stage armed)')
-else app.log.warn('sourcing trends stage disabled: SERPAPI_KEY not set — runs proceed without google_trends signals')
+if (config.serpapi) app.log.info('sourcing agent: SERPAPI_KEY configured (trends + market-price stages armed)')
+else app.log.warn('sourcing trends + market-price stages disabled: SERPAPI_KEY not set — runs proceed without google_trends signals and without the price-to-market gate')
 
 if (config.gmail) app.log.info('support: Gmail service-account configured (ingest armed)')
 else app.log.warn('support poll DISABLED: Gmail env not set — support.poll-gmail cron registers but no-ops (one info alert at boot)')
@@ -432,14 +434,17 @@ if (config.shopify && config.adminBaseUrl && shopifyClient) {
 // is never silently retried — `claimDailyRun`'s same-day breaker is the only thing standing between
 // this cron and a second paid run today, so a blind retry would be actively dangerous here.
 if (config.anthropic) {
-  // A FACTORY, not a single baked-in instance (FIX C2): `createSerpApiTrends` enforces its
-  // per-run SerpApi request cap via a closure counter that never resets, so reusing one instance
-  // across weekly runs would accumulate it and permanently trip (~week 4), silently nulling the
-  // trends stage. Constructing a fresh provider per run resets that counter every run.
-  const trendsFactory = (): ReturnType<typeof createSerpApiTrends> | null =>
-    config.serpapi ? createSerpApiTrends({ apiKey: config.serpapi.apiKey }) : null
+  // A FACTORY, not baked-in instances (FIX C2): both providers share ONE SerpApiClient whose
+  // per-run request cap (25, trends + market lookups combined) never resets — a fresh client per
+  // run resets it every run. No SERPAPI_KEY => both null: trends stage skipped AND the market
+  // gate skipped (each with its own warning alert), the run otherwise proceeds.
+  const providersFactory = (): SourcingProviders => {
+    if (!config.serpapi) return { trends: null, marketPrice: null }
+    const client = createSerpApiClient({ apiKey: config.serpapi.apiKey })
+    return { trends: createSerpApiTrends({ client }), marketPrice: createSerpApiMarketPrice({ client }) }
+  }
   const sourcingDeps: SourcingPipelineDeps = {
-    db, adapter: supplierAdapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trendsFactory,
+    db, adapter: supplierAdapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, providersFactory,
   }
   await registerCron(queue.boss, 'sourcing.weekly', '0 13 * * 1', sourcingWeeklyHandler(sourcingDeps), {
     retryLimit: 0,

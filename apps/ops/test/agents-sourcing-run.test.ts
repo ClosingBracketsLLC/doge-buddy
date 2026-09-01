@@ -125,7 +125,7 @@ describe('runSourcingAgent (fake SDK stream)', () => {
       runId,
       candidates: candidates(),
       trendSignals: trendSignals(),
-      knobs: { keywords: ['dog toy'], maxWinners: 8, maxBudgetUsd: 6.5, candidateTarget: 40, maxPages: 20 },
+      knobs: { keywords: ['dog toy'], maxWinners: 8, maxBudgetUsd: 6.5, candidateTarget: 40, maxPages: 20, maxPriceToMarketBps: 13_000 },
     })
 
     expect(capturedPrompt).toContain('up to 8 winners')

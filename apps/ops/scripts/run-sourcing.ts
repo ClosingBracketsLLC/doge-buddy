@@ -9,7 +9,9 @@ import type { NotifyOwner } from '../src/notify/notify.ts'
 import { createTelegramNotifier } from '../src/notify/telegram.ts'
 import { createSettings } from '../src/settings.ts'
 import { describeSourcingKnobs, parseRunSourcingArgs, resolveSourcingKnobs } from '../src/sourcing/knobs.ts'
-import { runSourcingPipeline, type SourcingPipelineDeps } from '../src/sourcing/pipeline.ts'
+import { createSerpApiMarketPrice } from '../src/sourcing/market-price.ts'
+import { runSourcingPipeline, type SourcingPipelineDeps, type SourcingProviders } from '../src/sourcing/pipeline.ts'
+import { createSerpApiClient } from '../src/sourcing/serpapi.ts'
 import { createSerpApiTrends } from '../src/sourcing/trends.ts'
 import { DrizzleCjTokenStore } from '../src/stores/cj-token-store.ts'
 
@@ -145,19 +147,19 @@ adapter.quoteShipping = async (q) => {
 }
 
 let serpApiRequests = 0
-// Factory (FIX C2): `runSourcingPipeline` constructs a fresh TrendsProvider per run so its per-run
-// SerpApi request counter resets each run. This script drives exactly one run, so the counting
-// `fetchFn` closure below still tallies that single run's requests for the post-run telemetry line.
-const trendsFactory = (): ReturnType<typeof createSerpApiTrends> | null =>
-  config.serpapi
-    ? createSerpApiTrends({
-        apiKey: config.serpapi.apiKey,
-        fetchFn: (...args: Parameters<typeof fetch>) => {
-          serpApiRequests += 1
-          return fetch(...args)
-        },
-      })
-    : null
+// Factory (FIX C2): fresh client per run so the shared 25-request cap resets. This script drives
+// exactly one run; the counting fetchFn tallies BOTH stages' requests for the telemetry line.
+const providersFactory = (): SourcingProviders => {
+  if (!config.serpapi) return { trends: null, marketPrice: null }
+  const client = createSerpApiClient({
+    apiKey: config.serpapi.apiKey,
+    fetchFn: (...args: Parameters<typeof fetch>) => {
+      serpApiRequests += 1
+      return fetch(...args)
+    },
+  })
+  return { trends: createSerpApiTrends({ client }), marketPrice: createSerpApiMarketPrice({ client }) }
+}
 
 let failed = false
 
@@ -178,7 +180,7 @@ try {
   }
 
   const deps: SourcingPipelineDeps = {
-    db, adapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, trendsFactory, force, overrides,
+    db, adapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, providersFactory, force, overrides,
   }
 
   // Resolved here purely to PRINT what this run will do before it costs anything; the pipeline
@@ -191,7 +193,9 @@ try {
   console.log(
     `run-sourcing: CJ points spent (estimate) ~${cjPointsSpentEstimate} (${searchProductsPages} harvest page(s) + tool/verify calls)`,
   )
-  console.log(`run-sourcing: SerpApi requests made ${serpApiRequests}${config.serpapi ? '' : ' (SERPAPI_KEY not set — trends stage skipped)'}`)
+  console.log(
+    `run-sourcing: SerpApi requests made ${serpApiRequests} (trends + market lookups)${config.serpapi ? '' : ' (SERPAPI_KEY not set — trends and market-price stages skipped)'}`,
+  )
 
   if (result.outcome === 'agent_failed') {
     failed = true

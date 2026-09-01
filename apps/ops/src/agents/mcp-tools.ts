@@ -1,4 +1,4 @@
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
+import { createSdkMcpServer, tool, type SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { z } from 'zod'
@@ -150,7 +150,10 @@ export function createSourcingToolHandlers(deps: SourcingMcpDeps) {
 export function createSourcingMcpServer(deps: SourcingMcpDeps): ReturnType<typeof createSdkMcpServer> {
   const handlers = createSourcingToolHandlers(deps)
 
-  const tools = [
+  // Explicitly typed (rather than inferred from the array literal): the fifth tool pushed below
+  // has a different Zod shape, and TS would otherwise narrow `tools` to the union of only the
+  // first four tools' types and reject the `push` on contravariant `handler` grounds.
+  const tools: SdkMcpToolDefinition<any>[] = [
     tool(
       'get_product_detail',
       'Full CJ product detail: title, description, variants with costs, images.',

@@ -15,7 +15,8 @@ import { SOURCING_MAX_BUDGET_USD, SOURCING_MODEL, type SourcingRunDeps } from '.
 import { sourcingWeeklyHandler } from '../src/jobs/sourcing-weekly.ts'
 import { createSettings } from '../src/settings.ts'
 import { HARVEST_KEYWORDS } from '../src/sourcing/harvest.ts'
-import { runSourcingPipeline, type SourcingPipelineDeps } from '../src/sourcing/pipeline.ts'
+import { MarketLookups, type MarketOffer } from '../src/sourcing/market-price.ts'
+import { persistMarketLookups, runSourcingPipeline, type SourcingPipelineDeps, type SourcingProviders } from '../src/sourcing/pipeline.ts'
 import type { TrendsProvider } from '../src/sourcing/trends.ts'
 import type { NotifyOwner } from '../src/notify/notify.ts'
 
@@ -237,7 +238,7 @@ describe('runSourcingPipeline', () => {
       enqueue: noopEnqueue,
       notify: noopNotify,
       adminBaseUrl: 'http://localhost:3001',
-      trendsFactory: () => stubTrends(),
+      providersFactory: () => ({ trends: stubTrends(), marketPrice: null }),
       ...overrides,
     }
   }
@@ -352,7 +353,7 @@ describe('runSourcingPipeline', () => {
     const alert = vi.fn(async () => {})
 
     const result = await runSourcingPipeline(
-      baseDeps({ adapter, alert, trendsFactory: () => trends, force: true, queryFn: fakeQueryFn([]) }),
+      baseDeps({ adapter, alert, providersFactory: () => ({ trends, marketPrice: null }), force: true, queryFn: fakeQueryFn([]) }),
     )
     expect(result.outcome).toBe('completed')
     createdRunIds.push(result.runId!)
@@ -370,7 +371,9 @@ describe('runSourcingPipeline', () => {
     const winners = [winnerFor(specs[0]!)]
     const alert = vi.fn(async () => {})
 
-    const result = await runSourcingPipeline(baseDeps({ adapter, alert, trendsFactory: () => null, force: true, queryFn: fakeQueryFn(winners) }))
+    const result = await runSourcingPipeline(
+      baseDeps({ adapter, alert, providersFactory: () => ({ trends: null, marketPrice: null }), force: true, queryFn: fakeQueryFn(winners) }),
+    )
     expect(result.outcome).toBe('completed')
     expect(result.submitted).toBe(1)
     createdRunIds.push(result.runId!)
@@ -400,6 +403,104 @@ describe('runSourcingPipeline', () => {
     expect(proposalRows).toHaveLength(0)
   })
 
+  // --- market-price gate wiring -----------------------------------------------------------------
+  it('no market provider: market_price_stage_skipped warning fires, winners submit without a lookup', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const winners = [winnerFor(specs[0]!)] // no marketLookupId set — nothing requires one this run
+    const alert = vi.fn(async () => {})
+
+    const result = await runSourcingPipeline(
+      baseDeps({
+        adapter,
+        alert,
+        force: true,
+        queryFn: fakeQueryFn(winners),
+        providersFactory: () => ({ trends: stubTrends(), marketPrice: null }),
+      }),
+    )
+    expect(result.outcome).toBe('completed')
+    expect(result.submitted).toBe(1)
+    createdRunIds.push(result.runId!)
+
+    expect(alert).toHaveBeenCalledWith('warning', 'market_price_stage_skipped', expect.anything())
+  })
+
+  it('market provider present: a winner without a lookup is dropped end-to-end (armed wiring proof)', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    // The fake stream below makes no tool calls, so the run-scoped MarketLookups registry stays
+    // empty — this winner has no marketLookupId, proving the gate actually reads the registry.
+    const winners = [winnerFor(specs[0]!)]
+    const alert = vi.fn(async () => {})
+
+    const result = await runSourcingPipeline(
+      baseDeps({
+        adapter,
+        alert,
+        force: true,
+        queryFn: fakeQueryFn(winners),
+        providersFactory: () => ({ trends: stubTrends(), marketPrice: { key: 'stub', fetchOffers: async () => [] } }),
+      }),
+    )
+    expect(result.outcome).toBe('completed')
+    expect(result.submitted).toBe(0)
+    createdRunIds.push(result.runId!)
+
+    expect(alert).toHaveBeenCalledWith('warning', 'sourcing_winner_no_market_price', expect.anything())
+    expect(alert).not.toHaveBeenCalledWith('warning', 'market_price_stage_skipped', expect.anything())
+  })
+
+  it('persistMarketLookups writes market_price sourcing_signals rows and never throws', async () => {
+    const pidA = uid()
+    const pidB = uid()
+    createdPids.push(pidA, pidB)
+
+    const fiveOffers: MarketOffer[] = [1000, 1200, 1400, 1600, 1800].map((priceCents, i) => ({
+      title: `Offer ${i}`,
+      priceCents,
+      merchant: 'Some Store',
+      url: `https://example.com/offer-${i}`,
+    }))
+
+    const reg = new MarketLookups()
+    const conclusive = reg.record({ supplierProductId: pidA, query: 'dog bed', offers: fiveOffers })
+    const inconclusive = reg.record({ supplierProductId: pidB, query: 'weird thing', offers: [] })
+    expect(conclusive.medianCents).not.toBeNull()
+    expect(inconclusive.medianCents).toBeNull()
+
+    const alert = vi.fn(async () => {})
+    await persistMarketLookups(db, alert, reg.all())
+
+    const rows = await db
+      .select()
+      .from(sourcingSignals)
+      .where(and(eq(sourcingSignals.source, 'market_price'), inArray(sourcingSignals.supplierProductId, [pidA, pidB])))
+    expect(rows).toHaveLength(2)
+    expect(alert).not.toHaveBeenCalled()
+
+    const conclusiveRow = rows.find((r) => r.supplierProductId === pidA)!
+    expect(conclusiveRow.keyword).toBe('dog bed')
+    expect(conclusiveRow.score).toBe(String(conclusive.medianCents))
+    expect((conclusiveRow.snapshot as { offerCount: number }).offerCount).toBe(5)
+
+    const inconclusiveRow = rows.find((r) => r.supplierProductId === pidB)!
+    expect(inconclusiveRow.keyword).toBe('weird thing')
+    expect(inconclusiveRow.score).toBeNull()
+
+    // A second call against a poisoned db must never throw — it warns and moves on (spec §7).
+    const poisonedDb = {
+      insert: () => ({
+        values: async () => {
+          throw new Error('sourcing-pipeline test: poisoned insert')
+        },
+      }),
+    } as unknown as typeof db
+    const poisonedAlert = vi.fn(async () => {})
+    await expect(persistMarketLookups(poisonedDb, poisonedAlert, reg.all())).resolves.toBeUndefined()
+    expect(poisonedAlert).toHaveBeenCalledWith('warning', 'market_price_persist_failed', expect.anything())
+  })
+
   // --- (f) FIX C2: fresh trends provider per run ------------------------------------------------
   it('(f) FIX C2: each run constructs a FRESH trends provider from the factory (per-run request budget resets)', async () => {
     // The bug: a single TrendsProvider baked in at boot keeps one closure counter that never
@@ -409,24 +510,24 @@ describe('runSourcingPipeline', () => {
     const specs = candidateSpecs()
     const adapter = makeAdapter(specs)
     const providers: TrendsProvider[] = []
-    const trendsFactory = vi.fn((): TrendsProvider => {
+    const providersFactory = vi.fn((): SourcingProviders => {
       const provider: TrendsProvider = {
         key: 'stub',
         fetchInterest: vi.fn(async (keywords: string[]) => keywords.map((keyword) => ({ keyword, score: 80, snapshot: { keyword } }))),
       }
       providers.push(provider)
-      return provider
+      return { trends: provider, marketPrice: null }
     })
 
-    const first = await runSourcingPipeline(baseDeps({ adapter, trendsFactory, force: true, queryFn: fakeQueryFn([]) }))
+    const first = await runSourcingPipeline(baseDeps({ adapter, providersFactory, force: true, queryFn: fakeQueryFn([]) }))
     expect(first.outcome).toBe('completed')
     createdRunIds.push(first.runId!)
 
-    const second = await runSourcingPipeline(baseDeps({ adapter, trendsFactory, force: true, queryFn: fakeQueryFn([]) }))
+    const second = await runSourcingPipeline(baseDeps({ adapter, providersFactory, force: true, queryFn: fakeQueryFn([]) }))
     expect(second.outcome).toBe('completed')
     createdRunIds.push(second.runId!)
 
-    expect(trendsFactory).toHaveBeenCalledTimes(2)
+    expect(providersFactory).toHaveBeenCalledTimes(2)
     expect(providers).toHaveLength(2)
     expect(providers[0]).not.toBe(providers[1]) // distinct instance => fresh per-run request budget
   })
@@ -440,11 +541,11 @@ describe('runSourcingPipeline', () => {
     const specs = candidateSpecs()
     const adapter = makeAdapter(specs)
     const alert = vi.fn(async () => {})
-    const trendsFactory = () => {
+    const providersFactory = (): SourcingProviders => {
       throw new Error('transient failure in a pre-runner stage')
     }
 
-    await expect(runSourcingPipeline(baseDeps({ adapter, alert, force: true, trendsFactory }))).rejects.toThrow(
+    await expect(runSourcingPipeline(baseDeps({ adapter, alert, force: true, providersFactory }))).rejects.toThrow(
       'transient failure in a pre-runner stage',
     )
 
