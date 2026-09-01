@@ -4,12 +4,17 @@ import type { SourcingWinner } from '../src/agents/output-schema.ts'
 import { PointsAllowance } from '../src/agents/points.ts'
 import type { SubmitProposalDeps, SubmitProposalInput } from '../src/proposals/submit.ts'
 import type { HarvestCandidate } from '../src/sourcing/harvest.ts'
+import { MarketLookups, type MarketOffer } from '../src/sourcing/market-price.ts'
 import {
   COST_TOLERANCE_BPS,
   validateAndSubmitWinners,
   type SubmitWinnersDeps,
 } from '../src/sourcing/submit-winners.ts'
 import type { Settings } from '../src/settings.ts'
+
+function marketOffers(...cents: number[]): MarketOffer[] {
+  return cents.map((c, i) => ({ title: `o${i}`, priceCents: c, merchant: null, url: null }))
+}
 
 const RUN_ID = 'run-test-1'
 
@@ -104,6 +109,7 @@ function makeDeps(overrides: Partial<SubmitWinnersDeps> & { submit?: SubmitWinne
     submitDeps: {} as SubmitProposalDeps,
     settings: makeSettings(),
     alert: vi.fn(async () => {}),
+    marketLookups: null,
     ...overrides,
   }
 }
@@ -129,6 +135,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -165,6 +172,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -189,6 +197,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1'), winnerFor('cjp-2')],
     })
 
@@ -214,6 +223,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-999')],
     })
 
@@ -241,6 +251,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winner],
     })
 
@@ -256,6 +267,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1', { payload: { deliveryMinDays: 10, deliveryMaxDays: 3 } })],
     })
 
@@ -276,6 +288,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1', { payload: { descriptionHtml: '<p onclick="x">bad</p>' } })],
     })
 
@@ -296,6 +309,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1', { payload: { title: 'Calming Dog Bed' } })],
     })
 
@@ -316,6 +330,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -331,6 +346,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1', { payload: { title: 'Hypoallergenic Dog Bed' } })],
     })
 
@@ -350,6 +366,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1', { winner: { rationale: 'Vet approved and clinically proven durability.' } })],
     })
 
@@ -373,6 +390,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -401,6 +419,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -422,6 +441,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -448,6 +468,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [
         winnerFor('cjp-1', {
           payload: { variants: [{ sku: 'SKU-cjp-1', priceCents: 1000, supplierCostCents: 510, supplier: 'cj', supplierProductId: 'cjp-1', supplierVariantId: 'cjp-1-v1' }] },
@@ -475,6 +496,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -493,6 +515,7 @@ describe('validateAndSubmitWinners', () => {
       runId: RUN_ID,
       candidateIds,
       candidatesByPid,
+      maxPriceToMarketBps: 13000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -506,5 +529,231 @@ describe('validateAndSubmitWinners', () => {
 
   it('exposes COST_TOLERANCE_BPS as 500', () => {
     expect(COST_TOLERANCE_BPS).toBe(500)
+  })
+})
+
+describe('step 6: price-to-market gate', () => {
+  it('gate skipped when marketLookups is null: winner submits, summary has NO market clause', async () => {
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({
+      id: 'proposal-1',
+      status: 'pending' as const,
+    }))
+    const deps = makeDeps({ submit }) // marketLookups: null by default
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1')],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    expect(submit).toHaveBeenCalledTimes(1)
+    const [, submitInput] = submit.mock.calls[0]!
+    expect(submitInput.summary).not.toMatch(/market \$/)
+  })
+
+  it('armed + no marketLookupId -> dropped sourcing_winner_no_market_price (reason missing), BEFORE any CJ call', async () => {
+    const alert = vi.fn(async () => {})
+    const deps = makeDeps({ marketLookups: new MarketLookups(), alert })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1')], // no marketLookupId
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_no_market_price' }])
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'sourcing_winner_no_market_price',
+      expect.objectContaining({
+        runId: RUN_ID,
+        supplierProductId: 'cjp-1',
+        detail: expect.objectContaining({ marketLookupId: null, reason: 'missing' }),
+      }),
+    )
+    expect(deps.adapter.getProduct).not.toHaveBeenCalled()
+  })
+
+  it('armed + lookup for a DIFFERENT pid -> dropped (pid_mismatch)', async () => {
+    const alert = vi.fn(async () => {})
+    const registry = new MarketLookups()
+    registry.record({ supplierProductId: 'other-pid', query: 'q', offers: marketOffers(1, 2, 3, 4, 5) })
+    const deps = makeDeps({ marketLookups: registry, alert })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1', { winner: { marketLookupId: 'mkt_1' } })],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_no_market_price' }])
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'sourcing_winner_no_market_price',
+      expect.objectContaining({
+        runId: RUN_ID,
+        supplierProductId: 'cjp-1',
+        detail: expect.objectContaining({ reason: 'pid_mismatch' }),
+      }),
+    )
+    expect(deps.adapter.getProduct).not.toHaveBeenCalled()
+  })
+
+  it('armed + inconclusive lookup (4 offers) -> dropped (inconclusive)', async () => {
+    const alert = vi.fn(async () => {})
+    const registry = new MarketLookups()
+    registry.record({ supplierProductId: 'cjp-1', query: 'q', offers: marketOffers(100, 200, 300, 400) })
+    const deps = makeDeps({ marketLookups: registry, alert })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1', { winner: { marketLookupId: 'mkt_1' } })],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_no_market_price' }])
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'sourcing_winner_no_market_price',
+      expect.objectContaining({
+        runId: RUN_ID,
+        supplierProductId: 'cjp-1',
+        detail: expect.objectContaining({ reason: 'inconclusive' }),
+      }),
+    )
+    expect(deps.adapter.getProduct).not.toHaveBeenCalled()
+  })
+
+  it('median variant price at the ceiling passes; one cent above drops with full detail', async () => {
+    // median(2000, 2400, 2499, 2600, 3000) = 2499; ceiling = floor(2499 * 13000 / 10000) = 3248
+    const alert = vi.fn(async () => {})
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({
+      id: 'proposal-1',
+      status: 'pending' as const,
+    }))
+    const registry = new MarketLookups()
+    registry.record({ supplierProductId: 'cjp-1', query: 'q', offers: marketOffers(2000, 2400, 2499, 2600, 3000) })
+    // Margin floor lowered to 0: at priceCents 3248 with live cost 1000 and freight 500, margin is
+    // ~5381bps — below the file's default 6000bps floor. This test is about the price-to-market
+    // gate (step 6), not the margin gate (step 8), so the floor is relaxed to isolate it.
+    const deps = makeDeps({ marketLookups: registry, alert, submit, settings: makeSettings(0) })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const atCeiling = winnerFor('cjp-1', {
+      payload: {
+        variants: [
+          { sku: 'SKU-cjp-1-a', priceCents: 3248, supplierCostCents: 1050, supplier: 'cj', supplierProductId: 'cjp-1', supplierVariantId: 'cjp-1-v1' },
+        ],
+      },
+      winner: { marketLookupId: 'mkt_1' },
+    })
+    const oneCentAbove = winnerFor('cjp-1', {
+      payload: {
+        variants: [
+          { sku: 'SKU-cjp-1-b', priceCents: 3249, supplierCostCents: 1050, supplier: 'cj', supplierProductId: 'cjp-1', supplierVariantId: 'cjp-1-v1' },
+        ],
+      },
+      winner: { marketLookupId: 'mkt_1' },
+    })
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [atCeiling, oneCentAbove],
+    })
+
+    expect(outcomes).toEqual([
+      { supplierProductId: 'cjp-1', outcome: 'submitted' },
+      { supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_price_above_market' },
+    ])
+    const [, submitInput] = submit.mock.calls[0]!
+    expect(submitInput.summary).toContain('market $24.99 median ×1.30')
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'sourcing_winner_price_above_market',
+      expect.objectContaining({
+        runId: RUN_ID,
+        supplierProductId: 'cjp-1',
+        detail: expect.objectContaining({
+          typicalCents: 3249,
+          medianCents: 2499,
+          ceilingCents: 3248,
+          maxPriceToMarketBps: 13000,
+        }),
+      }),
+    )
+  })
+
+  it('multi-variant: the MEDIAN variant price is gated (upper-middle on even counts)', async () => {
+    // median(2000, 2400, 2499, 2600, 3000) = 2499; ceiling = floor(2499 * 13000 / 10000) = 3248
+    function multiVariantPayload(pid: string, prices: number[], tag: string) {
+      return {
+        variants: prices.map((price, i) => ({
+          sku: `SKU-${pid}-${tag}-${i}`,
+          priceCents: price,
+          supplierCostCents: 1050,
+          supplier: 'cj',
+          supplierProductId: pid,
+          supplierVariantId: `${pid}-${tag}-${i}`,
+        })),
+      }
+    }
+
+    const registry = new MarketLookups()
+    registry.record({ supplierProductId: 'cjp-1', query: 'q', offers: marketOffers(2000, 2400, 2499, 2600, 3000) })
+
+    // Only the passing winner's variants ever reach CJ re-verification (the dropped winner is
+    // caught by the gate first) — live cost 1000, matching the file's existing winnerFor defaults.
+    const adapter = makeAdapter({
+      getProduct: async (pid) => ({
+        supplierProductId: pid,
+        title: 'CJ Dog Bed',
+        imageUrls: [],
+        variants: [0, 1, 2, 3].map((i) => ({ supplierVariantId: `${pid}-pass-${i}`, priceCents: 1000 })),
+      }),
+    })
+    // Margin floor lowered to 0 for the same reason as the ceiling test above — the lowest-priced
+    // variant here (1999c) would otherwise fail the unrelated margin gate (step 8).
+    const deps = makeDeps({ marketLookups: registry, adapter, settings: makeSettings(0) })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    // sorted [1999, 3249, 3300, 5999] -> index floor(4*0.5)=2 -> 3300 -> DROPPED (3300 > 3248)
+    const dropped = winnerFor('cjp-1', {
+      payload: multiVariantPayload('cjp-1', [1999, 3249, 3300, 5999], 'drop'),
+      winner: { marketLookupId: 'mkt_1' },
+    })
+    // sorted [1999, 3200, 3248, 5999] -> index floor(4*0.5)=2 -> 3248 -> PASSES (3248 == 3248)
+    const passed = winnerFor('cjp-1', {
+      payload: multiVariantPayload('cjp-1', [1999, 3200, 3248, 5999], 'pass'),
+      winner: { marketLookupId: 'mkt_1' },
+    })
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [dropped, passed],
+    })
+
+    expect(outcomes).toEqual([
+      { supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_price_above_market' },
+      { supplierProductId: 'cjp-1', outcome: 'submitted' },
+    ])
   })
 })

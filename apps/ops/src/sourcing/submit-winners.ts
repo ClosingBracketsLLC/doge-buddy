@@ -7,6 +7,7 @@ import { submitProposal, type SubmitProposalDeps } from '../proposals/submit.ts'
 import type { Settings } from '../settings.ts'
 import { findClaimViolations, htmlToText, matchExcludedCategory, validateDescriptionHtml } from './guards.ts'
 import type { HarvestCandidate } from './harvest.ts'
+import { quantileCents, type MarketLookups } from './market-price.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -25,6 +26,10 @@ export interface SubmitWinnersDeps {
   submitDeps: SubmitProposalDeps
   settings: Settings
   alert: Alert
+  /** The run's recorded market lookups, or null when the market-price provider was absent this
+   *  run (no SERPAPI_KEY) — null SKIPS step 6 entirely (spec Decision 5). Required, not optional:
+   *  every caller must decide, absence is not a default. */
+  marketLookups: MarketLookups | null
 }
 
 export interface WinnerOutcome {
@@ -38,6 +43,8 @@ export interface ValidateAndSubmitWinnersInput {
   candidateIds: Set<string>
   candidatesByPid: Map<string, HarvestCandidate>
   winners: SourcingWinner[]
+  /** Resolved `sourcing.max_price_to_market_bps` knob (Stage 0) — the step-6 ceiling in bps. */
+  maxPriceToMarketBps: number
 }
 
 function errMessage(err: unknown): string {
@@ -116,7 +123,39 @@ async function processWinner(
     return drop('claims_scrubbed', { terms: claimHits })
   }
 
-  // Step 6: ground-truth re-verification against CJ (spends from the run's shared allowance).
+  // Step 6: price-to-market gate (spec 2026-09-01 market-price §6 / Decisions 2-5). Runs BEFORE
+  // the CJ steps because it is free — a registry read — while steps 7-8 spend CJ points. Reads
+  // ONLY what the tool handler recorded (MarketLookups), never a number the agent typed; the
+  // agent's marketLookupId is a key, and a key for the wrong product is as dead as no key.
+  let marketClause = ''
+  if (deps.marketLookups !== null) {
+    const lookup = winner.marketLookupId ? deps.marketLookups.get(winner.marketLookupId) : undefined
+    if (!lookup || lookup.supplierProductId !== pid || lookup.medianCents == null) {
+      const reason = !lookup ? 'missing' : lookup.supplierProductId !== pid ? 'pid_mismatch' : 'inconclusive'
+      return drop('sourcing_winner_no_market_price', {
+        marketLookupId: winner.marketLookupId ?? null,
+        reason,
+        query: lookup?.query,
+        offerCount: lookup?.offerCount,
+      })
+    }
+    // Integer bps arithmetic, floored — a ceiling a hair under is never rounded up (mirrors step 8).
+    const ceilingCents = Math.floor((lookup.medianCents * input.maxPriceToMarketBps) / 10_000)
+    const typicalCents = quantileCents(payload.variants.map((v) => v.priceCents).sort((a, b) => a - b), 0.5)
+    if (typicalCents > ceilingCents) {
+      return drop('sourcing_winner_price_above_market', {
+        typicalCents,
+        medianCents: lookup.medianCents,
+        ceilingCents,
+        maxPriceToMarketBps: input.maxPriceToMarketBps,
+        query: lookup.query,
+        offerCount: lookup.offerCount,
+      })
+    }
+    marketClause = `, market $${(lookup.medianCents / 100).toFixed(2)} median ×${(typicalCents / lookup.medianCents).toFixed(2)}`
+  }
+
+  // Step 7: ground-truth re-verification against CJ (spends from the run's shared allowance).
   // Every payload variant's supplierVariantId must exist under the live product; live cost must
   // be within tolerance of the agent's claimed cost — on pass, the LIVE figure overwrites the
   // payload (fulfillment pays what CJ actually charges, never the agent's guess). Verified US
@@ -158,7 +197,7 @@ async function processWinner(
     return drop('sourcing_winner_unverifiable', { error: errMessage(err) })
   }
 
-  // Step 7: freight-inclusive margin re-check, mirroring the live fulfillment gate in plan.ts
+  // Step 8: freight-inclusive margin re-check, mirroring the live fulfillment gate in plan.ts
   // exactly: `Math.floor(((total - projected) * 10_000) / total)` — integer bps, floored, never
   // rounded, so a margin a hair under the floor never gets rounded up into a false pass.
   let freightCents: number
@@ -193,9 +232,9 @@ async function processWinner(
     if (marginBps < minMarginBps) minMarginBps = marginBps
   }
 
-  // Step 8: submit. The summary is composed by plain code from the already-scrubbed title and
+  // Step 9: submit. The summary is composed by plain code from the already-scrubbed title and
   // the code-computed margin, never from free agent text.
-  const summary = `New listing: ${payload.title} — ${payload.variants.length} variant(s), margin ${minMarginBps}bps`
+  const summary = `New listing: ${payload.title} — ${payload.variants.length} variant(s), margin ${minMarginBps}bps${marketClause}`
   try {
     await deps.submit(deps.submitDeps, {
       type: 'new_listing',
