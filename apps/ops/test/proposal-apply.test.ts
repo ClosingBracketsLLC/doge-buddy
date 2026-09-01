@@ -5,7 +5,7 @@ import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SendOpts } from '../src/fulfillment/types.ts'
 import { INVENTORY_SYNC_QUEUE } from '../src/jobs/inventory-sync.ts'
-import { resetLocationCache } from '../src/proposals/apply-new-listing.ts'
+import { resetLocationCache, usQuantity } from '../src/proposals/apply-new-listing.ts'
 import {
   deadLetterApplyProposal, executeApplyProposal, proposalHandle, type ProposalShopifyOps,
 } from '../src/proposals/run-apply.ts'
@@ -26,9 +26,12 @@ function newListingPayload() {
 const FIXTURE_LOCATION_ID = 'gid://shopify/Location/1'
 
 /** CJ's `getVariantStock` answer for the fixture variant: two US warehouse rows plus a CN one.
- * The executor must sum ONLY the US rows (4 + 3 = 7) and ignore CN entirely — a Chinese warehouse
- * cannot serve the 3-7 day US delivery promise the listing's own metafields make. */
-const FIXTURE_US_STOCK = 7
+ * The listed quantity is the LARGEST SINGLE US warehouse (4), not the sum (7) and never CN's 99:
+ * `fulfillment/plan.ts`'s stockout gate requires ONE warehouse entry to cover the whole order
+ * (`usEntries.some((e) => e.quantity >= needed)`), so listing the sum would advertise stock that
+ * gate will refuse to fulfill. CN is out regardless — it cannot serve the 3-7 day US delivery
+ * promise the listing's own metafields make. */
+const FIXTURE_US_STOCK = 4
 function fixtureStock(): WarehouseStock[] {
   return [
     { countryCode: 'US', quantity: 4, verified: true },
@@ -971,7 +974,10 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       .select()
       .from(supplierVariantMappings)
       .where(eq(supplierVariantMappings.variantId, variantRow!.id))
-    expect(mapping!.lastKnownStock).toBe(0)
+    // Shopify gets a 0 (safe under-sell); the local cache records NO observation rather than a
+    // confident zero — there is nothing to know yet, and test 21 covers why that distinction pays.
+    expect(mapping!.lastKnownStock).toBeNull()
+    expect(mapping!.stockCheckedAt).toBeNull()
   })
 
   // ---------------------------------------------------------------------------
@@ -1040,5 +1046,99 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     expect((await loadProposal(rowA.id))!.status).toBe('applied')
     expect((await loadProposal(rowB.id))!.status).toBe('applied')
     expect(locationSpy).toHaveBeenCalledTimes(1)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 19. The listable quantity is the largest SINGLE US warehouse, never the sum — review round 1.
+  // `fulfillment/plan.ts`'s Gate 4 needs one warehouse to cover the whole order, so a summed
+  // quantity is stock the fulfillment pipeline will refuse to ship.
+  // ---------------------------------------------------------------------------
+  it('19. usQuantity takes the largest single US warehouse, ignores non-US, floors at 0', () => {
+    expect(usQuantity(fixtureStock())).toBe(4)
+    expect(usQuantity([])).toBe(0)
+    expect(usQuantity([{ countryCode: 'CN', quantity: 99, verified: true }])).toBe(0)
+    expect(usQuantity([{ countryCode: 'US', quantity: -5, verified: true }])).toBe(0)
+    expect(usQuantity([
+      { countryCode: 'US', quantity: 2, verified: true },
+      { countryCode: 'US', quantity: 11, verified: false },
+    ])).toBe(11)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 20. The ACTIVE flip is a second `productSet` on the same product. Whether Shopify preserves
+  // fields an input omits is not live-verified, so the catalog scalars ride along on that call
+  // too — variants/files deliberately do NOT (re-sending those would rewrite inventory and
+  // re-upload media).
+  // ---------------------------------------------------------------------------
+  it('20. the ACTIVE productSet call re-sends tags/productType/seo, and never variants or files', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const payload = row.payload as ReturnType<typeof newListingPayload>
+    const shopify = fakeShopify()
+    const productSetSpy = vi.spyOn(shopify, 'productSet')
+    const alert = vi.fn(async () => {})
+
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    const activeCall = productSetSpy.mock.calls.find(([input]) => (input as { status?: string }).status === 'ACTIVE')
+    expect(activeCall).toBeDefined()
+    const activeInput = activeCall![0] as Record<string, unknown>
+    expect(activeInput.id).toBe(productRow!.shopifyProductGid)
+    expect(activeInput.tags).toEqual([categoryTagValue('toys')])
+    expect(activeInput.productType).toBe(categoryByTag('toys').productType)
+    expect(activeInput.seo).toEqual({ title: payload.title, description: 'x' })
+    expect(activeInput.variants).toBeUndefined()
+    expect(activeInput.files).toBeUndefined()
+  })
+
+  // ---------------------------------------------------------------------------
+  // 21. A failed stock read must not overwrite a good `last_known_stock` with a confident 0.
+  // Shopify still gets 0 for a fresh listing (safe: under-sell), but the local cache keeps the
+  // last reading it actually took, timestamp and all.
+  // ---------------------------------------------------------------------------
+  it('21. a failed stock read leaves an existing last_known_stock/stock_checked_at untouched', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const payload = row.payload as ReturnType<typeof newListingPayload>
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+
+    // First apply: a healthy read lands the mapping row.
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, row.id)
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, payload.variants[0]!.sku))
+
+    // Pin a known-good prior observation, then re-enter the apply (the crash-retry path) with CJ down.
+    const priorCheckedAt = new Date('2026-08-01T00:00:00.000Z')
+    await db
+      .update(supplierVariantMappings)
+      .set({ lastKnownStock: 7, stockCheckedAt: priorCheckedAt })
+      .where(eq(supplierVariantMappings.variantId, variantRow!.id))
+    await db.update(proposals).set({ status: 'applying' }).where(eq(proposals.id, row.id))
+
+    await executeApplyProposal(
+      {
+        db,
+        alert,
+        shopify,
+        adapter: fakeAdapter({
+          getVariantStock: async () => {
+            throw new Error('cj stock unavailable')
+          },
+        }),
+        ...baseDeps(),
+      },
+      row.id,
+    )
+
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+    const [mapping] = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantRow!.id))
+    expect(mapping!.lastKnownStock).toBe(7)
+    expect(mapping!.stockCheckedAt).toEqual(priorCheckedAt)
   })
 })

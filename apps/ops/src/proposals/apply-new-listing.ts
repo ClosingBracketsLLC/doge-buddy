@@ -1,5 +1,6 @@
 import { categoryByTag, categoryTagValue, centsToUsd, NewListingPayloadSchema } from '@doge-buddy/core'
 import { auditLog, products, productVariants, supplierVariantMappings } from '@doge-buddy/db'
+import type { WarehouseStock } from '@doge-buddy/supplier'
 import { eq, sql } from 'drizzle-orm'
 import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts } from '../jobs/inventory-sync.ts'
 import { applyProposalTransition } from './transitions.ts'
@@ -46,22 +47,41 @@ function seoDescription(descriptionHtml: string): string {
 }
 
 /**
- * How many units CJ can ship from a US warehouse for one supplier variant — the quantity a new
- * listing's Shopify inventory is born with.
+ * The sellable quantity for one supplier variant: the LARGEST SINGLE US warehouse, floored at 0.
  *
- * US-only on purpose: the listing's own `ships_from`/delivery metafields promise a US-warehouse
- * dispatch, so CN stock is not stock we can sell against without breaking that promise. A read
- * that throws yields 0 rather than propagating: a listing the owner already approved must not be
- * lost to a flaky supplier call, and 0 is the safe direction — it under-sells (the sync job,
- * Task 5, corrects it on its next pass) where a guessed number would oversell.
+ * Not the sum, and this is the whole subtlety. `fulfillment/plan.ts`'s Gate 4 refuses an order
+ * unless ONE US warehouse entry covers the entire needed quantity
+ * (`usEntries.some((entry) => entry.quantity >= needed)`) — CJ ships an order from a single
+ * warehouse, not by splitting it. Listing 4 + 3 = 7 units across two warehouses would therefore
+ * advertise stock that the fulfillment pipeline will later refuse to ship: an oversell that
+ * surfaces as a `stockout` needs-attention *after* the customer has paid.
  *
- * Task 5 moves the pure sum into the sync job's module, where both producers can share it.
+ * US-only for a separate reason: the listing's own `ships_from`/delivery metafields promise a
+ * US-warehouse dispatch, so CN stock is not stock we can sell against without breaking that
+ * promise.
+ *
+ * Exported because Task 5's sync job must apply the identical rule — the number it pushes on every
+ * later pass has to mean the same thing as the number the listing was born with. It moves into the
+ * sync job's module when that lands.
  */
-async function readUsStock(deps: ApplyProposalDeps, supplierVariantId: string): Promise<number> {
+export function usQuantity(stock: WarehouseStock[]): number {
+  const us = stock.filter((w) => w.countryCode === 'US').map((w) => w.quantity)
+  return us.length === 0 ? 0 : Math.max(0, ...us)
+}
+
+/**
+ * `usQuantity` over a live CJ read, or `null` when the read itself failed.
+ *
+ * `null` is NOT the same as 0 and the two must not be conflated. Shopify's brand-new listing still
+ * gets 0 for a failed read (safe: it under-sells, and the sync job corrects it on its next pass) —
+ * but the local `last_known_stock` cache must keep whatever reading it last actually took, because
+ * "CJ was unreachable for 30 seconds" is not an observation that the warehouse is empty. Writing a
+ * confident 0 there would silently destroy a good value on every retry of a listing whose apply
+ * happened to coincide with a supplier hiccup.
+ */
+async function readUsStock(deps: ApplyProposalDeps, supplierVariantId: string): Promise<number | null> {
   try {
-    const warehouses = await deps.adapter.getVariantStock(supplierVariantId)
-    const us = warehouses.filter((w) => w.countryCode === 'US').reduce((sum, w) => sum + w.quantity, 0)
-    return Math.max(0, us)
+    return usQuantity(await deps.adapter.getVariantStock(supplierVariantId))
   } catch (err) {
     await deps
       .alert('warning', 'listing_stock_read_failed', {
@@ -69,7 +89,7 @@ async function readUsStock(deps: ApplyProposalDeps, supplierVariantId: string): 
         error: err instanceof Error ? err.message : String(err),
       })
       .catch(() => {})
-    return 0
+    return null
   }
 }
 
@@ -96,6 +116,26 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
   const payload = NewListingPayloadSchema.parse(row.payload)
   const handle = proposalHandle(proposalId, payload.title)
   const category = categoryByTag(payload.categoryTag)
+  /**
+   * The merchandising scalars, hoisted because BOTH `productSet` calls below send them.
+   *
+   * The second call (the DRAFT -> ACTIVE flip) is a full `productSet` on the same product, and
+   * whether Shopify preserves fields an input omits is not something this repo has verified live.
+   * Re-sending these three costs nothing and removes the question entirely. What must NEVER ride
+   * along on that call is `variants` or `files` — those would rewrite inventory quantities the
+   * store may have moved on from and re-upload the media.
+   */
+  const catalogFields = {
+    // The tag the automated collections key on, and the storefront's own category vocabulary —
+    // both derived from `@doge-buddy/core`'s CATEGORIES so a product cannot be born into a
+    // category the store doesn't render.
+    tags: [categoryTagValue(payload.categoryTag)],
+    productType: category.productType,
+    seo: {
+      title: payload.title.slice(0, SEO_TITLE_MAX),
+      description: seoDescription(payload.descriptionHtml),
+    },
+  }
 
   // 0. CJ's US stock per payload variant, read BEFORE the product is resolved so both paths below
   // get it: the create path seeds Shopify's inventory levels with it, and every path — create or
@@ -103,7 +143,8 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
   // a resumed listing's `last_known_stock` permanently null, which is exactly the class of
   // resume-path hole the variant-gid backfill in step 3 below already had to be fixed for.
   const stockCheckedAt = new Date()
-  const stockBySku = new Map<string, number>()
+  // `null` = the read failed (see `readUsStock`); 0 = CJ genuinely has none.
+  const stockBySku = new Map<string, number | null>()
   for (const v of payload.variants) {
     stockBySku.set(v.sku, await readUsStock(deps, v.supplierVariantId))
   }
@@ -128,15 +169,7 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
       handle,
       descriptionHtml: payload.descriptionHtml,
       status: 'DRAFT',
-      // The tag the automated collections key on, and the storefront's own category vocabulary —
-      // both derived from `@doge-buddy/core`'s CATEGORIES so a product cannot be born into a
-      // category the store doesn't render.
-      tags: [categoryTagValue(payload.categoryTag)],
-      productType: category.productType,
-      seo: {
-        title: payload.title.slice(0, SEO_TITLE_MAX),
-        description: seoDescription(payload.descriptionHtml),
-      },
+      ...catalogFields,
       productOptions: [{
         name: 'Title',
         values: payload.variants.map((v, i, all) => ({ name: all.length === 1 ? 'Default Title' : v.sku })),
@@ -215,26 +248,33 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
       throw new Error(`sku collision: ${v.sku} already belongs to another product`)
     }
     // Unlike the identity columns above, the stock pair is NOT first-write-wins: it is a
-    // timestamped observation, and a re-applied listing has just taken a fresher one. Overwriting
-    // is the point — a stale `last_known_stock` is worse than no read at all.
+    // timestamped observation, and a re-applied listing that took a FRESH one should overwrite —
+    // a stale `last_known_stock` is worse than the new reading. But only a real reading counts:
+    // when the read failed (`null`), both columns go in null and the `coalesce(excluded, existing)`
+    // on conflict keeps whatever was already there, so a supplier hiccup during a retry can never
+    // regress a good value to 0. The pair moves together — a quantity without its timestamp, or a
+    // timestamp implying a reading that never happened, is worse than either alone.
+    const observed = stockBySku.get(v.sku) ?? null
     await db.insert(supplierVariantMappings).values({
       variantId: variantRow!.id, supplier: v.supplier,
       supplierProductId: v.supplierProductId, supplierVariantId: v.supplierVariantId,
-      lastKnownStock: stockBySku.get(v.sku) ?? 0, stockCheckedAt,
+      lastKnownStock: observed, stockCheckedAt: observed === null ? null : stockCheckedAt,
     }).onConflictDoUpdate({
       target: [supplierVariantMappings.variantId, supplierVariantMappings.supplier],
       set: {
-        lastKnownStock: sql`excluded.last_known_stock`,
-        stockCheckedAt: sql`excluded.stock_checked_at`,
+        lastKnownStock: sql`coalesce(excluded.last_known_stock, ${supplierVariantMappings.lastKnownStock})`,
+        stockCheckedAt: sql`coalesce(excluded.stock_checked_at, ${supplierVariantMappings.stockCheckedAt})`,
       },
     })
   }
 
   // 3b. Hand the product to the inventory sync job (Task 5). Strictly after the local rows exist —
-  // the job resolves the product by its local id — and strictly best-effort: the listing itself is
-  // already correct in Shopify by this point, so a queue that is momentarily unreachable costs us
-  // a refresh, not the listing. The queue's `singletonKey` is the product id, so the retry a
-  // thrown apply triggers cannot pile up duplicate syncs either.
+  // the job resolves the product by its local id. The product is still DRAFT at this point (step 4
+  // flips it), which changes nothing about the argument: the sync job is a *refresher* of an
+  // inventory the create call already seeded correctly, so a queue that is momentarily unreachable
+  // costs a refresh, never the listing — hence best-effort, alert, and carry on. The queue's
+  // `singletonKey` is the product id, so the retry a thrown apply triggers cannot pile up
+  // duplicate syncs either.
   try {
     await deps.enqueue(INVENTORY_SYNC_QUEUE, { productId: productRow!.id }, inventorySyncSendOpts(productRow!.id))
   } catch (err) {
@@ -245,7 +285,7 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     }).catch(() => {})
   }
   // 4. ACTIVE + publish. Online Store success is required for 'applied'; others alert-and-continue.
-  await deps.shopify.productSet({ id: productGid, status: 'ACTIVE' })
+  await deps.shopify.productSet({ id: productGid, status: 'ACTIVE', ...catalogFields })
   const publications = await deps.shopify.listPublications()
   for (const pub of publications) {
     try {
