@@ -78,7 +78,7 @@ labels, 3-column grid, `main` max-width 1200 px).
 
 ## 2. Shell
 
-`layout(title, body, nav?: NavCounts)` where `NavCounts = { pendingProposals: number; escalatedTickets: number }`.
+`layout(title, body, shell?: { path: string; counts: NavCounts })` where `NavCounts = { pendingProposals: number; escalatedTickets: number }` — the shell (top bar + tabs + badges) renders only when `shell` is passed.
 Markup:
 
 ```
@@ -93,16 +93,15 @@ Markup:
 <main>{body}</main>
 ```
 
-`aria-current="page"` is set from the `title`→path map already implied by `NAV` (layout gets the
-current path via a third param `{ path }` — passed by the `page()` helper, below). Badges render only
+`aria-current="page"` goes on the tab whose href is `shell.path` or a prefix of it (`/admin` only on an exact match). Badges render only
 when the count is > 0; Tickets' badge uses the `bad` color (escalated = customer waiting). Under
 640 px `.tabs` is `position: fixed; bottom: 0` with five equal cells; the `More` cell opens upward
 (`details` positioned absolute above the bar). ≥ 640 px `.tabs` is a sticky left rail and `More`'s
 three links render inline as ordinary rail items (CSS shows `summary` hidden, children visible).
 
-**`page()` helper** in `routes.ts`: `const page = async (title, body, path) => layout(title, body, { path, counts: await loadNavCounts(deps) })`
+**`page()` helper** in `routes.ts`: `const page = async (title: string, body: RawHtml, path: string) => layout(title, body, { path, counts: await loadNavCounts(deps) })`
 replaces every authed `layout(...)` call (login/consume pages keep plain `layout` — no counts, no
-tabs: `layout()` renders the tab bar only when `counts` is passed). `loadNavCounts(deps)` in a new
+tabs: `layout()` renders the shell only when `shell` is passed). `loadNavCounts(deps)` in a new
 `nav.ts`: two `count()` queries (`proposals.status = 'pending'`, `support_tickets.status = 'escalated'`),
 wrapped in try/catch → zeros, never a 500 for a badge.
 
@@ -113,9 +112,9 @@ through `page()` too so they keep the shell.
 
 `loadHealthStrip` is extended (same file, same `Promise.all`) with:
 `escalatedTickets`, `ordersNeedsAttention` (count of `supplier_orders.status = 'needs_attention'`),
-`sourcingLastRun: { status, startedAt } | null` (newest `agent_runs` row whose `workflow` is the
-sourcing pipeline's key — read the constant `startAgentRun` is called with in `sourcing/pipeline.ts`,
-do not hardcode a guess), `inventorySyncLastAt: Date | null` (newest `audit_log` row with
+`sourcingLastRun: { status, startedAt } | null` (newest `agent_runs` row with `workflow = 'sourcing.weekly'` —
+the key `sourcing/pipeline.ts` records for every sourcing run, manual or cron; export it from there
+as `SOURCING_WORKFLOW` rather than duplicating the literal), `inventorySyncLastAt: Date | null` (newest `audit_log` row with
 `action = 'inventory.synced'`), `inventorySyncDegraded: boolean` (an `inventory_sync_degraded` alert
 audit row newer than `inventorySyncLastAt`), `activeProducts`, `trackedVariants` (variants with a
 non-null `shopify_inventory_item_gid` on active products), `latestListing: { title, handle, createdAt } | null`
