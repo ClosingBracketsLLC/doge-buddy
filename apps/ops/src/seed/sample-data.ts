@@ -22,14 +22,14 @@ export const METAFIELD_DEFINITIONS: MetafieldDefinition[] = [
 export interface SeedCollection {
   title: string
   handle: string
-  tagCondition: string
+  tagValue: string
 }
 
 export const COLLECTIONS: SeedCollection[] = [
-  { title: 'Toys & Play', handle: 'toys-play', tagCondition: 'category:toys-play' },
-  { title: 'Walks & Travel', handle: 'walks-travel', tagCondition: 'category:walks-travel' },
-  { title: 'Beds & Comfort', handle: 'beds-comfort', tagCondition: 'category:beds-comfort' },
-  { title: 'Grooming & Care', handle: 'grooming-care', tagCondition: 'category:grooming-care' },
+  { title: 'Toys & Play', handle: 'toys-play', tagValue: 'category:toys-play' },
+  { title: 'Walks & Travel', handle: 'walks-travel', tagValue: 'category:walks-travel' },
+  { title: 'Beds & Comfort', handle: 'beds-comfort', tagValue: 'category:beds-comfort' },
+  { title: 'Grooming & Care', handle: 'grooming-care', tagValue: 'category:grooming-care' },
 ]
 
 export interface SampleProduct {

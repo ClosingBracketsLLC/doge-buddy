@@ -377,8 +377,20 @@ describe('listMetafieldDefinitions', () => {
 })
 
 describe('collectionCreate', () => {
-  const input = { title: 'Doge Tees', handle: 'doge-tees', tagCondition: 'doge-tees' }
-  it('builds a smart collection ruleSet, maps id', async () => {
+  const input = { title: 'Doge Tees', handle: 'doge-tees', tagValue: 'doge-tees' }
+  const expectedSources = [
+    {
+      source: {
+        title: 'Tagged doge-tees',
+        targetType: 'PRODUCTS',
+        inclusion: {
+          matchType: 'ALL',
+          conditions: [{ productTag: { relation: 'TAGGED_WITH', values: ['doge-tees'], matchType: 'ANY' } }],
+        },
+      },
+    },
+  ]
+  it('builds a tag-sourced smart collection, maps id', async () => {
     const { client, calls } = makeClient(() =>
       gql({ collectionCreate: { collection: { id: 'gid://shopify/Collection/1' }, userErrors: [] } }))
     const result = await collectionCreate(client, input)
@@ -386,13 +398,10 @@ describe('collectionCreate', () => {
     const { query, variables } = lastGraphqlCall(calls)
     expect(query).toMatch(/mutation[\s\S]*collectionCreate/)
     expect(variables).toEqual({
-      input: {
+      collection: {
         title: 'Doge Tees',
         handle: 'doge-tees',
-        ruleSet: {
-          appliedDisjunctively: false,
-          rules: [{ column: 'TAG', relation: 'EQUALS', condition: 'doge-tees' }],
-        },
+        sources: expectedSources,
       },
     })
   })
@@ -402,14 +411,11 @@ describe('collectionCreate', () => {
     await collectionCreate(client, { ...input, descriptionHtml: '<p>Doge tees</p>' })
     const { variables } = lastGraphqlCall(calls)
     expect(variables).toEqual({
-      input: {
+      collection: {
         title: 'Doge Tees',
         handle: 'doge-tees',
         descriptionHtml: '<p>Doge tees</p>',
-        ruleSet: {
-          appliedDisjunctively: false,
-          rules: [{ column: 'TAG', relation: 'EQUALS', condition: 'doge-tees' }],
-        },
+        sources: expectedSources,
       },
     })
   })
@@ -418,7 +424,7 @@ describe('collectionCreate', () => {
       gql({ collectionCreate: { collection: { id: 'gid://shopify/Collection/1' }, userErrors: [] } }))
     await collectionCreate(client, input)
     const { variables } = lastGraphqlCall(calls)
-    expect((variables as any).input).not.toHaveProperty('descriptionHtml')
+    expect((variables as any).collection).not.toHaveProperty('descriptionHtml')
   })
   it('throws ShopifyUserError on userErrors', async () => {
     const { client } = makeClient(() =>
@@ -506,7 +512,8 @@ describe('productUpdate', () => {
     await expect(productUpdate(client, input)).resolves.toBeUndefined()
     const { query, variables } = lastGraphqlCall(calls)
     expect(query).toMatch(/mutation[\s\S]*productUpdate/)
-    expect(variables).toEqual({ input })
+    expect(query).toMatch(/productUpdate\(product: \$product\)/)
+    expect(variables).toEqual({ product: input })
   })
   it('throws ShopifyUserError on userErrors', async () => {
     const { client } = makeClient(() =>

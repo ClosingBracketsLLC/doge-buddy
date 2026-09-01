@@ -34,9 +34,15 @@ export async function listPublications(client: ShopifyAdminClient): Promise<{ id
 // productSet
 // ---------------------------------------------------------------------------
 
-// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:
-//  - `ProductVariant.inventoryItem` is a non-null singular field (every variant tracks exactly one
-//    inventory item), so `inventoryItem { id }` needs no null-guard on the selection itself.
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema:
+//  - `ProductVariant.inventoryItem { id }` is a valid, selectable field.
+//  - `ProductSetInput` confirmed to carry `tags`, `productType`, `seo`, `handle`, among others —
+//    the same fields `productUpdate` below exposes individually.
+//  - `ProductVariantSetInput` (the shape of each entry in `productSet`'s `input.variants`)
+//    confirmed to carry `inventoryQuantities`, `inventoryItem`, `inventoryPolicy`, among others.
+//  Non-null-ness of `inventoryItem` itself was not separately probed by the introspection run;
+//  the mapping below still assumes every variant has one (every product variant does track
+//  exactly one inventory item in practice), so `v.inventoryItem.id` needs no null-guard.
 const PRODUCT_SET_MUTATION = `#graphql
   mutation ProductSet($input: ProductSetInput!) {
     productSet(input: $input) {
@@ -78,6 +84,9 @@ export async function productSet(
 // publishablePublish
 // ---------------------------------------------------------------------------
 
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema:
+//  - `Mutation.publishablePublish(id: ID!, input: [PublicationInput!]!)` confirmed, where
+//    `PublicationInput { publicationId, publishDate }` — this op only ever sends `publicationId`.
 const PUBLISHABLE_PUBLISH_MUTATION = `#graphql
   mutation PublishablePublish($id: ID!, $input: [PublicationInput!]!) {
     publishablePublish(id: $id, input: $input) {
@@ -138,6 +147,14 @@ export async function publishableUnpublish(
 // inventorySetQuantities
 // ---------------------------------------------------------------------------
 
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema:
+//  - `InventorySetQuantitiesInput { reason!, name! ('available'|'on_hand'), quantities:
+//    [{ inventoryItemId!, locationId!, quantity!, changeFromQuantity? }]!,
+//    referenceDocumentUri? }` — there is NO `ignoreCompareQuantity` field on this input (that
+//    name does not exist in the 2026-07 schema). Omitting `changeFromQuantity` on a quantity
+//    entry performs an unconditional SET, with no compare-and-swap against a prior known
+//    quantity. Task 5's `input.quantities` construction relies on this comment.
+//
 // NOTE: no `#graphql` prefix on this raw document — withIdempotencyKey locates the operation
 // header by anchoring to the very start of the string. The prefix is prepended after the
 // directive is spliced in, below.
@@ -512,9 +529,21 @@ export async function listMetafieldDefinitions(
 // collectionCreate
 // ---------------------------------------------------------------------------
 
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema:
+//  - `Mutation.collectionCreate(collection: CollectionCreateInput)` — the argument is named
+//    `collection`, NOT `input` (this op previously sent `input:` and silently created zero
+//    collections against the live store).
+//  - `CollectionCreateInput { title!, handle, descriptionHtml, image: ImageInput, seo, sortOrder,
+//    metafields, sources: [CollectionCreateSourceTargetInput!] }` — there is NO `ruleSet` field.
+//    Automated ("smart") membership is expressed as a `sources` entry instead:
+//    `CollectionCreateSourceTargetInput { source: CollectionCreateConditionsSourceInput { title!,
+//    description, inclusion, exclusion, targetType } }`, where `inclusion` is a
+//    `CollectionCreateSourceInclusionInput { matchType: ANY|ALL,
+//    conditions: [CollectionSourceInclusionConditionInput], selections }`, and a tag condition is
+//    `{ productTag: { relation: TAGGED_WITH|NOT_TAGGED_WITH, values: [String!]!, matchType: ANY|ALL } }`.
 const COLLECTION_CREATE_MUTATION = `#graphql
-  mutation CollectionCreate($input: CollectionInput!) {
-    collectionCreate(input: $input) {
+  mutation CollectionCreate($collection: CollectionCreateInput!) {
+    collectionCreate(collection: $collection) {
       collection { id }
       userErrors { field message }
     }
@@ -527,20 +556,28 @@ interface CollectionCreateData {
 
 export async function collectionCreate(
   client: ShopifyAdminClient,
-  input: { title: string; handle: string; tagCondition: string; descriptionHtml?: string },
+  input: { title: string; handle: string; tagValue: string; descriptionHtml?: string },
 ): Promise<{ id: string }> {
   const collectionInput: Record<string, unknown> = {
     title: input.title,
     handle: input.handle,
-    ruleSet: {
-      appliedDisjunctively: false,
-      rules: [{ column: 'TAG', relation: 'EQUALS', condition: input.tagCondition }],
-    },
+    sources: [
+      {
+        source: {
+          title: `Tagged ${input.tagValue}`,
+          targetType: 'PRODUCTS',
+          inclusion: {
+            matchType: 'ALL',
+            conditions: [{ productTag: { relation: 'TAGGED_WITH', values: [input.tagValue], matchType: 'ANY' } }],
+          },
+        },
+      },
+    ],
   }
   if (input.descriptionHtml !== undefined) {
     collectionInput.descriptionHtml = input.descriptionHtml
   }
-  const data = await client.graphql<CollectionCreateData>(COLLECTION_CREATE_MUTATION, { input: collectionInput })
+  const data = await client.graphql<CollectionCreateData>(COLLECTION_CREATE_MUTATION, { collection: collectionInput })
   assertNoUserErrors(data, 'collectionCreate')
   return { id: data.collectionCreate.collection.id }
 }
@@ -593,8 +630,10 @@ export async function findProductByHandle(client: ShopifyAdminClient, handle: st
 // productVariantsByProductId
 // ---------------------------------------------------------------------------
 
-// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run: same
-// `ProductVariant.inventoryItem` non-null assumption as PRODUCT_SET_MUTATION above.
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema: same
+// `ProductVariant.inventoryItem { id }` selectability as PRODUCT_SET_MUTATION above (same
+// non-null-ness caveat: the introspection run didn't separately probe nullability, so the mapping
+// below still assumes every variant has one).
 const PRODUCT_VARIANTS_BY_PRODUCT_ID_QUERY = `#graphql
   query ProductVariantsByProductId($id: ID!) {
     product(id: $id) {
@@ -670,12 +709,13 @@ export async function webhookSubscriptionDelete(
 // primaryLocationId
 // ---------------------------------------------------------------------------
 
-// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:
-//  - `locations(query: "active:true")` is a valid search filter that returns only active
-//    locations, and `first: 1` on it is sufficient to get "the" primary location for stores (like
-//    this one) with exactly one active location. A store with several active locations would need
-//    a real "is this the primary location" signal instead of just taking the first result — out of
-//    scope here.
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema:
+//  - `Query.locations(first:, query:, …)` confirmed, and `query: "active:true"` is a valid search
+//    filter that returns only active locations.
+//  Still a DESIGN assumption, not something introspection confirms: taking `first: 1`'s result as
+//  "the" primary location only holds for stores (like this one) with exactly one active location.
+//  A store with several active locations would need a real "is this the primary location" signal
+//  instead of just taking the first result — out of scope here.
 const PRIMARY_LOCATION_QUERY = `#graphql
   query PrimaryLocation {
     locations(first: 1, query: "active:true") {
@@ -699,9 +739,18 @@ export async function primaryLocationId(client: ShopifyAdminClient): Promise<str
 // productUpdate
 // ---------------------------------------------------------------------------
 
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema:
+//  - `Mutation.productUpdate(product: ProductUpdateInput, media: [CreateMediaInput!],
+//    identifier: ProductUpdateIdentifiers)` — the `input:` argument from older API versions is
+//    GONE; the argument is named `product` (this op previously sent `input:` and would have
+//    failed validation against the live store).
+//  - `ProductUpdateInput` fields confirmed present: `id`, `handle`, `tags`, `productType`,
+//    `seo` (`SEOInput { title description }`), `title`, `descriptionHtml`, `status`, `vendor`,
+//    `category`, `redirectNewHandle`, among others. Only the subset this op's callers need
+//    (`id`/`handle`/`tags`/`productType`/`seo`) is exposed on the function signature.
 const PRODUCT_UPDATE_MUTATION = `#graphql
-  mutation ProductUpdate($input: ProductInput!) {
-    productUpdate(input: $input) {
+  mutation ProductUpdate($product: ProductUpdateInput!) {
+    productUpdate(product: $product) {
       product { id }
       userErrors { field message }
     }
@@ -716,7 +765,7 @@ export async function productUpdate(
   client: ShopifyAdminClient,
   input: { id: string; handle?: string; tags?: string[]; productType?: string; seo?: { title?: string; description?: string } },
 ): Promise<void> {
-  const data = await client.graphql<ProductUpdateData>(PRODUCT_UPDATE_MUTATION, { input })
+  const data = await client.graphql<ProductUpdateData>(PRODUCT_UPDATE_MUTATION, { product: input })
   assertNoUserErrors(data, 'productUpdate')
 }
 
@@ -724,10 +773,11 @@ export async function productUpdate(
 // inventoryItemUpdate
 // ---------------------------------------------------------------------------
 
-// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:
-//  - `inventoryItemUpdate(id:, input:)` takes an `InventoryItemInput` with a boolean `tracked`
-//    field, and returns the updated `inventoryItem { id }` alongside `userErrors` — same shape
-//    family as every other `*Update` mutation in this file.
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema:
+//  - `Mutation.inventoryItemUpdate(id: ID!, input: InventoryItemInput!)` confirmed, where
+//    `InventoryItemInput` carries a boolean `tracked` field (among others), and the mutation
+//    returns the updated `inventoryItem { id }` alongside `userErrors` — same shape family as
+//    every other `*Update` mutation in this file.
 const INVENTORY_ITEM_UPDATE_MUTATION = `#graphql
   mutation InventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
     inventoryItemUpdate(id: $id, input: $input) {
