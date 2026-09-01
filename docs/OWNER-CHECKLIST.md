@@ -465,7 +465,11 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 is its live tier — canary is still next after that). When you complete an item, check it off and
 tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** Sourcing upgrade 1 (market-price tool + 1.3× gate) is **MERGED to `main` 2026-09-01** (spec `2026-09-01-sourcing-market-price-design.md`; push is Robert's) — its **LIVE CHECK is the "Sourcing market-price LIVE CHECK" item above** (full command, flags, Railway-shell gotcha, pass criteria). Owner items before it: `SERPAPI_KEY` on the Railway ops service, and the SerpApi plan's monthly search quota (design assumed 250/mo; if it's 100, lower `SERPAPI_MAX_REQUESTS_PER_RUN` to 15 before a build week). Upgrade (2) — Google Trends rising related queries — gets its spec after the live check. Still queued behind it: runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
+**Next build session starts here →** **Product Page v2 spec written 2026-09-01
+(`docs/superpowers/specs/2026-09-01-product-page-v2-design.md` — variant images end-to-end,
+gallery, highlights/specs/what's-in-box, labeled CJ supplier reviews, trust badges, qty selector;
+absorbs backlog #6+#7): Robert reviews, then Claude writes the plan and builds on a branch.**
+Also pending: sourcing upgrade 1 (market-price tool + 1.3× gate) is **MERGED to `main` 2026-09-01** (spec `2026-09-01-sourcing-market-price-design.md`; push is Robert's) — its **LIVE CHECK is the "Sourcing market-price LIVE CHECK" item above** (full command, flags, Railway-shell gotcha, pass criteria). Owner items before it: `SERPAPI_KEY` on the Railway ops service, and the SerpApi plan's monthly search quota (design assumed 250/mo; if it's 100, lower `SERPAPI_MAX_REQUESTS_PER_RUN` to 15 before a build week). Upgrade (2) — Google Trends rising related queries — gets its spec after the live check. Still queued behind it: runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
 one manual `run-sourcing --max-winners 2` → force an `inventory.sync` check → flip
 `workflow.sourcing.mode` to `auto` for the build-week runs → back to `manual` after). Once the
 build-week runs land ~40+ products, next is `docs/LAUNCH-BACKLOG.md` **P1** (product page image
