@@ -70,7 +70,7 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
 
 - [ ] **Sourcing agent upgrades (brainstormed 2026-09-01; all three approved on the recommended
   options — Google Shopping via SerpApi for (1), Google Trends rising related queries for (2),
-  advisory performance brief + harvest keyword ordering for (3)).** **(1) BUILT 2026-09-01 (branch `sourcing-market-price`)** — live check pending (one `run-sourcing --max-winners 2`: SerpApi requests ≤ 25, a proposal summary carrying `market $… median ×…`, a `market_price` row in `sourcing_signals` with offerCount ≥ 5). (2) is next to spec.
+  advisory performance brief + harvest keyword ordering for (3)).** **(1) BUILT + MERGED to `main` 2026-09-01** — live check pending; the full runbook (command, every `run-sourcing` flag, the run-inside-Railway gotcha, pass criteria) is `OWNER-CHECKLIST.md` → "Sourcing market-price LIVE CHECK". (2) is next to spec after that check.
   Three specs, in this order: (1) competitor-price tool for the agent (Amazon / Google Shopping
   lookup on the top candidates, rule "price ≤ 1.3× market" enforced in Stage 6, not just advised);
   (2) a demand-signal harvest source beyond CJ keyword search (Amazon movers-and-shakers / Google
