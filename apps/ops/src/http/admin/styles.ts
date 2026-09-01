@@ -145,7 +145,11 @@ section { margin-bottom: 20px; }
 /**
  * Progressive enhancement only — without it every form still posts. (1) marks <html> as js-capable
  * so "Save" buttons on auto-submitting toggles can hide; (2) `data-confirm` forms ask before an
- * irreversible POST; (3) `data-autosubmit` forms submit on change.
+ * irreversible POST via the submit listener (ordinary button submits); (3) `data-autosubmit` forms
+ * confirm right here in the change handler and post via \`.submit()\` — never \`.requestSubmit()\`,
+ * because \`.submit()\` fires no \`submit\` event, so a form carrying BOTH \`data-autosubmit\` and
+ * \`data-confirm\` (the kill-switch toggle) gets exactly one prompt, not a double prompt or an
+ * unconfirmed post on engines lacking \`requestSubmit\`.
  */
 export const ADMIN_JS = `
 document.documentElement.classList.add('js');
@@ -153,6 +157,12 @@ document.addEventListener('submit', function (e) {
   var f = e.target; if (f && f.dataset && f.dataset.confirm && !window.confirm(f.dataset.confirm)) e.preventDefault();
 });
 document.addEventListener('change', function (e) {
-  var f = e.target && e.target.form; if (f && f.dataset && 'autosubmit' in f.dataset) f.requestSubmit ? f.requestSubmit() : f.submit();
+  var el = e.target, f = el && el.form;
+  if (!f || !f.dataset || !('autosubmit' in f.dataset)) return;
+  if (f.dataset.confirm && !window.confirm(f.dataset.confirm)) {
+    if (el.type === 'checkbox' || el.type === 'radio') el.checked = !el.checked; else el.value = el.defaultValue;
+    return;
+  }
+  f.submit();
 });
 `

@@ -48,6 +48,10 @@ describe('admin html helpers', () => {
     expect(doc).toMatch(/<a class="tab" href="\/admin\/tickets" aria-current="page">/)
     expect(doc).not.toMatch(/href="\/admin" aria-current/)
     expect(doc).toContain('<h1 class="page-title">Tickets</h1>')
+    // Autosubmit forms must confirm-then-.submit() — never fall back to .requestSubmit(), which
+    // fires no `submit` event and would silently skip data-confirm on autosubmit+confirm forms.
+    expect(ADMIN_JS).not.toContain('requestSubmit')
+    expect(ADMIN_JS).toContain("'autosubmit' in f.dataset")
   })
 
   it('escalated badge uses the bad tone; /admin is current only on an exact match; detail paths match their list tab', () => {
