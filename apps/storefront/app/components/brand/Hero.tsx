@@ -1,4 +1,5 @@
 import {Link} from 'react-router';
+import {CATEGORIES} from '@doge-buddy/core';
 import heroArt from '~/assets/art/hero-mascot.webp';
 
 export function Hero() {
@@ -14,7 +15,7 @@ export function Hero() {
         </p>
         <div>
           <Link
-            to="/collections/toys-play"
+            to={`/collections/${CATEGORIES[0].handle}`}
             className="mt-6 inline-block rounded-2xl border-2 border-ink bg-cta px-8 py-3 font-display text-xl text-white shadow-[4px_4px_0_var(--color-ink)] transition-transform hover:-translate-y-0.5 motion-reduce:transition-none"
           >
             Shop toys

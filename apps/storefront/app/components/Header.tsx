@@ -5,6 +5,7 @@ import {
   useAnalytics,
   useOptimisticCart,
 } from '@shopify/hydrogen';
+import {CATEGORIES} from '@doge-buddy/core';
 import type {HeaderQuery, CartApiQueryFragment} from 'storefrontapi.generated';
 import {useAside} from '~/components/Aside';
 import wordmark from '~/assets/wordmark.svg';
@@ -18,14 +19,12 @@ interface HeaderProps {
 
 type Viewport = 'desktop' | 'mobile';
 
-// Hardcoded nav — later tasks (product/collection routes, Task 10 policy
-// pages) rely on these exact paths existing in the header/mobile nav.
-const NAV_ITEMS: Array<{to: string; title: string}> = [
-  {to: '/collections/toys-play', title: 'Toys & Play'},
-  {to: '/collections/walks-travel', title: 'Walks & Travel'},
-  {to: '/collections/beds-comfort', title: 'Beds & Comfort'},
-  {to: '/collections/grooming-care', title: 'Grooming & Care'},
-];
+// Nav derived from the single category source of truth — later tasks
+// (product/collection routes, Task 10 policy pages) rely on these exact
+// paths existing in the header/mobile nav.
+const NAV_ITEMS: Array<{to: string; title: string}> = CATEGORIES.map(
+  (c) => ({to: `/collections/${c.handle}`, title: c.title}),
+);
 
 export function Header({
   header,
