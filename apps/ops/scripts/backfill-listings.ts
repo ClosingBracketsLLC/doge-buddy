@@ -1,6 +1,7 @@
 import { createDb } from '@doge-buddy/db'
 import {
   inventoryItemUpdate,
+  inventoryAvailableAt,
   inventorySetQuantities,
   primaryLocationId,
   productDescriptionHtml,
@@ -118,6 +119,7 @@ try {
     productVariantsByProductId: (productGid) => productVariantsByProductId(client, productGid),
     inventoryItemUpdate: (inventoryItemId, input) => inventoryItemUpdate(client, inventoryItemId, input),
     primaryLocationId: () => primaryLocationId(client),
+    inventoryAvailableAt: (inventoryItemId, locationId) => inventoryAvailableAt(client, inventoryItemId, locationId),
     inventorySetQuantities: (input, key) => inventorySetQuantities(client, input, key),
     productDescriptionHtml: (productGid) => productDescriptionHtml(client, productGid),
   }

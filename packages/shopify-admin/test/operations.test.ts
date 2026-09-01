@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ShopifyAdminClient, ShopifyTokenManager, ShopifyUserError,
   collectionCreate, findProductByHandle, fulfillmentCreate, fulfillmentTrackingInfoUpdate,
-  inventoryItemUpdate, inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
+  inventoryAvailableAt, inventoryItemUpdate, inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
   listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, orderRefundState,
   ordersUpdatedSince, primaryLocationId, productDelete, productDescriptionHtml, productUpdate,
   productSet, productVariantsByProductId, publishablePublish, publishableUnpublish, refundCreate, webhookSubscriptionCreate,
@@ -521,6 +521,28 @@ describe('primaryLocationId', () => {
   it('throws when the store has no active location', async () => {
     const { client } = makeClient(() => gql({ locations: { nodes: [] } }))
     await expect(primaryLocationId(client)).rejects.toThrow(/no active location/)
+  })
+})
+
+describe('inventoryAvailableAt', () => {
+  const item = 'gid://shopify/InventoryItem/46762900947032'
+  const location = 'gid://shopify/Location/87420600408'
+  it('reads the `available` quantity of the item at that location (live-verified shape)', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ inventoryItem: { inventoryLevel: { quantities: [{ name: 'available', quantity: 7 }] } } }))
+    await expect(inventoryAvailableAt(client, item, location)).resolves.toBe(7)
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*inventoryItem\(id: \$inventoryItemId\)[\s\S]*inventoryLevel\(locationId: \$locationId\)/)
+    expect(query).toContain('quantities(names: ["available"])')
+    expect(variables).toEqual({ inventoryItemId: item, locationId: location })
+  })
+  it('resolves null when the item is not stocked at that location (inventoryLevel is null)', async () => {
+    const { client } = makeClient(() => gql({ inventoryItem: { inventoryLevel: null } }))
+    await expect(inventoryAvailableAt(client, item, location)).resolves.toBeNull()
+  })
+  it('throws when the inventory item does not exist', async () => {
+    const { client } = makeClient(() => gql({ inventoryItem: null }))
+    await expect(inventoryAvailableAt(client, item, location)).rejects.toThrow(/no inventory item/)
   })
 })
 

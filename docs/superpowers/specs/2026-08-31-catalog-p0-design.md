@@ -124,7 +124,7 @@ on-demand via `enqueue('inventory.sync', { productId? })` (queue policy `stately
 productId or `'all'`). One cycle: select every `product_variants` row joined to an ACTIVE product with
 a `supplier_variant_mappings` row and a non-null `shopify_inventory_item_gid`; for each (bounded: 200
 variants/cycle, ordered by `stock_checked_at ASC NULLS FIRST` so an over-cap tail rotates in on later cycles; alert if more) call `adapter.getVariantStock`, take the largest single US-warehouse quantity, clamp ≥ 0; if it
-differs from `last_known_stock`, `inventorySetQuantities({ name:'available', reason:'correction', quantities:[{ inventoryItemId, locationId, quantity }] }, idempotencyKey)` (2026-07 has no `ignoreCompareQuantity`, and the optional per-entry `changeFromQuantity` CAS is omitted on purpose — see the concurrency rule below)
+differs from `last_known_stock`, `inventorySetQuantities({ name:'available', reason:'correction', quantities:[{ inventoryItemId, locationId, quantity, changeFromQuantity }] }, idempotencyKey)` where `changeFromQuantity` = Shopify's CURRENT `available` from a fresh `inventoryAvailableAt(inventoryItemId, locationId)` read taken right before the set (amended 2026-08-31 after the first live backfill: 2026-07 has no `ignoreCompareQuantity` AND rejects an entry without `changeFromQuantity` at runtime, INVALID_FIELD_ARGUMENTS — the schema's "optional" is a lie; see the concurrency rule below for why the value must never come from our cache)
 (key = `inv-<variantRowId>-<quantity>-<unix seconds>` — amended 2026-08-31 in review: an hour-bucketed key could replay a stale set inside the hour and then cement it through the local cache; a per-value-per-second key only dedupes an identical immediate retry), then update `last_known_stock`/`stock_checked_at`.
 
 **Concurrency (amended 2026-08-31, whole-branch review re-review).** Each variant's read → push →
@@ -142,13 +142,23 @@ shape). The trade-off — a connection and a row lock held across a CJ read and 
 accepted: one variant per transaction, and the only contender is another cycle on the SAME variant,
 which must wait anyway to be correct.
 
-The API's `changeFromQuantity` CAS was ruled in for this and then ruled back OUT: it compares
-against Shopify's CURRENT `available`, whereas `last_known_stock` caches CJ's last READING. They
-diverge on the first sale of any variant (Shopify moves `available` → `committed` when an order is
-placed; nothing pushes, because CJ has not moved), after which every push is rejected forever —
-cache 7, store 6; CJ drops to 5; push `{5, from 7}` rejected; cache stays 7; repeat — in the
-oversell direction and below the 25% degraded-alert ratio, i.e. permanent and near-silent. Pushes
-are therefore unconditional sets.
+The API's `changeFromQuantity` CAS fed from `last_known_stock` was ruled in for this and then
+ruled back OUT: it compares against Shopify's CURRENT `available`, whereas `last_known_stock`
+caches CJ's last READING. They diverge on the first sale of any variant (Shopify moves `available`
+→ `committed` when an order is placed; nothing pushes, because CJ has not moved), after which
+every push is rejected forever — cache 7, store 6; CJ drops to 5; push `{5, from 7}` rejected;
+cache stays 7; repeat — in the oversell direction and below the 25% degraded-alert ratio, i.e.
+permanent and near-silent.
+
+**Amended 2026-08-31 (first live backfill run):** the 2026-07 API makes the CAS mandatory — an
+entry without `changeFromQuantity` is rejected outright — so pushes cannot be unconditional sets.
+Both the sync and the backfill read Shopify's current `available` for the item at the location
+(`inventoryAvailableAt`, `InventoryItem.inventoryLevel(locationId:)`, `read_inventory` only)
+immediately before the set and send that as `changeFromQuantity`; `null` (no level yet) is sent
+as 0. A `CHANGE_FROM_QUANTITY_STALE` reply means a sale landed inside that window: the variant
+counts as failed, its cache write rolls back, and the next cycle re-reads and retries. The row
+lock above still serializes our own two producers; the CAS only guards the read→set window
+against Shopify's own writers.
 
 Per-variant errors are logged + counted, never abort the cycle; more than 25% failures in a cycle (strictly greater — 1 of 4 does not fire) → one warning alert
 `inventory_sync_degraded`. Variants whose product isn't active, or with no inventory item gid, are

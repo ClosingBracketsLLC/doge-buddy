@@ -26,6 +26,8 @@ function uid(): string {
 
 /** The single active location every `primaryLocationId()` in this file resolves to. */
 const LOCATION_ID = 'gid://shopify/Location/inv-sync-test'
+/** What every fake `inventoryAvailableAt()` in this file says Shopify currently holds. */
+const SHOPIFY_AVAILABLE = 2
 
 /** Frozen clock: fixes both the `stock_checked_at` writes and the unix-seconds tail of every
  * idempotency key this file asserts on. */
@@ -58,6 +60,7 @@ function fakeShopify(overrides: Partial<InventorySyncShopifyOps> = {}): Inventor
     inventorySetQuantities: async (input: Record<string, unknown>, key: string) => {
       calls.push({ input, key })
     },
+    inventoryAvailableAt: async () => SHOPIFY_AVAILABLE,
     primaryLocationId: async () => {
       self.locationCalls += 1
       return LOCATION_ID
@@ -245,17 +248,17 @@ describe('executeInventorySync', () => {
     expect(shopify.calls[0]!.input).toEqual({
       name: 'available',
       reason: 'correction',
-      quantities: [{ inventoryItemId: v.inventoryItemGid, locationId: LOCATION_ID, quantity: 4 }],
+      quantities: [{ inventoryItemId: v.inventoryItemGid, locationId: LOCATION_ID, quantity: 4, changeFromQuantity: SHOPIFY_AVAILABLE }],
     })
-    // NO `changeFromQuantity`, even though the cache here is non-null (1) — this is an
-    // UNCONDITIONAL set, on purpose. The 2026-07 CAS field compares against Shopify's CURRENT
-    // `available`, and `last_known_stock` caches CJ's last READING; the two diverge the moment a
-    // customer buys one (Shopify moves available -> committed, CJ still says 7, and nothing
-    // pushes because the job sees no change). A CAS against the cache would then be rejected on
-    // every later cycle forever, in the oversell direction and below the degraded-alert ratio.
-    // Concurrency between our own two producers is solved by the row lock instead — see (c2).
+    // `changeFromQuantity` is Shopify's CURRENT `available` (the fake says 2) — NOT the cache
+    // (1). The 2026-07 API requires the field (INVALID_FIELD_ARGUMENTS without it, seen live), and
+    // it is a CAS against what Shopify holds; `last_known_stock` caches CJ's last READING, and the
+    // two diverge the moment a customer buys one (Shopify moves available -> committed, CJ still
+    // says 7, and nothing pushes because the job sees no change). A CAS fed from the cache would
+    // then be rejected on every later cycle forever, in the oversell direction and below the
+    // degraded-alert ratio. Concurrency between our own two producers is the row lock's job — (c2).
     const quantity = (shopify.calls[0]!.input as { quantities: Record<string, unknown>[] }).quantities[0]!
-    expect(Object.keys(quantity).sort()).toEqual(['inventoryItemId', 'locationId', 'quantity'])
+    expect(Object.keys(quantity).sort()).toEqual(['changeFromQuantity', 'inventoryItemId', 'locationId', 'quantity'])
     // `inv-<variantRowId>-<quantity>-<unix seconds>`: the quantity is in the key so a real change
     // can never replay a previous push's result (an hour-bucketed key would let a :40 push of 2
     // replay a :05 push of 4 — the store stays wrong, in the oversell direction, forever).
@@ -330,6 +333,7 @@ describe('executeInventorySync', () => {
           await new Promise((resolve) => setTimeout(resolve, 10))
         }
       },
+      inventoryAvailableAt: async () => SHOPIFY_AVAILABLE,
       primaryLocationId: async () => LOCATION_ID,
     })
 
@@ -422,7 +426,7 @@ describe('executeInventorySync', () => {
     expect(result).toEqual({ updated: 1, unchanged: 0, failed: 0, skipped: 0 })
     expect(adapter.reads).toEqual([a.supplierVariantId])
     expect(shopify.calls[0]!.input).toMatchObject({
-      quantities: [{ inventoryItemId: a.inventoryItemGid, locationId: LOCATION_ID, quantity: 4 }],
+      quantities: [{ inventoryItemId: a.inventoryItemGid, locationId: LOCATION_ID, quantity: 4, changeFromQuantity: SHOPIFY_AVAILABLE }],
     })
     expect((await mappingRow(b.variantId))!.lastKnownStock).toBe(1)
   })

@@ -1225,6 +1225,9 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       inventorySetQuantities: async (input, key) => {
         pushes.push({ input, key })
       },
+      // What Shopify currently holds for the item: the listing seeded 0 (the failed CJ read),
+      // so the CAS value the sync must send is 0 — read from Shopify, not from the (null) cache.
+      inventoryAvailableAt: async () => 0,
       primaryLocationId: async () => FIXTURE_LOCATION_ID,
     }
 
@@ -1238,10 +1241,11 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     expect(pushes[0]!.input).toEqual({
       name: 'available',
       reason: 'correction',
-      // No `changeFromQuantity`: the cache is null, so there is nothing to compare-and-swap
-      // against and this is the unconditional first real push for the variant.
+      // `changeFromQuantity` is Shopify's CURRENT `available` (0 — what the listing seeded on
+      // its failed read), never the cache (null here): the 2026-07 API requires the CAS field
+      // on every entry, and it compares against Shopify's number, not ours.
       quantities: [
-        { inventoryItemId: variantRow.shopifyInventoryItemGid, locationId: FIXTURE_LOCATION_ID, quantity: FIXTURE_US_STOCK },
+        { inventoryItemId: variantRow.shopifyInventoryItemGid, locationId: FIXTURE_LOCATION_ID, quantity: FIXTURE_US_STOCK, changeFromQuantity: 0 },
       ],
     })
     const [mapping] = await db

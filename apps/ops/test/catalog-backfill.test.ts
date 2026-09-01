@@ -23,6 +23,8 @@ function uid(): string {
 }
 
 const LOCATION_ID = 'gid://shopify/Location/backfill-test'
+/** What the fake `inventoryAvailableAt()` says Shopify currently holds — the CAS value. */
+const SHOPIFY_AVAILABLE = 2
 const NOW = new Date('2026-09-02T09:15:00.000Z')
 const NOW_EPOCH_SECONDS = Math.floor(NOW.getTime() / 1000)
 
@@ -95,6 +97,7 @@ function fakeOps(script: Record<string, ScriptedProduct>) {
       calls.locationCalls += 1
       return LOCATION_ID
     },
+    inventoryAvailableAt: async () => SHOPIFY_AVAILABLE,
     inventorySetQuantities: async (input, key) => {
       const itemId = String(((input as { quantities: { inventoryItemId: string }[] }).quantities)[0]!.inventoryItemId)
       calls.inventoryOrder.push(`quantity:${itemId}`)
@@ -316,7 +319,7 @@ describe('backfillListings', () => {
     expect(push!.input).toEqual({
       name: 'available',
       reason: 'correction',
-      quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/77', locationId: LOCATION_ID, quantity: 4 }],
+      quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/77', locationId: LOCATION_ID, quantity: 4, changeFromQuantity: SHOPIFY_AVAILABLE }],
     })
     expect(push!.key).toBe(`bf-${seeded.variantId}-4-${NOW_EPOCH_SECONDS}`)
 

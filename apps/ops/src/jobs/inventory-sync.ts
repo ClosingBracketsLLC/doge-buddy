@@ -69,6 +69,8 @@ export const INVENTORY_SYNC_POINTS_ALLOWANCE = INVENTORY_SYNC_MAX_VARIANTS_PER_C
  * loudly-once, not fail every variant. */
 export interface InventorySyncShopifyOps {
   inventorySetQuantities(input: Record<string, unknown>, idempotencyKey: string): Promise<void>
+  /** Shopify's current `available` at a location (`null` = not stocked there) — the CAS value. */
+  inventoryAvailableAt(inventoryItemId: string, locationId: string): Promise<number | null>
   primaryLocationId(): Promise<string>
 }
 
@@ -191,7 +193,8 @@ async function auditVariantFailure(db: Db, variantId: string, err: unknown): Pro
  * again. Read, push and cache write all run inside ONE short transaction holding that variant's
  * `supplier_variant_mappings` row lock — what keeps this job's two producers (the cron and the
  * on-demand post-listing job, on two different queue names) from interleaving into a lost update.
- * The API's own `changeFromQuantity` CAS is the wrong tool for it; the inline docblock says why.
+ * The API's `changeFromQuantity` CAS (mandatory on 2026-07) is fed from a fresh read of Shopify's
+ * own number, never from that cache; the inline docblock says why.
  *
  * **Isolation.** Every variant's work is wrapped: a throw is counted `failed`, audit-logged, and
  * the cycle moves on — one flaky supplier read must never cost the other 199 variants their sync.
@@ -353,13 +356,19 @@ export async function executeInventorySync(
        * then re-read the cache the first just wrote. That re-read is the point: the value selected
        * at the top of the cycle can be minutes old by the time a 200-variant walk reaches this row.
        *
-       * NOT solved with the API's `changeFromQuantity` CAS, which was this review's first ruling
-       * and is wrong: it compares against Shopify's CURRENT `available`, while `last_known_stock`
-       * caches CJ's last READING. The two diverge on the first sale of any variant — Shopify moves
-       * `available` -> `committed` when an order is placed and nothing pushes, because CJ has not
-       * moved — after which every push is rejected forever (cache 7, store 6; CJ drops to 5; push
-       * {5, from 7} rejected; cache stays 7; repeat), in the oversell direction and quietly, below
-       * the degraded-alert ratio.
+       * NOT solved with the API's `changeFromQuantity` CAS fed from `last_known_stock` — this
+       * review's first ruling, withdrawn: that compares against Shopify's CURRENT `available`,
+       * while `last_known_stock` caches CJ's last READING. The two diverge on the first sale of any
+       * variant — Shopify moves `available` -> `committed` when an order is placed and nothing
+       * pushes, because CJ has not moved — after which every push is rejected forever (cache 7,
+       * store 6; CJ drops to 5; push {5, from 7} rejected; cache stays 7; repeat), in the oversell
+       * direction and quietly, below the degraded-alert ratio.
+       *
+       * The CAS itself is NOT optional on 2026-07 (live: INVALID_FIELD_ARGUMENTS without it — the
+       * first backfill run, 2026-08-31), so the push below carries it, fed from a fresh
+       * `inventoryAvailableAt` read of Shopify's own number taken under this lock. A stale reply
+       * (a sale landed between that read and the set) throws, counts as `failed`, rolls the cache
+       * write back, and the next cycle re-reads and retries.
        *
        * The cost is a DB connection and a row lock held across a CJ read and a Shopify push. That
        * is deliberate: the transaction covers exactly one variant, and the only thing that can
@@ -388,16 +397,22 @@ export async function executeInventorySync(
             .where(eq(supplierVariantMappings.id, row.mappingId))
           return 'unchanged' as const
         }
+        // The selection already requires a gid (a variant without one is a backfill case, not a
+        // sync case); this narrows the type and keeps that rule local to the push.
+        const inventoryItemGid = row.inventoryItemGid
+        if (!inventoryItemGid) return 'gone' as const
+        const locationId = await getLocationId()
+        // LIVE-VERIFIED 2026-08-31 against the 2026-07 Admin API: `changeFromQuantity` is
+        // required at runtime (no `ignoreCompareQuantity` exists). Read Shopify's CURRENT number
+        // for it here — CJ stays the source of truth for what we may sell; Shopify is only the
+        // source of truth for what it currently holds. `null` = no inventory level at this
+        // location yet, which Shopify treats as 0.
+        const changeFromQuantity = (await shopify.inventoryAvailableAt(inventoryItemGid, locationId)) ?? 0
         await shopify.inventorySetQuantities(
           {
             name: 'available',
             reason: 'correction',
-            // LIVE-VERIFIED 2026-08-31 against the 2026-07 Admin API: there is no
-            // `ignoreCompareQuantity` field on `InventorySetQuantitiesInput`, and the optional
-            // per-entry `changeFromQuantity` CAS is omitted ON PURPOSE — see the docblock above
-            // for why it is the wrong tool for this job's concurrency. This is an unconditional
-            // set: CJ is the source of truth for what we may sell, not what Shopify last held.
-            quantities: [{ inventoryItemId: row.inventoryItemGid, locationId: await getLocationId(), quantity }],
+            quantities: [{ inventoryItemId: inventoryItemGid, locationId, quantity, changeFromQuantity }],
           },
           idempotencyKey(row.variantId, quantity, clock()),
         )

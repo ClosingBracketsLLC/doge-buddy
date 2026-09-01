@@ -4,6 +4,7 @@ import {
   findProductByHandle,
   fulfillmentCreate,
   fulfillmentTrackingInfoUpdate,
+  inventoryAvailableAt,
   inventorySetQuantities,
   listPublications,
   orderFulfillmentOrders,
@@ -273,6 +274,7 @@ const refundOps: RefundOps | null = shopifyClient
 const inventorySyncShopify: InventorySyncShopifyOps | null = shopifyClient && supplierAdapter.key === 'cj'
   ? {
       inventorySetQuantities: (input, idempotencyKey) => inventorySetQuantities(shopifyClient, input, idempotencyKey),
+      inventoryAvailableAt: (inventoryItemId, locationId) => inventoryAvailableAt(shopifyClient, inventoryItemId, locationId),
       primaryLocationId: () => primaryLocationId(shopifyClient),
     }
   : null

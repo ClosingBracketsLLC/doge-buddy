@@ -147,16 +147,18 @@ export async function publishableUnpublish(
 // inventorySetQuantities
 // ---------------------------------------------------------------------------
 
-// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema:
+// LIVE-VERIFIED 2026-08-31 by introspection of the 2026-07 Admin schema AND by a live call:
 //  - `InventorySetQuantitiesInput { reason!, name! ('available'|'on_hand'), quantities:
-//    [{ inventoryItemId!, locationId!, quantity!, changeFromQuantity? }]!,
-//    referenceDocumentUri? }` — there is NO `ignoreCompareQuantity` field on this input (that
-//    name does not exist in the 2026-07 schema). Omitting `changeFromQuantity` on a quantity
-//    entry performs an unconditional SET, with no compare-and-swap against a prior known
-//    quantity. `inventory.sync` (and the backfill) send exactly that unconditional set, on
-//    purpose: the CAS compares against Shopify's CURRENT `available`, which stops matching our
-//    cached CJ reading the moment a customer buys one, so using it would reject every later push
-//    forever. Those jobs serialize their own producers with a row lock instead.
+//    [{ inventoryItemId!, locationId!, quantity!, changeFromQuantity? }]!, referenceDocumentUri? }`
+//    — there is NO `ignoreCompareQuantity` field (the pre-2026 opt-out is gone from this
+//    version), and although the schema types `changeFromQuantity` as optional, the API REJECTS
+//    an entry that omits it at runtime: "InventoryQuantityInput must include the following
+//    argument: changeFromQuantity" (INVALID_FIELD_ARGUMENTS — seen live on the first backfill
+//    run). Every set is therefore a compare-and-swap against Shopify's CURRENT `available` at
+//    that location; a mismatch comes back as a userError (code CHANGE_FROM_QUANTITY_STALE).
+//    Callers read that current value with `inventoryAvailableAt` immediately before the set —
+//    never from a local cache of a SUPPLIER reading, which stops matching Shopify the moment a
+//    customer buys one — and treat a stale reply as "failed this cycle, retry next".
 //
 // NOTE: no `#graphql` prefix on this raw document — withIdempotencyKey locates the operation
 // header by anchoring to the very start of the string. The prefix is prepended after the
@@ -179,6 +181,47 @@ export async function inventorySetQuantities(
   const document = `#graphql\n${withIdempotencyKey(INVENTORY_SET_QUANTITIES_MUTATION, idempotencyKey)}`
   const data = await client.graphql<InventorySetQuantitiesData>(document, { input })
   assertNoUserErrors(data, 'inventorySetQuantities')
+}
+
+// ---------------------------------------------------------------------------
+// inventoryAvailableAt
+// ---------------------------------------------------------------------------
+
+// LIVE-VERIFIED 2026-08-31 (introspection + live read): `InventoryItem.inventoryLevel(locationId:
+// ID!)` returns the level at that location or `null` when the item is not stocked there;
+// `InventoryLevel.quantities(names: [String!]!)` returns `[{ name, quantity }]`. Needs only
+// `read_inventory` — NOT `read_locations` (which this app does not hold; even `Location.name`
+// is denied without it, `Location.id` is not).
+const INVENTORY_AVAILABLE_AT_QUERY = `#graphql
+  query InventoryAvailableAt($inventoryItemId: ID!, $locationId: ID!) {
+    inventoryItem(id: $inventoryItemId) {
+      inventoryLevel(locationId: $locationId) {
+        quantities(names: ["available"]) { name quantity }
+      }
+    }
+  }
+`
+
+interface InventoryAvailableAtData {
+  inventoryItem: { inventoryLevel: { quantities: { name: string; quantity: number }[] } | null } | null
+}
+
+/**
+ * Shopify's CURRENT `available` quantity for one inventory item at one location — the value an
+ * `inventorySetQuantities` entry must carry as `changeFromQuantity` (see the note above that
+ * mutation). Resolves `null` when the item has no inventory level at that location yet; throws
+ * when the inventory item itself does not exist.
+ */
+export async function inventoryAvailableAt(
+  client: ShopifyAdminClient,
+  inventoryItemId: string,
+  locationId: string,
+): Promise<number | null> {
+  const data = await client.graphql<InventoryAvailableAtData>(INVENTORY_AVAILABLE_AT_QUERY, { inventoryItemId, locationId })
+  if (!data.inventoryItem) throw new Error(`inventoryAvailableAt: no inventory item ${inventoryItemId}`)
+  const level = data.inventoryItem.inventoryLevel
+  if (!level) return null
+  return level.quantities.find((q) => q.name === 'available')?.quantity ?? null
 }
 
 // ---------------------------------------------------------------------------

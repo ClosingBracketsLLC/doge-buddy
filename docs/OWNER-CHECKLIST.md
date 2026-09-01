@@ -48,7 +48,26 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
     URL (Variables → `DATABASE_PUBLIC_URL`) — the internal `railway.internal` host is not reachable
     from your laptop. `FULFILLMENT_SUPPLIER=cj` is already set in `apps/ops/.env` (checked) — the
     script refuses to push inventory otherwise. Don't run it in the minute after a `:00` 6-hourly
-    sync tick (00/06/12/18 UTC) — the two are not serialized. The two live products get
+    sync tick (00/06/12/18 UTC) — the two are not serialized.
+    **First real run (2026-08-31, inside Railway):** `products=2 updated=0 partial=1 failures=2`:
+    (1) clipper — catalog fields landed (slug/tag/type/SEO ✅), inventory push rejected because
+    the 2026-07 API REQUIRES `changeFromQuantity` (fixed in code, commit below — the sync job had
+    the same bug; rerun after the push); (2) Snuff Pad — the Railway row `e10022af…` points at
+    Shopify product `8947876659288`, which no longer exists (the live Snuff Pad is
+    `8947799064664`, listed from the LOCAL machine under proposal `f0b3f371`, not the deployed
+    worker's `263e41a3`). Repoint the Railway row, then rerun the backfill:
+    ```sql
+    UPDATE products SET shopify_product_gid = 'gid://shopify/Product/8947799064664'
+      WHERE id = 'e10022af-357a-4a59-be02-1911922b2d38';
+    UPDATE product_variants SET shopify_variant_gid = 'gid://shopify/ProductVariant/44650188144728',
+      shopify_inventory_item_gid = 'gid://shopify/InventoryItem/46758880641112'
+      WHERE product_id = 'e10022af-357a-4a59-be02-1911922b2d38';
+    ```
+    (If the Snuff Pad is not a real CJ product — sku `DB-SNUFFPAD-01` doesn't look like one — skip
+    the SQL, archive it in Shopify admin and `UPDATE products SET status='deprecated' WHERE id=
+    'e10022af-…'` instead; the backfill then reports its CJ read as failed and leaves it alone.)
+    Rerun (inside Railway, as before): `--dry-run` → expect 2 products; then real → expect
+    `products=2 updated=2 partial=0 failures=0`. The two live products get
     human URLs (`/products/dog-snuff-pad-<8hex>`, `/products/low-noise-pet-hair-clipper-<8hex>`),
     land in the right category (Grooming & Care for the clipper, etc.), and show tracked stock.
     (d) Verify: the four `/collections/*` pages now list the products; each product page shows
@@ -88,7 +107,7 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ## Now / this week
 
-- [ ] ⚪ **Catalog P0 — follow-ups (none block go-live; from the branch review).** (1) `inventory.sync` holds a DB connection + row lock per variant across the CJ read and Shopify push, and neither client has a request timeout — bounded to 2 of 10 pool connections, fine for the canary; queue `SET LOCAL idle_in_transaction_session_timeout = '30s'` in that transaction + request timeouts on the CJ/Shopify clients. (2) Don't run `backfill-listings` while the 6-hourly sync is mid-cycle — it is a manual one-shot and is NOT row-lock serialized (fix the `operations.ts` comment that says otherwise). (3) Comment nits: `proposal-apply.test.ts` still explains a withdrawn CAS; the sync's points guard can never fire before the variant cap; `skipped` lumps out-of-scope variants with "needs backfill" ones. (4) `usQuantity` = largest single US warehouse (not the sum) — matches the fulfillment planner; revisit only if the planner ever learns multi-warehouse splits.
+- [ ] ⚪ **Catalog P0 — follow-ups (none block go-live; from the branch review).** (1) `inventory.sync` holds a DB connection + row lock per variant across the CJ read and Shopify push, and neither client has a request timeout — bounded to 2 of 10 pool connections, fine for the canary; queue `SET LOCAL idle_in_transaction_session_timeout = '30s'` in that transaction + request timeouts on the CJ/Shopify clients. (2) Don't run `backfill-listings` while the 6-hourly sync is mid-cycle — it is a manual one-shot and is NOT row-lock serialized (fix the `operations.ts` comment that says otherwise). (3) Comment nits: ~~`proposal-apply.test.ts` still explains a withdrawn CAS~~ (fixed with the changeFromQuantity fix); the sync's points guard can never fire before the variant cap; `skipped` lumps out-of-scope variants with "needs backfill" ones. (4) `usQuantity` = largest single US warehouse (not the sum) — matches the fulfillment planner; revisit only if the planner ever learns multi-warehouse splits.
 - [x] ~~Tap APPROVE on a proposal on your phone.~~ **Done (2026-08-25) — and it closed BOTH open live tiers.** You approved the *Low Noise Pet Hair Clipper* **from the admin dashboard** (Telegram login-link → `/admin/proposals` → approve — exactly Phase 4B's walk) and rejected the *Plush Round Dog Bed* via the Telegram link. The apply worker created ACTIVE Shopify product `gid://shopify/Product/8949329592408` ($54.99, SKU `CJJJCWGY01635-Style D`) with its CJ fulfillment mapping 6 seconds after the tap. **Phase 5 is closed on every tier.**
 - [x] ~~Migration 0008 on Railway FIRST, then push.~~ **Done 2026-08-31** (0008 + 0009 migrated, pushed, verified from outside: origin==main, fresh `/healthz`, `/public/contact` armed). *Original item:* Local main is ahead of origin with the Tier-2 sign-off (re-recorded Gmail fixtures — tests only) **and the pre-triage spam short-circuit, which adds `support_tickets.gmail_spam` (migration `0008_flat_lionheart`)**. Same drill as 0005/0006/0007 — the STRICT order matters: the new ingest code writes that column on every inbound message, so a redeploy before the migration throws on every poll while `/healthz` stays green (a silent mail outage). (1) From this checkout: `DATABASE_URL='<Railway PUBLIC postgres url>' pnpm --filter @doge-buddy/db migrate` → expect `migrations applied` (9/9). (2) Then `git push origin main` and let Railway redeploy. Nothing else to configure — the short-circuit's only knob (`support.spam_shortcircuit.always`) defaults off and lives on `/admin/settings`.
 - [x] ~~🔴 Contact form go-live.~~ **DONE 2026-08-31 — live walk PASSED** via `robert@closingbrackets.com`: ack 22:34:24Z → approved reply 22:36:26Z threaded on the ack's real Message-ID with the marker → your Gmail reply 22:38:42Z ingested into the same thread/ticket. Two findings became the two items right below. *(The first attempt from the Outlook address tripped `repeat_complainant` — 3rd ticket in 30 days, correct behaviour, re-armed with the walk-#2 SQL — and Microsoft then silently dropped both messages.)* *Original walk-through, kept for the next env setup:* Order only matters in ONE place: **step 4 (migrations) must happen BEFORE step 5 (push)** — the new code writes the `gmail_spam`/`source` columns on every poll cycle and form submission, so a redeploy before the migration is a silent mail outage behind a green `/healthz` (same trap as 0005/0006/0007). Steps 1–3 are safe in any order, any time.

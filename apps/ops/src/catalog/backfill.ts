@@ -31,6 +31,8 @@ export interface BackfillOps {
   productVariantsByProductId(productGid: string): Promise<{ id: string; sku?: string; inventoryItemId: string }[]>
   inventoryItemUpdate(inventoryItemId: string, input: { tracked: boolean }): Promise<void>
   primaryLocationId(): Promise<string>
+  /** Shopify's current `available` at a location (`null` = not stocked there) — the CAS value. */
+  inventoryAvailableAt(inventoryItemId: string, locationId: string): Promise<number | null>
   inventorySetQuantities(input: Record<string, unknown>, idempotencyKey: string): Promise<void>
   productDescriptionHtml(productGid: string): Promise<string>
 }
@@ -311,11 +313,16 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
         // gid that came back from `productVariantsByProductId` is what this inventory item is
         // TODAY.
         try {
+          const locationId = await getLocationId()
+          // 2026-07 requires `changeFromQuantity` on every entry (live: INVALID_FIELD_ARGUMENTS
+          // without it — this script's first real run). It is a CAS against Shopify's CURRENT
+          // `available`, so read that number now, from Shopify — never from our cache of CJ.
+          const changeFromQuantity = (await ops.inventoryAvailableAt(match.inventoryItemId, locationId)) ?? 0
           await ops.inventorySetQuantities(
             {
               name: 'available',
               reason: 'correction',
-              quantities: [{ inventoryItemId: match.inventoryItemId, locationId: await getLocationId(), quantity: observed }],
+              quantities: [{ inventoryItemId: match.inventoryItemId, locationId, quantity: observed, changeFromQuantity }],
             },
             idempotencyKey(local.id, observed, clock()),
           )
