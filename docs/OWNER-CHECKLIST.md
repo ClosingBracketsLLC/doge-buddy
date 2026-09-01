@@ -66,8 +66,16 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
     (If the Snuff Pad is not a real CJ product — sku `DB-SNUFFPAD-01` doesn't look like one — skip
     the SQL, archive it in Shopify admin and `UPDATE products SET status='deprecated' WHERE id=
     'e10022af-…'` instead; the backfill then reports its CJ read as failed and leaves it alone.)
-    Rerun (inside Railway, as before): `--dry-run` → expect 2 products; then real → expect
-    `products=2 updated=2 partial=0 failures=0`. The two live products get
+    **Second run (2026-08-31, after the fix + SQL): `updated=1 partial=1 failures=1`** — the
+    clipper is DONE (slug, `category:grooming`, type, SEO, `tracked=true`, **16 in stock** —
+    verified by Admin API probe); the Snuff Pad got its slug/tag/type but CJ answered *"Variant
+    has been removed from shelves"* (vid `1952308304731430913`) — CJ has delisted it, so it must
+    come OFF sale, not be repaired. Step (c) is otherwise ✅. Deprecate the Snuff Pad through the
+    normal path (inside Railway):
+    `pnpm --filter @doge-buddy/ops deprecate-product --product e10022af-357a-4a59-be02-1911922b2d38 --reason "CJ removed the variant from shelves"`
+    → approve it on Telegram → the worker flips it to DRAFT, unpublishes it, marks the row
+    `deprecated`. Until then the backfill (and the 6-hourly sync) keep reporting that one read as
+    failed — expected. The two live products get
     human URLs (`/products/dog-snuff-pad-<8hex>`, `/products/low-noise-pet-hair-clipper-<8hex>`),
     land in the right category (Grooming & Care for the clipper, etc.), and show tracked stock.
     (d) Verify: the four `/collections/*` pages now list the products; each product page shows

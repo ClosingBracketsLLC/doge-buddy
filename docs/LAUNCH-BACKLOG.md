@@ -66,7 +66,15 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
    by a post-listing `inventory.sync` job and every 6 h after that by the cron). The 2 live
    products get tracked quantities via `backfill-listings`.
 
-## P1 — before the official launch
+## P1
+
+- [ ] **Supplier delisting → automatic deprecation proposal.** CJ answers `Variant has been removed
+  from shelves` on `getVariantStock` for a delisted variant (seen live 2026-08-31 on the Snuff
+  Pad). Today that is just a failed read every 6 h (and a `listing_stock_read_failed` warning);
+  `inventory.sync` should recognise that specific error, push quantity 0 (so the storefront says
+  Sold out at once), and submit a `deprecate_product` proposal (the manual `deprecate-product`
+  script does this by hand meanwhile).
+ — before the official launch
 
 6. **Product page: image gallery** — *Claude*, small. Render all `media` (thumbnails + main), not just
    the variant image; the Clipper already has 3 images. Pair with the sourcing agent pulling ≥3 CJ
