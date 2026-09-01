@@ -99,6 +99,8 @@ const CHIP_TONES: Record<string, ChipTone> = {
   running: 'info', succeeded: 'ok', aborted: 'bad',
   // switches
   ON: 'bad', OFF: 'muted', auto: 'info', manual: 'muted',
+  // control-center home
+  DEGRADED: 'bad', ok: 'ok',
 }
 
 export function chipTone(state: string): ChipTone {

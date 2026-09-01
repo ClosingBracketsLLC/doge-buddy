@@ -49,6 +49,11 @@ export interface SourcingPipelineDeps {
   overrides?: SourcingOverrides
 }
 
+/** The `agent_runs.workflow` value this pipeline claims/runs under — shared with the dashboard's
+ * `sourcingLastRun` health-strip loader (`http/admin/health.ts`) so both sides name the same
+ * workflow string exactly once. */
+export const SOURCING_WORKFLOW = 'sourcing.weekly'
+
 export interface SourcingPipelineResult {
   runId: string | null
   outcome: 'refused' | 'no_candidates' | 'agent_failed' | 'completed'
@@ -87,7 +92,7 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
 
   // --- Stage 1: claim the day's run (Task 11's atomic breaker) --------------------------------
   const claim = await claimDailyRun(db, alert, {
-    workflow: 'sourcing.weekly',
+    workflow: SOURCING_WORKFLOW,
     model: SOURCING_MODEL,
     triggerRef: force ? 'manual' : 'cron',
     force,

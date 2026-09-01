@@ -1,4 +1,4 @@
-import { formatCents, PROPOSAL_TYPES, type ProposalType } from '@doge-buddy/core'
+import { PROPOSAL_TYPES, type ProposalType } from '@doge-buddy/core'
 import {
   adminSessions,
   agentRunEvents,
@@ -19,7 +19,6 @@ import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { FULFILLMENT_RETRY_OPTS } from '../../fulfillment/run-place-order.ts'
 import { applyTransition, IllegalTransitionError, StaleStatusError } from '../../fulfillment/transitions.ts'
 import type { SendOpts } from '../../fulfillment/types.ts'
-import { SUPPORT_AGENT_MAX_RUNS_PER_DAY } from '../../jobs/support-agent-run.ts'
 import type { NotifyOwner } from '../../notify/notify.ts'
 import { enqueueProposalApply, PAYLOAD_SCHEMAS } from '../../proposals/submit.ts'
 import {
@@ -43,10 +42,11 @@ import {
   SESSION_COOKIE,
   validateSession,
 } from './auth.ts'
-import { loadHealthStrip, type HealthStrip } from './health.ts'
+import { loadHealthStrip } from './health.ts'
 import { html, layout, raw, type RawHtml } from './html.ts'
 import { loadNavCounts } from './nav.ts'
 import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
+import { renderDashboard } from './render-dashboard.ts'
 import { renderProposalDetail, renderProposalRow, type ProposalDetailExtras, type ProposalRow } from './render-proposal.ts'
 import { renderRunDetail, renderRunRow } from './render-run.ts'
 import {
@@ -60,37 +60,6 @@ import {
 } from './render-tickets.ts'
 
 const PROPOSAL_STATUSES = proposalStatus.enumValues
-
-/**
- * Renders the dashboard's health strip: wallet balance (or 'n/a'), queue depth, last webhook
- * received, the three kill switches (ON/OFF so the state reads unambiguously at a glance), the
- * pending-proposal count, and (Task 11 scoring) the newest `product_scores.score_date` plus how
- * many products were scored that day ('never'/0 before the scoring job has ever run). Every
- * field is a `HealthStrip` value already loaded by `loadHealthStrip` — this function only formats
- * and escapes (via html``) for display.
- */
-function renderHealthStrip(h: HealthStrip): RawHtml {
-  // Visible below-threshold call-out, distinct from the plain "Wallet: $x.xx" line above it: an
-  // operator scanning the strip should not have to do the < comparison against the settings page
-  // themselves to notice the wallet is running low.
-  const belowThreshold = h.walletCents !== null && h.walletCents < h.walletAlertThresholdCents
-  return html`<section id="health-strip">
-    <p>Wallet: ${h.walletCents === null ? 'n/a' : formatCents(h.walletCents)}</p>
-    ${belowThreshold
-      ? html`<p id="wallet-alert">wallet: ${formatCents(h.walletCents!)} (BELOW ALERT THRESHOLD ${formatCents(h.walletAlertThresholdCents)})</p>`
-      : html``}
-    <p>Queue depth: ${h.queueDepth}</p>
-    <p>Last webhook: ${h.lastWebhookAt ? h.lastWebhookAt.toISOString() : 'never'}</p>
-    <p>Killswitch: ${h.killswitch ? 'ON' : 'OFF'}</p>
-    <p>Fulfillment enabled: ${h.fulfillmentEnabled ? 'ON' : 'OFF'}</p>
-    <p>Paused for funds: ${h.pausedForFunds ? 'ON' : 'OFF'}</p>
-    <p>Pending proposals: ${h.pendingProposals}</p>
-    <p>support poll: last ok ${h.supportPollLastSuccessAt ? h.supportPollLastSuccessAt.toISOString() : 'never'} (${h.supportPollConsecutiveFailures} consecutive failures)</p>
-    <p>support agent: ${h.supportAgentRunsToday} runs today / ${SUPPORT_AGENT_MAX_RUNS_PER_DAY}</p>
-    <p>support agent last run: ${h.supportAgentLastRun ? `${h.supportAgentLastRun.status} at ${h.supportAgentLastRun.startedAt.toISOString()}` : 'none'}</p>
-    <p>scoring: last run ${h.scoringLastRunDate ?? 'never'}, ${h.scoringProductsScored} products scored</p>
-  </section>`
-}
 
 type SettingKind = 'boolean' | 'mode' | 'number' | 'string'
 
@@ -412,7 +381,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       authed.get('/admin', async (request, reply) => {
         return safeHandle('dashboard', reply, async () => {
           const health = await loadHealthStrip(deps)
-          return reply.code(200).type('text/html; charset=utf-8').send(await page('Dashboard', renderHealthStrip(health), request.url))
+          return reply.code(200).type('text/html; charset=utf-8').send(await page('Home', renderDashboard(health), request.url))
         })
       })
 

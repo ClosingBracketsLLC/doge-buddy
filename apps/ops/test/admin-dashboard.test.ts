@@ -1,4 +1,17 @@
-import { agentRuns, auditLog, createDb, gmailSyncState, products, productScores, proposals, settings, supportTickets } from '@doge-buddy/db'
+import {
+  agentRuns,
+  auditLog,
+  createDb,
+  gmailSyncState,
+  orders,
+  products,
+  productScores,
+  productVariants,
+  proposals,
+  settings,
+  supplierOrders,
+  supportTickets,
+} from '@doge-buddy/db'
 import { and, count, eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
@@ -8,6 +21,7 @@ import { createCaptureNotifier } from '../src/notify/capture.ts'
 import { AGENT_RUN_AUDIT_ACTION, SUPPORT_AGENT_MAX_RUNS_PER_DAY } from '../src/jobs/support-agent-run.ts'
 import type { OwnerNotification } from '../src/notify/notify.ts'
 import { createSettings } from '../src/settings.ts'
+import type { SupplierOrderStatusDb } from '../src/fulfillment/transitions.ts'
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -46,6 +60,9 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
   let createdRunIds: string[] = []
   let createdAuditLogIds: bigint[] = []
   let createdProductIds: string[] = []
+  let createdTicketIds: string[] = []
+  let createdOrderIds: string[] = []
+  let createdSupplierOrderIds: string[] = []
 
   afterEach(async () => {
     if (createdProposalIds.length > 0) {
@@ -61,8 +78,24 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
       await db.delete(auditLog).where(inArray(auditLog.id, createdAuditLogIds))
       createdAuditLogIds = []
     }
+    if (createdTicketIds.length > 0) {
+      await db.delete(supportTickets).where(inArray(supportTickets.id, createdTicketIds))
+      createdTicketIds = []
+    }
+    if (createdSupplierOrderIds.length > 0) {
+      await db
+        .delete(auditLog)
+        .where(and(eq(auditLog.entityType, 'supplier_order'), inArray(auditLog.entityId, createdSupplierOrderIds)))
+      await db.delete(supplierOrders).where(inArray(supplierOrders.id, createdSupplierOrderIds))
+      createdSupplierOrderIds = []
+    }
+    if (createdOrderIds.length > 0) {
+      await db.delete(orders).where(inArray(orders.id, createdOrderIds))
+      createdOrderIds = []
+    }
     if (createdProductIds.length > 0) {
-      // product_scores has no ON DELETE CASCADE off products — scores go first.
+      // product_variants and product_scores have no ON DELETE CASCADE off products — both go first.
+      await db.delete(productVariants).where(inArray(productVariants.productId, createdProductIds))
       await db.delete(productScores).where(inArray(productScores.productId, createdProductIds))
       await db.delete(products).where(inArray(products.id, createdProductIds))
       createdProductIds = []
@@ -175,6 +208,50 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
 
   async function seedScoreRow(productId: string, scoreDate: string) {
     await db.insert(productScores).values({ productId, scoreDate })
+  }
+
+  // control-center helpers, copied from admin-orders.test.ts (lines ~80-107) and adapted for this
+  // file's own createdOrderIds/createdSupplierOrderIds cleanup lists.
+  async function seedTicket(status: 'escalated' | 'triaged') {
+    const [row] = await db
+      .insert(supportTickets)
+      .values({
+        gmailThreadId: `cc-${crypto.randomUUID()}`,
+        customerEmail: `cc-${crypto.randomUUID()}@example.com`,
+        subject: 'cc',
+        status,
+      })
+      .returning({ id: supportTickets.id })
+    createdTicketIds.push(row!.id)
+    return row!.id
+  }
+
+  async function seedOrder(): Promise<typeof orders.$inferSelect> {
+    const [row] = await db
+      .insert(orders)
+      .values({ shopifyOrderGid: `gid://shopify/Order/${crypto.randomUUID()}`, isTest: false, totalCents: 5000 })
+      .returning()
+    createdOrderIds.push(row!.id)
+    return row!
+  }
+
+  async function seedSupplierOrder(opts: {
+    orderId: string
+    status: SupplierOrderStatusDb
+    lastError?: string | null
+  }): Promise<typeof supplierOrders.$inferSelect> {
+    const [row] = await db
+      .insert(supplierOrders)
+      .values({
+        orderId: opts.orderId,
+        supplier: 'mock',
+        idempotencyKey: `test-${crypto.randomUUID()}`,
+        status: opts.status,
+        lastError: opts.lastError ?? null,
+      })
+      .returning()
+    createdSupplierOrderIds.push(row!.id)
+    return row!
   }
 
   it('1. unauthenticated GET /admin -> 303 to login', async () => {
@@ -442,6 +519,109 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toContain(`scoring: last run ${FAR_FUTURE_SCORE_DATE}, 2 products scored`)
 
+    await app.close()
+  })
+
+  it('control center: Needs-you cards link to the filtered lists with live counts', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+    const [pending] = await db
+      .insert(proposals)
+      .values({
+        type: 'new_listing',
+        status: 'pending',
+        summary: 'cc pending',
+        payload: VALID_NEW_LISTING_PAYLOAD,
+        sourceWorkflow: 'test',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      })
+      .returning({ id: proposals.id })
+    createdProposalIds.push(pending!.id)
+    await seedTicket('escalated')
+    const order = await seedOrder()
+    await seedSupplierOrder({ orderId: order.id, status: 'needs_attention' })
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('<a class="card" href="/admin/proposals?status=pending">')
+    expect(res.body).toMatch(/Pending proposals<\/div><div class="stat bad">[1-9]\d*</)
+    expect(res.body).toContain('<a class="card" href="/admin/tickets?status=escalated">')
+    expect(res.body).toMatch(/Escalated tickets<\/div><div class="stat bad">[1-9]\d*</)
+    expect(res.body).toContain('<a class="card" href="/admin/orders">')
+    expect(res.body).toMatch(/Orders needing attention<\/div><div class="stat bad">[1-9]\d*</)
+    // the verbatim strip survives inside the details block
+    expect(res.body).toContain('<summary>System status (text)</summary>')
+    expect(res.body).toContain('Pending proposals: ')
+    await app.close()
+  })
+
+  it('control center: switches post to /admin/settings with returnTo=/admin, the kill switch asks first, modes are segmented', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+    expect(res.body).toContain('<input type="hidden" name="key" value="killswitch.global">')
+    expect(res.body).toContain('<input type="hidden" name="returnTo" value="/admin">')
+    expect(res.body).toContain('data-confirm="Turn the global kill switch ON? Every workflow stops."')
+    expect(res.body).toContain('<input type="hidden" name="key" value="workflow.sourcing.mode">')
+    expect(res.body).toContain('<button type="submit" name="value" value="manual" aria-pressed="true">manual</button>')
+    expect(res.body).toContain('<button type="submit" name="value" value="auto" aria-pressed="false">auto</button>')
+    await app.close()
+  })
+
+  it('control center: wallet bar tone — bad below threshold, warn under 2x, plain otherwise', async () => {
+    for (const [cents, cls] of [
+      [500, 'bar bad'],
+      [3000, 'bar warn'],
+      [9000, 'bar '],
+    ] as const) {
+      const deps = makeDeps({ getWalletBalance: async () => ({ availableCents: cents, frozenCents: 0 }) })
+      const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+      const cookie = await loginAndGetCookie(app, deps)
+      const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+      expect(res.body).toContain(`<div class="${cls}">`)
+      await app.close()
+    }
+  })
+
+  it('control center: agents & jobs + catalog rows, without and with data', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+    // The DB may hold other rows; assert on the rows this test controls via distinctive seeds.
+    const [product] = await db
+      .insert(products)
+      .values({ title: 'CC Latest Widget', handle: 'cc-latest-widget-abc12345', status: 'active' })
+      .returning({ id: products.id })
+    createdProductIds.push(product!.id)
+    await db
+      .insert(productVariants)
+      .values({ productId: product!.id, sku: `CC-${crypto.randomUUID()}`, priceCents: 1999, shopifyInventoryItemGid: 'gid://shopify/InventoryItem/1' })
+    await seedAgentRun('sourcing.weekly', 'succeeded')
+    const [synced] = await db
+      .insert(auditLog)
+      .values({ actor: 'system', action: 'inventory.synced', entityType: 'product', entityId: product!.id, detail: {} })
+      .returning({ id: auditLog.id })
+    createdAuditLogIds.push(synced!.id)
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+    expect(res.body).toContain('<span>Sourcing last run</span>')
+    expect(res.body).toContain('<span class="chip chip-ok">succeeded</span>')
+    expect(res.body).toContain('<span>Inventory sync</span>')
+    expect(res.body).toContain('just now')
+    expect(res.body).not.toContain('DEGRADED')
+    expect(res.body).toContain('<a href="https://dogebuddy.com/products/cc-latest-widget-abc12345">CC Latest Widget</a>')
+    expect(res.body).toContain('<div class="label">Tracked variants</div>')
+
+    // a degraded alert newer than the last sync flips the chip on
+    const [degraded] = await db
+      .insert(auditLog)
+      .values({ actor: 'system', action: 'alert.inventory_sync_degraded', entityType: 'alert', detail: { severity: 'warning', failed: 3, attempted: 4 } })
+      .returning({ id: auditLog.id })
+    createdAuditLogIds.push(degraded!.id)
+    const res2 = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+    expect(res2.body).toContain('<span class="chip chip-bad">DEGRADED</span>')
     await app.close()
   })
 })
