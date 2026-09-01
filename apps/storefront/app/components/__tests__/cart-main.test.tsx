@@ -1,5 +1,6 @@
 import {useEffect} from 'react';
 import {render, screen, fireEvent} from '@testing-library/react';
+import {CATEGORIES} from '@doge-buddy/core';
 import {Aside, useAside} from '../Aside';
 import {CartEmpty} from '../CartMain';
 
@@ -46,4 +47,19 @@ it('does not wire a close handler for the page layout (no aside to close)', () =
   // there's no expanded aside for a "page" layout to close.
   fireEvent.click(screen.getByRole('link', {name: 'Start shopping'}));
   expect(screen.getByText('Your cart is empty')).toBeInTheDocument();
+});
+
+it('points the empty-cart CTA at the first real category, not a hardcoded handle', () => {
+  render(
+    <Aside.Provider>
+      <CartEmpty hidden={false} layout="page" />
+    </Aside.Provider>,
+  );
+
+  // Derived from CATEGORIES (the same source Header and Hero use) so the CTA cannot outlive a
+  // renamed or reordered category and 404 the way the hardcoded `/collections/toys-play` would.
+  expect(screen.getByRole('link', {name: 'Start shopping'})).toHaveAttribute(
+    'href',
+    `/collections/${CATEGORIES[0].handle}`,
+  );
 });

@@ -1,3 +1,4 @@
+import {CATEGORIES} from '@doge-buddy/core';
 import {useOptimisticCart} from '@shopify/hydrogen';
 import type {CartApiQueryFragment} from 'storefrontapi.generated';
 import {useAside} from '~/components/Aside';
@@ -100,7 +101,7 @@ export function CartEmpty({
       <EmptyState
         title="Your cart is empty"
         message="Your buddy deserves something new."
-        cta={{to: '/collections/toys-play', label: 'Start shopping'}}
+        cta={{to: `/collections/${CATEGORIES[0].handle}`, label: 'Start shopping'}}
         onCtaClick={layout === 'aside' ? close : undefined}
       />
     </div>

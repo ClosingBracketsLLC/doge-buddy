@@ -53,10 +53,10 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
     (f) Force a sync check: watch the Railway ops logs for `inventory.synced` right after that
     listing (the post-listing job enqueues automatically) — or wait for the next 6-hourly cron. A
     variant whose CJ stock is 0 should show "Sold out" on the storefront within one cycle.
-    (g) **Build-week runs:** on `/admin/settings`, flip `workflow.sourcing.mode` to `auto` and set
-    `sourcing.max_winners` = 8, `sourcing.candidate_target` = 40, `sourcing.max_pages` = 20,
-    `sourcing.max_budget_cents` = 500 (or skip the settings and just pass the CLI flags below —
-    overrides beat settings). Then run the block below, Tue–Thu, ~10 min apart (each run costs
+    (g) **Build-week runs:** on `/admin/settings`, flip `workflow.sourcing.mode` to `auto`. Leave
+    the four `sourcing.*` settings alone — the CLI flags in the block below carry the build-week
+    numbers (overrides beat settings), so nothing has to be set here and nothing is left changed
+    afterwards. Then run the block below, Tue–Thu, ~10 min apart (each run costs
     ≈$3–5 CJ points + Anthropic spend; Claude watches `/admin` and the wallet). **Flip
     `workflow.sourcing.mode` back to `manual` after the last run.**
     ```
