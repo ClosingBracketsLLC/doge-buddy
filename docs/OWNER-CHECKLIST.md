@@ -116,6 +116,16 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ## Now / this week
 
+- [x] ✅ **Admin control center shipped (2026-09-01).** `/admin` is mobile-first for the Fold: bottom tabs
+  with badges (pending proposals, escalated tickets) on the cover screen, a left rail on the inner
+  screen/desktop; the home page is a card board — Needs you · Money · Switches · Agents & jobs ·
+  Catalog — and the switches (kill switch, fulfillment, the four workflow modes) flip settings in one
+  tap (the kill switch asks first). Every table stacks into cards under 640 px; Approve/Reject and
+  Escalate/Resolve sit in a sticky bar; irreversible posts confirm. Dark by default, light follows
+  the phone. **What to do:** open `/admin` on the cover screen and the inner screen; tap through a
+  proposal and a ticket; report anything that overflows, is too small to tap, or reads wrong.
+  (Verified at 380/800/1280 px by screenshot; the raw text health strip still lives under
+  "System status (text)".)
 - [ ] ⚪ **Catalog P0 — follow-ups (none block go-live; from the branch review).** (1) `inventory.sync` holds a DB connection + row lock per variant across the CJ read and Shopify push, and neither client has a request timeout — bounded to 2 of 10 pool connections, fine for the canary; queue `SET LOCAL idle_in_transaction_session_timeout = '30s'` in that transaction + request timeouts on the CJ/Shopify clients. (2) Don't run `backfill-listings` while the 6-hourly sync is mid-cycle — it is a manual one-shot and is NOT row-lock serialized (fix the `operations.ts` comment that says otherwise). (3) Comment nits: ~~`proposal-apply.test.ts` still explains a withdrawn CAS~~ (fixed with the changeFromQuantity fix); the sync's points guard can never fire before the variant cap; `skipped` lumps out-of-scope variants with "needs backfill" ones. (4) `usQuantity` = largest single US warehouse (not the sum) — matches the fulfillment planner; revisit only if the planner ever learns multi-warehouse splits.
 - [x] ~~Tap APPROVE on a proposal on your phone.~~ **Done (2026-08-25) — and it closed BOTH open live tiers.** You approved the *Low Noise Pet Hair Clipper* **from the admin dashboard** (Telegram login-link → `/admin/proposals` → approve — exactly Phase 4B's walk) and rejected the *Plush Round Dog Bed* via the Telegram link. The apply worker created ACTIVE Shopify product `gid://shopify/Product/8949329592408` ($54.99, SKU `CJJJCWGY01635-Style D`) with its CJ fulfillment mapping 6 seconds after the tap. **Phase 5 is closed on every tier.**
 - [x] ~~Migration 0008 on Railway FIRST, then push.~~ **Done 2026-08-31** (0008 + 0009 migrated, pushed, verified from outside: origin==main, fresh `/healthz`, `/public/contact` armed). *Original item:* Local main is ahead of origin with the Tier-2 sign-off (re-recorded Gmail fixtures — tests only) **and the pre-triage spam short-circuit, which adds `support_tickets.gmail_spam` (migration `0008_flat_lionheart`)**. Same drill as 0005/0006/0007 — the STRICT order matters: the new ingest code writes that column on every inbound message, so a redeploy before the migration throws on every poll while `/healthz` stays green (a silent mail outage). (1) From this checkout: `DATABASE_URL='<Railway PUBLIC postgres url>' pnpm --filter @doge-buddy/db migrate` → expect `migrations applied` (9/9). (2) Then `git push origin main` and let Railway redeploy. Nothing else to configure — the short-circuit's only knob (`support.spam_shortcircuit.always`) defaults off and lives on `/admin/settings`.
@@ -445,7 +455,7 @@ tell Claude — especially the credential items, so live verification can run.*
 
 **Next build session starts here →** **Catalog P0 is BUILT 2026-08-31 (branch `catalog-p0`,
 `docs/superpowers/specs/2026-08-31-catalog-p0-design.md`) — the live tier is the top of the
-remaining work: runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
+remaining work: admin control center is on `main` (push it); then runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
 one manual `run-sourcing --max-winners 2` → force an `inventory.sync` check → flip
 `workflow.sourcing.mode` to `auto` for the build-week runs → back to `manual` after). Once the
 build-week runs land ~40+ products, next is `docs/LAUNCH-BACKLOG.md` **P1** (product page image
