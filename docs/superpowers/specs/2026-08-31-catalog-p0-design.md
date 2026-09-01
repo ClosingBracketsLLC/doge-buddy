@@ -107,7 +107,7 @@ Also fixes `runSeed` so its collection step publishes the same way (today it pub
 
 **Backfill** for the two live products: `pnpm --filter @doge-buddy/ops backfill-listings` — for every
 `products` row with an active Shopify gid: `productUpdate` handle/tags/productType/seo from the local
-row + category, then the inventory part (tracked + quantity from CJ + inventory item gid). Idempotent.
+row + category, then the inventory part (tracked + quantity from CJ + inventory item gid). Idempotent. Review rulings 2026-08-31: a failed CJ read SKIPS both inventory writes for that variant (the item stays untracked and selling — never zero a live product) and is recorded as a failure (exit 1, rerun); the handle change passes `redirectNewHandle: true`; a single-variant product matches its Shopify variant positionally when Shopify's sku is null; a product with any failed variant counts as `partial`, not `updated`; a fully repaired product enqueues one `inventory.sync`; `tags`/`seo` are replaced wholesale (hand edits on a live product are discarded).
 Run once against the real store; the same script is the repair tool if a future listing half-applies.
 
 ## 4. `inventory.sync` job
