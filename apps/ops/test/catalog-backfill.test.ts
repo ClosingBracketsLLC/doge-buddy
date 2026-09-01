@@ -41,6 +41,9 @@ interface ScriptedProduct {
   variants: { id: string; sku?: string; inventoryItemId: string }[]
   /** When set, `productUpdate` rejects with it — the (d) failure-containment case. */
   productUpdateError?: Error
+  /** When set, `inventorySetQuantities` rejects with it for EVERY variant of this product — the
+   * (b) ordering case: a failed quantity set must leave the item untracked. */
+  setQuantitiesError?: Error
 }
 
 /**
@@ -59,6 +62,9 @@ function fakeOps(script: Record<string, ScriptedProduct>) {
     inventoryItemUpdate: [] as { inventoryItemId: string; input: { tracked: boolean } }[],
     setQuantities: [] as { input: Record<string, unknown>; key: string }[],
     locationCalls: 0,
+    /** The two inventory writes in the order they were ISSUED, across both ops — the only way to
+     * assert that the quantity lands before tracking is switched on. */
+    inventoryOrder: [] as string[],
   }
   const scripted = (productGid: string): ScriptedProduct => {
     const entry = script[productGid]
@@ -82,6 +88,7 @@ function fakeOps(script: Record<string, ScriptedProduct>) {
       return entry.variants
     },
     inventoryItemUpdate: async (inventoryItemId, input) => {
+      calls.inventoryOrder.push(`tracked:${inventoryItemId}`)
       calls.inventoryItemUpdate.push({ inventoryItemId, input })
     },
     primaryLocationId: async () => {
@@ -89,6 +96,10 @@ function fakeOps(script: Record<string, ScriptedProduct>) {
       return LOCATION_ID
     },
     inventorySetQuantities: async (input, key) => {
+      const itemId = String(((input as { quantities: { inventoryItemId: string }[] }).quantities)[0]!.inventoryItemId)
+      calls.inventoryOrder.push(`quantity:${itemId}`)
+      const entry = Object.values(script).find((e) => e.variants.some((v) => v.inventoryItemId === itemId))
+      if (entry?.setQuantitiesError) throw entry.setQuantitiesError
       calls.setQuantities.push({ input, key })
     },
   }
@@ -317,6 +328,57 @@ describe('backfillListings', () => {
     expect(mapping!.stockCheckedAt).toEqual(NOW)
   })
 
+  it('(b) sets the quantity BEFORE switching tracking on', async () => {
+    const seeded = await seedProduct()
+    const { ops, calls } = fakeOps({
+      [seeded.productGid]: {
+        descriptionHtml: '<p>Mat.</p>',
+        variants: [{ id: 'gid://shopify/ProductVariant/81', sku: seeded.sku, inventoryItemId: 'gid://shopify/InventoryItem/81' }],
+      },
+    })
+    const { deps: d } = deps(ops, fakeAdapter({ [seeded.supplierVariantId]: 4 }))
+
+    await backfillListings(d, { dryRun: false })
+
+    // Quantities exist on an untracked item; tracking only decides whether Shopify ENFORCES them.
+    // So the quantity goes first: an item that is tracked before it has a real number is a live
+    // product showing Sold out for as long as the second call takes to land — or forever, if it
+    // never does.
+    expect(calls.inventoryOrder).toEqual([
+      'quantity:gid://shopify/InventoryItem/81',
+      'tracked:gid://shopify/InventoryItem/81',
+    ])
+  })
+
+  it('(b) a throwing inventorySetQuantities leaves the item UNTRACKED and records the failure', async () => {
+    const seeded = await seedProduct({ lastKnownStock: 7, stockCheckedAt: new Date('2026-08-20T00:00:00.000Z') })
+    const { ops, calls } = fakeOps({
+      [seeded.productGid]: {
+        descriptionHtml: '<p>Mat.</p>',
+        variants: [{ id: 'gid://shopify/ProductVariant/82', sku: seeded.sku, inventoryItemId: 'gid://shopify/InventoryItem/82' }],
+        setQuantitiesError: new Error('Shopify 500'),
+      },
+    })
+    const { deps: d, enqueued } = deps(ops, fakeAdapter({ [seeded.supplierVariantId]: 4 }))
+
+    const result = await backfillListings(d, { dryRun: false })
+
+    // The whole point of the ordering: the set failed, so tracking is never switched on and the
+    // live product keeps selling instead of being stranded at Sold out.
+    expect(calls.inventoryItemUpdate).toEqual([])
+    expect(calls.inventoryOrder).toEqual(['quantity:gid://shopify/InventoryItem/82'])
+    expect(result.partial).toBe(1)
+    expect(result.updated).toBe(0)
+    expect(enqueued).toEqual([])
+    expect(result.failures.some((f) => f.includes(seeded.sku) && f.includes('Shopify 500'))).toBe(true)
+    // No push landed, so nothing is cached: the local row still holds the last real observation.
+    const [mapping] = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, seeded.variantId))
+    expect(mapping!.lastKnownStock).toBe(7)
+  })
+
   it('(b) leaves inventory UNTOUCHED when the CJ read fails, and says so loudly', async () => {
     const checkedAt = new Date('2026-08-20T00:00:00.000Z')
     const seeded = await seedProduct({ lastKnownStock: 7, stockCheckedAt: checkedAt })
@@ -368,6 +430,19 @@ describe('backfillListings', () => {
     // The Shopify handle update DID land, so the local row must not desync from it.
     const [row] = await db.select().from(products).where(eq(products.id, seeded.productId))
     expect(row!.handle).toBe(proposalHandle(seeded.proposalId!, seeded.title!))
+
+    // BOTH variants' gids are persisted, the failed one included: the gid write happens before the
+    // stock read and is what makes the variant addressable at all — without it `inventory.sync`
+    // counts the row `skipped` forever and the rerun this failure asks for has nothing to repair.
+    const persisted = await db
+      .select()
+      .from(productVariants)
+      .where(inArray(productVariants.id, [seeded.variantId, second.variantId]))
+    const byId = new Map(persisted.map((v) => [v.id, v]))
+    expect(byId.get(seeded.variantId)!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/78')
+    expect(byId.get(seeded.variantId)!.shopifyInventoryItemGid).toBe('gid://shopify/InventoryItem/78')
+    expect(byId.get(second.variantId)!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/79')
+    expect(byId.get(second.variantId)!.shopifyInventoryItemGid).toBe('gid://shopify/InventoryItem/79')
   })
 
   it('(b) matches a single variant positionally when Shopify reports no sku', async () => {

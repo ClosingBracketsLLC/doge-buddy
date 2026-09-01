@@ -116,10 +116,12 @@ function idempotencyKey(variantId: string, quantity: number, at: Date): string {
  * 3. `productVariantsByProductId` → persist `shopify_inventory_item_gid` (and
  *    `shopify_variant_gid` when it's null) onto the local variant rows, matched by sku.
  * 4. Per variant that has a supplier mapping: read CJ's US stock FIRST, then — only on a real
- *    reading — `inventoryItemUpdate(tracked: true)` and one `inventorySetQuantities` with it. A
- *    failed read leaves the variant untouched and untracked (see the inline note: tracking a live
- *    product at a fabricated 0 would strand it at Sold out, because the unchanged local cache
- *    would make every later sync cycle call it "unchanged").
+ *    reading — one `inventorySetQuantities` with it and, ONLY IF THAT LANDED,
+ *    `inventoryItemUpdate(tracked: true)`. A failed read leaves the variant untouched and
+ *    untracked (see the inline note: tracking a live product at a fabricated 0 would strand it at
+ *    Sold out, because the unchanged local cache would make every later sync cycle call it
+ *    "unchanged"), and a failed quantity set does the same for the same reason — tracking is what
+ *    makes a quantity enforced, so it must never be switched on ahead of a real number.
  * 5. The local `products.handle`, written LAST — so a crash anywhere above leaves the row still
  *    claiming the old handle and a rerun repeats the whole product rather than believing it done.
  * 6. Only if EVERY variant came through: the product is counted `updated` and handed to
@@ -296,17 +298,39 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
           log(`FAILED ${message}`)
           continue
         }
-        // Shopify's own answer addresses the push, not the (possibly stale) local column: the gid
-        // that came back from `productVariantsByProductId` is what this inventory item is TODAY.
-        await ops.inventoryItemUpdate(match.inventoryItemId, { tracked: true })
-        await ops.inventorySetQuantities(
-          {
-            name: 'available',
-            reason: 'correction',
-            quantities: [{ inventoryItemId: match.inventoryItemId, locationId: await getLocationId(), quantity: observed }],
-          },
-          idempotencyKey(local.id, observed, clock()),
-        )
+        // QUANTITY FIRST, TRACKING SECOND — the order matters and it is not the obvious one
+        // (whole-branch review, I4). A quantity can be set on an UNTRACKED inventory item;
+        // `tracked` only decides whether Shopify ENFORCES it at checkout. Switching tracking on
+        // first therefore publishes an enforced quantity of whatever Shopify happened to hold for
+        // an item nobody was tracking — 0 — so a failed or slow `inventorySetQuantities` leaves a
+        // LIVE product reading Sold out: for the length of one round-trip if the set lands, and
+        // permanently if it throws. Quantity first inverts that: the worst case is an item that is
+        // correct but unenforced, which is exactly the state the product is in right now.
+        //
+        // Shopify's own answer addresses both calls, not the (possibly stale) local column: the
+        // gid that came back from `productVariantsByProductId` is what this inventory item is
+        // TODAY.
+        try {
+          await ops.inventorySetQuantities(
+            {
+              name: 'available',
+              reason: 'correction',
+              quantities: [{ inventoryItemId: match.inventoryItemId, locationId: await getLocationId(), quantity: observed }],
+            },
+            idempotencyKey(local.id, observed, clock()),
+          )
+          await ops.inventoryItemUpdate(match.inventoryItemId, { tracked: true })
+        } catch (err) {
+          // Contained per VARIANT, not per product: the catalog fields already landed and the
+          // sibling variants still deserve their repair. The item is left untracked and selling —
+          // its current live state — and the recorded failure is what makes the run exit 1 and a
+          // human rerun it.
+          variantFailures += 1
+          const message = `product ${product.id} ${local.sku}: inventory repair failed — ${formatError(err)}`
+          failures.push(message)
+          log(`FAILED ${message}`)
+          continue
+        }
         // Strictly after the push: a crash between the two re-pushes the same value on a rerun
         // (harmless), whereas caching first would record a push that never happened.
         await db
