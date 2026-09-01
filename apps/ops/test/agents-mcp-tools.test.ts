@@ -316,20 +316,40 @@ describe('agents/mcp-tools', () => {
 
     it('server registers the tool only when a provider is wired', () => {
       const base = { adapter: makeStubAdapter(), allowance: new PointsAllowance() }
-      // instance.options.tools is the SDK's registered tool list (name property per tool)
-      const without = createSourcingMcpServer(base) as unknown as { instance?: unknown }
+
+      const without = createSourcingMcpServer(base) as unknown as Record<string, unknown>
       const withMarket = createSourcingMcpServer({
         ...base,
         marketPrice: { key: 'serpapi_google_shopping', fetchOffers: async () => [] },
         marketLookups: new MarketLookups(),
-      })
-      // Both construct; the armed one exposes a lookup_market_price handler, the bare one does not.
+      }) as unknown as Record<string, unknown>
+
+      // The SDK server exposes registered tools through instance._registeredTools (object keyed by tool name)
+      const getToolNames = (server: Record<string, unknown>): string[] => {
+        const inst = server.instance as Record<string, unknown> | undefined
+        const registeredTools = inst?._registeredTools as Record<string, unknown> | undefined
+        return Object.keys(registeredTools ?? {})
+      }
+
+      // Without market deps: exactly four CJ tools (no lookup_market_price)
+      const withoutToolNames = getToolNames(without).sort()
+      expect(withoutToolNames).toEqual([
+        'get_product_detail', 'get_reviews', 'get_stock', 'quote_freight'
+      ].sort())
+      expect(withoutToolNames).not.toContain('lookup_market_price')
+
+      // With market deps: five tools including lookup_market_price
+      const withMarketToolNames = getToolNames(withMarket).sort()
+      expect(withMarketToolNames).toEqual([
+        'get_product_detail', 'get_reviews', 'get_stock', 'quote_freight', 'lookup_market_price'
+      ].sort())
+      expect(withMarketToolNames).toContain('lookup_market_price')
+
+      // Handler is always available on the handlers object (for tests), but returns error if deps missing
       const bareHandlers = createSourcingToolHandlers(base)
-      expect(bareHandlers.lookup_market_price).toBeDefined() // handler exists...
+      expect(bareHandlers.lookup_market_price).toBeDefined()
       const bareResult = bareHandlers.lookup_market_price({ supplierProductId: 'p', query: 'q' })
-      expect(without).toBeDefined()
-      expect(withMarket).toBeDefined()
-      return expect(bareResult).resolves.toMatchObject({ isError: true }) // ...but reports unavailable
+      return expect(bareResult).resolves.toMatchObject({ isError: true })
     })
   })
 })
