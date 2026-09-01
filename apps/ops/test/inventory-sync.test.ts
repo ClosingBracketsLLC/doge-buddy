@@ -245,14 +245,17 @@ describe('executeInventorySync', () => {
     expect(shopify.calls[0]!.input).toEqual({
       name: 'available',
       reason: 'correction',
-      // `changeFromQuantity` is the cached value: 2026-07 has no `ignoreCompareQuantity`, and this
-      // optional per-entry field is the API's compare-and-swap. It is what stops the cron cycle
-      // and an on-demand post-listing cycle — two producers on two queues, unserialized by design
-      // — from silently clobbering each other's push with a stale number.
-      quantities: [{ inventoryItemId: v.inventoryItemGid, locationId: LOCATION_ID, quantity: 4, changeFromQuantity: 1 }],
+      quantities: [{ inventoryItemId: v.inventoryItemGid, locationId: LOCATION_ID, quantity: 4 }],
     })
+    // NO `changeFromQuantity`, even though the cache here is non-null (1) — this is an
+    // UNCONDITIONAL set, on purpose. The 2026-07 CAS field compares against Shopify's CURRENT
+    // `available`, and `last_known_stock` caches CJ's last READING; the two diverge the moment a
+    // customer buys one (Shopify moves available -> committed, CJ still says 7, and nothing
+    // pushes because the job sees no change). A CAS against the cache would then be rejected on
+    // every later cycle forever, in the oversell direction and below the degraded-alert ratio.
+    // Concurrency between our own two producers is solved by the row lock instead — see (c2).
     const quantity = (shopify.calls[0]!.input as { quantities: Record<string, unknown>[] }).quantities[0]!
-    expect(Object.keys(quantity).sort()).toEqual(['changeFromQuantity', 'inventoryItemId', 'locationId', 'quantity'])
+    expect(Object.keys(quantity).sort()).toEqual(['inventoryItemId', 'locationId', 'quantity'])
     // `inv-<variantRowId>-<quantity>-<unix seconds>`: the quantity is in the key so a real change
     // can never replay a previous push's result (an hour-bucketed key would let a :40 push of 2
     // replay a :05 push of 4 — the store stays wrong, in the oversell direction, forever).
@@ -272,48 +275,84 @@ describe('executeInventorySync', () => {
     await executeInventorySync(depsAgain, { productId })
     expect(shopifyAgain.calls[0]!.key).toBe(`inv-${v.variantId}-7-${NOW_EPOCH_SECONDS}`)
     expect(shopifyAgain.calls[0]!.key).not.toBe(shopify.calls[0]!.key)
-    // The CAS follows the cache, which the first push above advanced to 4.
-    expect((shopifyAgain.calls[0]!.input as { quantities: { changeFromQuantity?: number }[] }).quantities[0]!.changeFromQuantity)
-      .toBe(4)
   })
 
   // (c2) ------------------------------------------------------------------------------------
-  it('c2. a null cache omits changeFromQuantity entirely (nothing to compare against)', async () => {
+  it('c2. two concurrent cycles on the same variant leave Shopify and the cache consistent', async () => {
     const productId = await seedProduct('active')
     const v = await seedVariant(productId, { lastKnownStock: null })
-    const shopify = fakeShopify()
-    const { deps } = makeDeps(fakeAdapter({ [v.supplierVariantId]: 4 }), shopify)
 
-    expect(await executeInventorySync(deps, { productId })).toEqual({ updated: 1, unchanged: 0, failed: 0, skipped: 0 })
-    const quantity = (shopify.calls[0]!.input as { quantities: Record<string, unknown>[] }).quantities[0]!
-    expect(Object.keys(quantity).sort()).toEqual(['inventoryItemId', 'locationId', 'quantity'])
-  })
-
-  // (c3) ------------------------------------------------------------------------------------
-  it('c3. a userError from the CAS counts the variant failed and leaves the cache untouched', async () => {
-    const productId = await seedProduct('active')
-    const v = await seedVariant(productId, { lastKnownStock: 1, stockCheckedAt: new Date('2026-08-01T00:00:00.000Z') })
-    // What the real op does with a non-empty `userErrors` (`assertNoUserErrors`): it throws.
-    const shopify = fakeShopify({
-      inventorySetQuantities: async () => {
-        throw new Error('inventorySetQuantities: Quantity does not match the compare quantity')
+    // CJ's answer MOVES between the two reads: whichever cycle reads this variant first gets 7,
+    // the other gets 3.
+    //
+    // The SECOND reader then holds until the first cycle's push has actually been issued, so the
+    // store receives 7 before it receives 3. Bounded by a timeout, for the same reason the push
+    // hold below is: once the variant is serialized the second reader is blocked on the row lock
+    // and the thing it waits for can never arrive, and a bare `await` would deadlock the very fix
+    // this test exists to prove.
+    const answers = [7, 3]
+    const pushes: { inventoryItemId: string; quantity: number }[] = []
+    let readCount = 0
+    const adapter = {
+      reads: [] as string[],
+      getVariantStock: async (supplierVariantId: string): Promise<WarehouseStock[]> => {
+        adapter.reads.push(supplierVariantId)
+        if (supplierVariantId !== v.supplierVariantId) {
+          // Same stance as `fakeAdapter`: an id this test didn't seed (the unscoped cycle sweeps
+          // the shared database) throws, so it is counted failed and touches nothing.
+          throw new Error(`unscripted supplier variant ${supplierVariantId}`)
+        }
+        const answer = answers[Math.min(readCount, answers.length - 1)]!
+        readCount += 1
+        if (readCount > 1) {
+          for (let waited = 0; waited < 300 && pushes.length === 0; waited += 10) {
+            await new Promise((resolve) => setTimeout(resolve, 10))
+          }
+        }
+        return stock(answer)
       },
-    })
-    const { deps } = makeDeps(fakeAdapter({ [v.supplierVariantId]: 4 }), shopify)
+    }
 
-    // A lost CAS is a real miss, not noise: it is counted `failed` and therefore counts toward the
-    // degraded ratio, exactly like a supplier read that fell over.
-    expect(await executeInventorySync(deps, { productId })).toEqual({ updated: 0, unchanged: 0, failed: 1, skipped: 0 })
-    // No cache write: the other producer's value is what Shopify holds, and next cycle re-reads
-    // CJ and retries against the row it finds then.
-    const row = await mappingRow(v.variantId)
-    expect(row!.lastKnownStock).toBe(1)
-    expect(row!.stockCheckedAt?.toISOString()).toBe('2026-08-01T00:00:00.000Z')
-    const failedAudit = await db
-      .select()
-      .from(auditLog)
-      .where(and(eq(auditLog.action, 'inventory_sync.variant_failed'), eq(auditLog.entityId, v.variantId)))
-    expect(failedAudit).toHaveLength(1)
+    // Records what Shopify RECEIVED, in receive order. The 7 — the first reader's push — then
+    // HOLDS its caller until the other cycle has written 3 to the cache (bounded, for the same
+    // deadlock reason as the read gate: once the variant is serialized, that can never happen
+    // while the lock is held). Unserialized, that pins the exact interleave the lost update is
+    // made of: Shopify receives 7, then 3 (so the store holds 3), while the 7-cycle's cache write
+    // lands LAST (so the cache claims 7). Nothing ever corrects that split — every later cycle
+    // compares CJ against the cache, agrees, and pushes nothing.
+    const shopify = (): InventorySyncShopifyOps => ({
+      inventorySetQuantities: async (input: Record<string, unknown>) => {
+        const entry = (input as { quantities: { inventoryItemId: string; quantity: number }[] }).quantities[0]!
+        pushes.push(entry)
+        if (entry.quantity !== 7) return
+        for (let waited = 0; waited < 300; waited += 10) {
+          if ((await mappingRow(v.variantId))?.lastKnownStock === 3) return
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+      },
+      primaryLocationId: async () => LOCATION_ID,
+    })
+
+    const { deps: cronDeps } = makeDeps(adapter, shopify())
+    const { deps: onDemandDeps } = makeDeps(adapter, shopify())
+
+    // The two real producers: the 6-hourly whole-catalog cron and the post-listing per-product
+    // job. They sit on two different queue names, so pg-boss's stately singleton cannot serialize
+    // them against each other — only the row lock can.
+    await Promise.all([
+      executeInventorySync(cronDeps, {}),
+      executeInventorySync(onDemandDeps, { productId }),
+    ])
+
+    // Both cycles read this variant, so they genuinely contended for it.
+    expect(adapter.reads.filter((id) => id === v.supplierVariantId)).toHaveLength(2)
+
+    const mine = pushes.filter((p) => p.inventoryItemId === v.inventoryItemGid)
+    expect(mine.length).toBeGreaterThanOrEqual(1)
+    // The invariant: whatever Shopify was left holding is exactly what our cache claims it holds.
+    const cached = (await mappingRow(v.variantId))!.lastKnownStock
+    expect(mine[mine.length - 1]!.quantity).toBe(cached)
+    expect(answers).toContain(cached)
   })
 
   // (d) -------------------------------------------------------------------------------------

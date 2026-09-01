@@ -185,19 +185,19 @@ async function auditVariantFailure(db: Db, variantId: string, err: unknown): Pro
  * unchanged means NO Shopify call at all (the common case by far — most variants don't move in six
  * hours) but still a fresh `stock_checked_at`, so "we looked" and "it changed" stay separable.
  * Changed means one `inventorySetQuantities` setting the `available` quantity at the store's one
- * active location — compare-and-swapped against `last_known_stock` via the optional
- * `changeFromQuantity` whenever there is one to swap against — followed by the local cache write.
- * That ordering is deliberate: a crash between the two re-pushes the same value next cycle
- * (harmless), whereas writing the cache first would record a push that never happened and leave the
- * storefront stale until CJ's number moves again.
+ * active location — followed by the local cache write. That ordering is deliberate: a crash
+ * between the two re-pushes the same value next cycle (harmless), whereas writing the cache first
+ * would record a push that never happened and leave the storefront stale until CJ's number moves
+ * again. Read, push and cache write all run inside ONE short transaction holding that variant's
+ * `supplier_variant_mappings` row lock — what keeps this job's two producers (the cron and the
+ * on-demand post-listing job, on two different queue names) from interleaving into a lost update.
+ * The API's own `changeFromQuantity` CAS is the wrong tool for it; the inline docblock says why.
  *
  * **Isolation.** Every variant's work is wrapped: a throw is counted `failed`, audit-logged, and
  * the cycle moves on — one flaky supplier read must never cost the other 199 variants their sync.
  * A failed variant's `last_known_stock` is left exactly as it was; "CJ was unreachable" is not an
- * observation that the warehouse is empty. A LOST CAS arrives here as a throw too (the op turns
- * `userErrors` into one) and is treated identically — counted `failed`, cache untouched, retried
- * next cycle — and it DOES count toward the degraded ratio below, because a push that did not land
- * is a real miss however it was lost.
+ * observation that the warehouse is empty. The throw also rolls that variant's transaction back,
+ * so a push that landed but whose cache write did not is simply re-pushed next cycle.
  */
 export async function executeInventorySync(
   deps: InventorySyncDeps,
@@ -218,7 +218,9 @@ export async function executeInventorySync(
       inventoryItemGid: productVariants.shopifyInventoryItemGid,
       mappingId: supplierVariantMappings.id,
       supplierVariantId: supplierVariantMappings.supplierVariantId,
-      lastKnownStock: supplierVariantMappings.lastKnownStock,
+      // `last_known_stock` is deliberately NOT selected here: this snapshot can be minutes old by
+      // the time a 200-variant cycle reaches a given row, and the only value safe to compare
+      // against is the one re-read under that row's lock below.
     })
     .from(productVariants)
     .innerJoin(products, eq(products.id, productVariants.productId))
@@ -234,9 +236,9 @@ export async function executeInventorySync(
 
   // A variant could in principle carry mappings for two suppliers (the unique index is on
   // (variant, supplier)), which would yield two rows here for one inventory item — two pushes of
-  // two different numbers at the same inventory item, the second of which would also lose the CAS
-  // against a cache the first just advanced. Only ever one supplier per variant today; take the
-  // first deterministically rather than leaving that to chance.
+  // two different numbers at the same inventory item — which the row lock below would NOT
+  // serialize either, since they are two different mapping rows. Only ever one supplier per
+  // variant today; take the first deterministically rather than leaving that to chance.
   const byVariant = new Map<string, (typeof selected)[number]>()
   for (const row of selected) {
     if (!byVariant.has(row.variantId)) byVariant.set(row.variantId, row)
@@ -333,54 +335,87 @@ export async function executeInventorySync(
     }
 
     try {
-      const quantity = usQuantity(await deps.adapter.getVariantStock(row.supplierVariantId))
-      if (quantity === row.lastKnownStock) {
-        // Nothing to push, but the observation is still worth recording: `stock_checked_at` is how
-        // an operator tells "CJ says 4" from "nobody has looked since Tuesday".
-        await db
-          .update(supplierVariantMappings)
-          .set({ stockCheckedAt: clock() })
+      /**
+       * ONE VARIANT, ONE SHORT TRANSACTION, HOLDING THAT VARIANT'S MAPPING ROW LOCK across the
+       * whole read -> push -> cache sequence (whole-branch review, I1).
+       *
+       * This job has two producers — the 6-hourly whole-catalog cron and the on-demand
+       * post-listing job — and they sit on two DIFFERENT queue names by design, so pg-boss's
+       * `stately` singleton cannot serialize them against each other. Unserialized, their
+       * sequences interleave into a plain lost update: A reads 7 and pushes 7, B reads 5, pushes
+       * 5 and caches 5, A caches 7 LAST — the store holds 5 while the cache claims 7, and every
+       * later cycle compares CJ against that cache, agrees, and pushes nothing. Permanent, and in
+       * the oversell direction.
+       *
+       * `SELECT … FOR UPDATE` on the mapping row (not an advisory lock — the row IS the contended
+       * thing; `scoring-weekly-digest.ts`'s `pg_advisory_xact_lock` guards a whole-job singleton,
+       * which is not what this is) makes the second producer block until the first COMMITS and
+       * then re-read the cache the first just wrote. That re-read is the point: the value selected
+       * at the top of the cycle can be minutes old by the time a 200-variant walk reaches this row.
+       *
+       * NOT solved with the API's `changeFromQuantity` CAS, which was this review's first ruling
+       * and is wrong: it compares against Shopify's CURRENT `available`, while `last_known_stock`
+       * caches CJ's last READING. The two diverge on the first sale of any variant — Shopify moves
+       * `available` -> `committed` when an order is placed and nothing pushes, because CJ has not
+       * moved — after which every push is rejected forever (cache 7, store 6; CJ drops to 5; push
+       * {5, from 7} rejected; cache stays 7; repeat), in the oversell direction and quietly, below
+       * the degraded-alert ratio.
+       *
+       * The cost is a DB connection and a row lock held across a CJ read and a Shopify push. That
+       * is deliberate: the transaction covers exactly one variant, and the only thing that can
+       * contend for the lock is another cycle syncing the SAME variant — which has to wait anyway
+       * to be correct.
+       */
+      const outcome = await db.transaction(async (tx) => {
+        const [locked] = await tx
+          .select({ lastKnownStock: supplierVariantMappings.lastKnownStock })
+          .from(supplierVariantMappings)
           .where(eq(supplierVariantMappings.id, row.mappingId))
-        unchanged += 1
-        continue
-      }
-      await shopify.inventorySetQuantities(
-        {
-          name: 'available',
-          reason: 'correction',
-          // LIVE-VERIFIED 2026-08-31 against the 2026-07 Admin API: there is no
-          // `ignoreCompareQuantity` field on `InventorySetQuantitiesInput`; the optional per-entry
-          // `changeFromQuantity` is its compare-and-swap, and it is SENT whenever this variant has
-          // a cached value to swap against (whole-branch review, I1).
-          //
-          // The two producers of this job — the 6-hourly cron and the on-demand post-listing job —
-          // sit on two different queue names by design, so pg-boss's `stately` singleton cannot
-          // serialize them against each other. Without the CAS their read -> push -> cache
-          // sequences interleave into a plain lost update: A reads 7, B reads 5 and pushes 5, A
-          // pushes 7 and caches 7 while CJ says 5 — and every later cycle agrees with the cache and
-          // never corrects the oversell. With it, the loser's push is rejected by Shopify (a
-          // userError, which the op turns into a throw), the variant is counted `failed`, its cache
-          // is left alone, and the next cycle retries from whatever is true then.
-          //
-          // Omitted when the cache is null: there is nothing to compare against (a brand-new or
-          // resume-path listing), and sending nothing makes that push unconditional on purpose.
-          quantities: [
-            {
-              inventoryItemId: row.inventoryItemGid,
-              locationId: await getLocationId(),
-              quantity,
-              ...(row.lastKnownStock === null ? {} : { changeFromQuantity: row.lastKnownStock }),
-            },
-          ],
-        },
-        idempotencyKey(row.variantId, quantity, clock()),
-      )
-      await db
-        .update(supplierVariantMappings)
-        .set({ lastKnownStock: quantity, stockCheckedAt: clock() })
-        .where(eq(supplierVariantMappings.id, row.mappingId))
-      updated += 1
+          .limit(1)
+          .for('update')
+        // The mapping was deleted between this cycle's select and this variant's turn (a
+        // deprecation, a repair). Nothing to sync and nothing to record — count it with the other
+        // unsyncable rows rather than inventing a failure.
+        if (!locked) return 'gone' as const
+
+        const quantity = usQuantity(await deps.adapter.getVariantStock(row.supplierVariantId))
+        if (quantity === locked.lastKnownStock) {
+          // Nothing to push, but the observation is still worth recording: `stock_checked_at` is
+          // how an operator tells "CJ says 4" from "nobody has looked since Tuesday".
+          await tx
+            .update(supplierVariantMappings)
+            .set({ stockCheckedAt: clock() })
+            .where(eq(supplierVariantMappings.id, row.mappingId))
+          return 'unchanged' as const
+        }
+        await shopify.inventorySetQuantities(
+          {
+            name: 'available',
+            reason: 'correction',
+            // LIVE-VERIFIED 2026-08-31 against the 2026-07 Admin API: there is no
+            // `ignoreCompareQuantity` field on `InventorySetQuantitiesInput`, and the optional
+            // per-entry `changeFromQuantity` CAS is omitted ON PURPOSE — see the docblock above
+            // for why it is the wrong tool for this job's concurrency. This is an unconditional
+            // set: CJ is the source of truth for what we may sell, not what Shopify last held.
+            quantities: [{ inventoryItemId: row.inventoryItemGid, locationId: await getLocationId(), quantity }],
+          },
+          idempotencyKey(row.variantId, quantity, clock()),
+        )
+        // Strictly after the push, and inside the same transaction: a crash between the two rolls
+        // the cache write back and re-pushes the same value next cycle (harmless), whereas caching
+        // first would record a push that never happened.
+        await tx
+          .update(supplierVariantMappings)
+          .set({ lastKnownStock: quantity, stockCheckedAt: clock() })
+          .where(eq(supplierVariantMappings.id, row.mappingId))
+        return 'updated' as const
+      })
+      if (outcome === 'updated') updated += 1
+      else if (outcome === 'unchanged') unchanged += 1
+      else skipped += 1
     } catch (err) {
+      // Outside the transaction on purpose: the throw already rolled this variant's work back, so
+      // the audit row has to be written on the pool, not on the dead `tx`.
       failed += 1
       await auditVariantFailure(db, row.variantId, err).catch(() => {})
     }

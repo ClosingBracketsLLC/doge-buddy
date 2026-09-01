@@ -153,7 +153,10 @@ export async function publishableUnpublish(
 //    referenceDocumentUri? }` — there is NO `ignoreCompareQuantity` field on this input (that
 //    name does not exist in the 2026-07 schema). Omitting `changeFromQuantity` on a quantity
 //    entry performs an unconditional SET, with no compare-and-swap against a prior known
-//    quantity. Task 5's `input.quantities` construction relies on this comment.
+//    quantity. `inventory.sync` (and the backfill) send exactly that unconditional set, on
+//    purpose: the CAS compares against Shopify's CURRENT `available`, which stops matching our
+//    cached CJ reading the moment a customer buys one, so using it would reject every later push
+//    forever. Those jobs serialize their own producers with a row lock instead.
 //
 // NOTE: no `#graphql` prefix on this raw document — withIdempotencyKey locates the operation
 // header by anchoring to the very start of the string. The prefix is prepended after the

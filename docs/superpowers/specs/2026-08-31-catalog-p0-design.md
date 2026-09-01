@@ -124,9 +124,33 @@ on-demand via `enqueue('inventory.sync', { productId? })` (queue policy `stately
 productId or `'all'`). One cycle: select every `product_variants` row joined to an ACTIVE product with
 a `supplier_variant_mappings` row and a non-null `shopify_inventory_item_gid`; for each (bounded: 200
 variants/cycle, ordered by `stock_checked_at ASC NULLS FIRST` so an over-cap tail rotates in on later cycles; alert if more) call `adapter.getVariantStock`, take the largest single US-warehouse quantity, clamp ≥ 0; if it
-differs from `last_known_stock`, `inventorySetQuantities({ name:'available', reason:'correction', quantities:[{ inventoryItemId, locationId, quantity, changeFromQuantity? }] }, idempotencyKey)` (2026-07 has no `ignoreCompareQuantity`; the optional per-entry `changeFromQuantity` CAS is SENT whenever `last_known_stock` is non-null — amended 2026-08-31 in the whole-branch review: the cron and the on-demand post-listing job are two producers on two queue names, so nothing serializes their read → push → cache sequences and an interleave is a plain lost update in the oversell direction. A userError from the CAS is counted `failed` for that variant — no cache write, retried next cycle with a fresh reading — and it counts toward the degraded ratio like any other miss. Omitted when the cache is null: nothing to compare against, so that push is unconditional)
-(key = `inv-<variantRowId>-<quantity>-<unix seconds>` — amended 2026-08-31 in review: an hour-bucketed key could replay a stale set inside the hour and then cement it through the local cache; a per-value-per-second key only dedupes an identical immediate retry), then update `last_known_stock`/`stock_checked_at`. Per-variant
-errors are logged + counted, never abort the cycle; more than 25% failures in a cycle (strictly greater — 1 of 4 does not fire) → one warning alert
+differs from `last_known_stock`, `inventorySetQuantities({ name:'available', reason:'correction', quantities:[{ inventoryItemId, locationId, quantity }] }, idempotencyKey)` (2026-07 has no `ignoreCompareQuantity`, and the optional per-entry `changeFromQuantity` CAS is omitted on purpose — see the concurrency rule below)
+(key = `inv-<variantRowId>-<quantity>-<unix seconds>` — amended 2026-08-31 in review: an hour-bucketed key could replay a stale set inside the hour and then cement it through the local cache; a per-value-per-second key only dedupes an identical immediate retry), then update `last_known_stock`/`stock_checked_at`.
+
+**Concurrency (amended 2026-08-31, whole-branch review re-review).** Each variant's read → push →
+cache runs inside ONE short `db.transaction` that first takes `SELECT … FOR UPDATE` on that
+variant's `supplier_variant_mappings` row and re-reads `last_known_stock` from it (the value
+selected at the top of the cycle can be minutes stale). The cron and the on-demand post-listing job
+are two producers on two different queue names, so pg-boss's `stately` singleton cannot serialize
+them; without the lock their sequences interleave into a lost update — A pushes 7, B pushes 5 and
+caches 5, A caches 7 last, the store holds 5 while the cache claims 7, and every later cycle agrees
+with the cache and pushes nothing. The lock makes the second producer block until the first commits
+and then see the value it wrote. The per-variant try/catch stays OUTSIDE the transaction, so a
+throw rolls that variant back only. Row lock, not `pg_advisory_xact_lock`: the row is the contended
+thing (the advisory lock in `scoring-weekly-digest.ts` guards a whole-job singleton, a different
+shape). The trade-off — a connection and a row lock held across a CJ read and a Shopify push — is
+accepted: one variant per transaction, and the only contender is another cycle on the SAME variant,
+which must wait anyway to be correct.
+
+The API's `changeFromQuantity` CAS was ruled in for this and then ruled back OUT: it compares
+against Shopify's CURRENT `available`, whereas `last_known_stock` caches CJ's last READING. They
+diverge on the first sale of any variant (Shopify moves `available` → `committed` when an order is
+placed; nothing pushes, because CJ has not moved), after which every push is rejected forever —
+cache 7, store 6; CJ drops to 5; push `{5, from 7}` rejected; cache stays 7; repeat — in the
+oversell direction and below the 25% degraded-alert ratio, i.e. permanent and near-silent. Pushes
+are therefore unconditional sets.
+
+Per-variant errors are logged + counted, never abort the cycle; more than 25% failures in a cycle (strictly greater — 1 of 4 does not fire) → one warning alert
 `inventory_sync_degraded`. Variants whose product isn't active, or with no inventory item gid, are
 skipped (the backfill fixes the latter). A CJ points budget guard mirrors the sourcing agent's
 (`points.ts`): stop the cycle at the cap and alert. Audit `inventory.synced {updated, unchanged,
