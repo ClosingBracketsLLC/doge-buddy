@@ -78,14 +78,15 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
     failed — expected. The two live products get
     human URLs (`/products/dog-snuff-pad-<8hex>`, `/products/low-noise-pet-hair-clipper-<8hex>`),
     land in the right category (Grooming & Care for the clipper, etc.), and show tracked stock.
-    (d) Verify: the four `/collections/*` pages now list the products; each product page shows
-    its new URL; in Shopify admin → the product, confirm the `category:<tag>` tag, `productType`,
-    and SEO title/description are set.
-    (e) One manual-mode sourcing run, proving exit criterion 3: `pnpm --filter @doge-buddy/ops
+    ✅ 2026-08-31 Snuff Pad deprecated (DRAFT, unpublished) via `deprecate-product` + Telegram approve.
+    (d) ✅ 2026-08-31 verified by Admin API probe: clipper in `grooming-care` (1), tag/type/SEO set.
+    (e) ✅ 2026-08-31 — manual run + approve produced `automatic-dog-ball-launcher-adjustable-fetch-machine-with-6-d02dda59`:
+    `category:toys`, "Dog Toys", `tracked=true`, 126 in stock, published to all 4 channels, listed
+    in `toys-play`. Exit criterion 3 met. Original step: One manual-mode sourcing run, proving exit criterion 3: `pnpm --filter @doge-buddy/ops
     run-sourcing --force --max-winners 2 --keywords "dog chew toy"` → approve the winner on your
     phone (Telegram or `/admin/proposals`) → the new product arrives slugged, tagged, typed, with
     tracked inventory equal to CJ's largest single US-warehouse stock.
-    (f) Force a sync check: watch the Railway ops logs for `inventory.synced` right after that
+    (f) ⚪ (not verified by Claude — Railway DB/logs are yours) Force a sync check: watch the Railway ops logs for `inventory.synced` right after that
     listing (the post-listing job enqueues automatically) — or wait for the next 6-hourly cron. A
     variant whose CJ stock is 0 should show "Sold out" on the storefront within one cycle.
     (g) **Build-week runs:** on `/admin/settings`, flip `workflow.sourcing.mode` to `auto`. Leave
