@@ -34,7 +34,7 @@ describe('admin html helpers', () => {
     expect(doc).toContain(ADMIN_CSS)
     expect(doc).toContain(ADMIN_JS)
     expect(doc).not.toContain('class="tabs"')
-    expect(doc).toContain('action="/admin/logout"')
+    expect(doc).not.toContain('action="/admin/logout"')
   })
 
   it('layout with a shell renders the seven nav links, badges only when > 0, aria-current on the active tab', () => {
@@ -48,6 +48,13 @@ describe('admin html helpers', () => {
     expect(doc).toMatch(/<a class="tab" href="\/admin\/tickets" aria-current="page">/)
     expect(doc).not.toMatch(/href="\/admin" aria-current/)
     expect(doc).toContain('<h1 class="page-title">Tickets</h1>')
+    expect(doc).toContain('action="/admin/logout"')
+    // Rail bug fix: the >=640px rail can't open the collapsed <details class="tab more"> menu via
+    // CSS alone, so each 'more' item (Runs/Settings/Guidance) also renders as a plain rail tab
+    // (class="tab more-item") right after Orders — hidden at <640px, shown at >=640px — alongside
+    // its unchanged copy inside the <details> menu (shown at <640px, hidden at >=640px).
+    expect(doc).toContain('<a class="tab more-item" href="/admin/settings"')
+    expect((doc.match(/href="\/admin\/settings"/g) ?? []).length).toBe(2)
     // Autosubmit forms must confirm-then-.submit() — never fall back to .requestSubmit(), which
     // fires no `submit` event and would silently skip data-confirm on autosubmit+confirm forms.
     expect(ADMIN_JS).not.toContain('requestSubmit')
@@ -83,5 +90,10 @@ describe('admin html helpers', () => {
     expect(relativeTime(new Date('2026-08-31T10:00:00Z'), now)).toBe('2h ago')
     expect(relativeTime(new Date('2026-08-27T12:00:00Z'), now)).toBe('4d ago')
     expect(relativeTime(new Date('2026-08-31T12:00:30Z'), now)).toBe('just now') // clock skew: never negative
+    // Fix round: future dates (a proposal's expiresAt) get their own 'in N…' buckets instead of
+    // being clamped to 'just now'.
+    expect(relativeTime(new Date('2026-08-31T15:00:00Z'), now)).toBe('in 3h')
+    expect(relativeTime(new Date('2026-08-31T12:45:00Z'), now)).toBe('in 45m')
+    expect(relativeTime(new Date('2026-09-03T12:00:00Z'), now)).toBe('in 3d')
   })
 })

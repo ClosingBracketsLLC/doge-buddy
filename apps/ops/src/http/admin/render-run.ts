@@ -1,5 +1,5 @@
 import type { agentRunEvents, agentRuns } from '@doge-buddy/db'
-import { chip, html, relativeTime, type RawHtml } from './html.ts'
+import { chip, html, kv, relativeTime, type RawHtml } from './html.ts'
 
 export type AgentRunRow = typeof agentRuns.$inferSelect
 export type AgentRunListRow = Pick<
@@ -97,12 +97,6 @@ function renderEvent(e: AgentRunEventRow): RawHtml {
     <summary>${eventSummary(e)}</summary>
     <pre>${body}</pre>
   </details>`
-}
-
-/** One `.kv` row — same markup shape as render-dashboard.ts's own local `kv` helper (each
- * renderer keeps its own small copy rather than sharing one, same idiom the test files use). */
-function kv(label: string, value: RawHtml | string): RawHtml {
-  return html`<div class="kv"><span>${label}</span><span class="v">${value}</span></div>`
 }
 
 /**

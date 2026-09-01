@@ -8,13 +8,7 @@ import {
 import type { proposals } from '@doge-buddy/db'
 import { validateDescriptionHtml } from '../../sourcing/guards.ts'
 import { SUPPORT_REDRAFT_MAX } from '../../support/redraft.ts'
-import { chip, html, raw, relativeTime, type RawHtml } from './html.ts'
-
-/** One `.kv` row — same markup shape as render-dashboard.ts's own local `kv` helper (each
- * renderer keeps its own small copy rather than sharing one). */
-function kv(label: string, value: RawHtml | string): RawHtml {
-  return html`<div class="kv"><span>${label}</span><span class="v">${value}</span></div>`
-}
+import { chip, html, kv, raw, relativeTime, type RawHtml } from './html.ts'
 
 export type ProposalRow = typeof proposals.$inferSelect
 export type ProposalListRow = Pick<ProposalRow, 'id' | 'type' | 'status' | 'summary' | 'createdAt' | 'expiresAt'>

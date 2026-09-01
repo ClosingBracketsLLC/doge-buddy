@@ -257,6 +257,9 @@ describe('proposals queue + detail pages', () => {
     expect(res.body).not.toContain('<Widget>')
     // Task 4: responsive table cell — free-text summary wraps.
     expect(res.body).toContain('<td data-label="Summary" class="wrap">')
+    // Fix round: the filter chip row exists and defaults to the 'all' chip active.
+    expect(res.body).toContain('<nav class="chips" id="proposal-filters">')
+    expect(res.body).toMatch(/<a href="\/admin\/proposals" aria-current="page">all<\/a>/)
 
     await app.close()
   })

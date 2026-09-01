@@ -1,7 +1,7 @@
 import { formatCents } from '@doge-buddy/core'
 import { SUPPORT_AGENT_MAX_RUNS_PER_DAY } from '../../jobs/support-agent-run.ts'
 import type { HealthStrip } from './health.ts'
-import { chip, html, raw, relativeTime, type RawHtml } from './html.ts'
+import { chip, html, kv, raw, relativeTime, type RawHtml } from './html.ts'
 
 /**
  * Renders the dashboard's health strip: wallet balance (or 'n/a'), queue depth, last webhook
@@ -74,11 +74,6 @@ function modeCard(label: string, key: string, current: 'manual' | 'auto'): RawHt
   return html`<div class="card"><form method="post" action="/admin/settings">
     <input type="hidden" name="key" value="${key}"><input type="hidden" name="returnTo" value="/admin">
     <div class="toggle"><label>${label}</label><span class="seg">${seg('manual')}${seg('auto')}</span></div></form></div>`
-}
-
-function kv(label: string, value: RawHtml | string, iso?: Date | null): RawHtml {
-  const title = iso ? html` title="${iso.toISOString()}"` : html``
-  return html`<div class="kv"><span>${label}</span><span class="v"${title}>${value}</span></div>`
 }
 
 export function renderDashboard(h: HealthStrip, now: Date = new Date()): RawHtml {

@@ -64,12 +64,24 @@ function badgeFor(href: string, counts: NavCounts): RawHtml {
   return html``
 }
 
+/**
+ * `>= 640px` (styles.ts) lays the rail out as a plain vertical list of `.tab`s — CSS alone can't
+ * "open" the `<details class="tab more">` disclosure to reveal Runs/Settings/Guidance there, so at
+ * that width the collapsed `<details>` (still rendered, for the < 640px cover-screen tab bar)
+ * would silently strand those three links unreachable. Fix: render every `more` item TWICE —
+ * once as a plain rail tab (`class="tab more-item"`, placed right after Orders) that styles.ts
+ * shows only at `>= 640px` and hides at `< 640px`, and once more, unchanged, inside the `<details>`
+ * menu that styles.ts shows only below 640px. Same `ico`/label/badge/aria-current markup either
+ * way — the two copies just differ in which one the current viewport keeps visible.
+ */
 function renderTabs(shell: Shell): RawHtml {
-  const tab = (item: (typeof NAV_ITEMS)[number]) =>
-    html`<a class="tab" href="${raw(item.href)}"${raw(isCurrent(item.href, shell.path) ? ' aria-current="page"' : '')}><span class="ico">${item.ico}</span>${item.label}${badgeFor(item.href, shell.counts)}</a>`
-  const main = NAV_ITEMS.filter((i) => !('more' in i)).map(tab)
-  const more = NAV_ITEMS.filter((i) => 'more' in i).map(tab)
-  return html`<nav class="tabs" aria-label="Admin">${main}<details class="tab more"><summary><span class="ico">⋯</span>More</summary><div class="menu">${more}</div></details></nav>`
+  const tab = (item: (typeof NAV_ITEMS)[number], extraClass = '') =>
+    html`<a class="tab${raw(extraClass)}" href="${raw(item.href)}"${raw(isCurrent(item.href, shell.path) ? ' aria-current="page"' : '')}><span class="ico">${item.ico}</span>${item.label}${badgeFor(item.href, shell.counts)}</a>`
+  const main = NAV_ITEMS.filter((i) => !('more' in i)).map((i) => tab(i))
+  const moreItems = NAV_ITEMS.filter((i) => 'more' in i)
+  const moreRailTabs = moreItems.map((i) => tab(i, ' more-item'))
+  const moreMenuTabs = moreItems.map((i) => tab(i))
+  return html`<nav class="tabs" aria-label="Admin">${main}${moreRailTabs}<details class="tab more"><summary><span class="ico">⋯</span>More</summary><div class="menu">${moreMenuTabs}</div></details></nav>`
 }
 
 /**
@@ -79,7 +91,7 @@ function renderTabs(shell: Shell): RawHtml {
  */
 export function layout(title: string, body: RawHtml, shell?: Shell): string {
   return html`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#10171a" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#fdf3e0" media="(prefers-color-scheme: light)"><title>${title}</title><style>${raw(ADMIN_CSS)}</style></head><body>
-    <header class="topbar"><a class="brand" href="/admin">🐶 Doge Buddy</a><h1 class="page-title">${title}</h1>${LOGOUT_FORM}</header>
+    <header class="topbar"><a class="brand" href="/admin">🐶 Doge Buddy</a><h1 class="page-title">${title}</h1>${shell ? LOGOUT_FORM : html``}</header>
     ${shell ? renderTabs(shell) : html``}
     <main>${body}</main>
     <script>${raw(ADMIN_JS)}</script>
@@ -112,12 +124,35 @@ export function chip(state: string): RawHtml {
   return html`<span class="chip chip-${raw(chipTone(state))}">${state}</span>`
 }
 
-/** 'never' | 'just now' | 'Nm ago' | 'Nh ago' | 'Nd ago' — never negative (clock skew reads as 'just now'). */
+/**
+ * 'never' | 'just now' | 'Nm ago'/'Nh ago'/'Nd ago' (past) | 'in Nm'/'in Nh'/'in Nd' (future) —
+ * magnitude-based buckets in both directions, so a sub-minute difference either way (including
+ * ordinary clock skew) reads as 'just now' rather than a spurious negative or future value. Used
+ * for both "last happened" fields (support poll, agent runs, tickets) and "will happen" fields
+ * (a proposal's `expiresAt`), so it has to handle `date` landing on either side of `now`.
+ */
 export function relativeTime(date: Date | null, now: Date = new Date()): string {
   if (!date) return 'never'
-  const s = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000))
+  const diffMs = date.getTime() - now.getTime()
+  if (diffMs >= 60_000) {
+    const s = Math.floor(diffMs / 1000)
+    if (s < 3600) return `in ${Math.floor(s / 60)}m`
+    if (s < 86_400) return `in ${Math.floor(s / 3600)}h`
+    return `in ${Math.floor(s / 86_400)}d`
+  }
+  const s = Math.max(0, Math.floor(-diffMs / 1000))
   if (s < 60) return 'just now'
   if (s < 3600) return `${Math.floor(s / 60)}m ago`
   if (s < 86_400) return `${Math.floor(s / 3600)}h ago`
   return `${Math.floor(s / 86_400)}d ago`
+}
+
+/** One `.kv` row: `<div class="kv"><span>label</span><span class="v"[ title="…"]>value</span></div>`.
+ * `iso`, when given, adds a `title` attribute carrying the exact timestamp — used by callers that
+ * display a relative time in `value` but still want the precise instant available on hover/inspect.
+ * The one shared implementation for every renderer's kv-row card (dashboard, proposal, run, ticket
+ * detail pages) — they used to each carry their own near-identical copy. */
+export function kv(label: string, value: RawHtml | string, iso?: Date | null): RawHtml {
+  const title = iso ? html` title="${iso.toISOString()}"` : html``
+  return html`<div class="kv"><span>${label}</span><span class="v"${title}>${value}</span></div>`
 }

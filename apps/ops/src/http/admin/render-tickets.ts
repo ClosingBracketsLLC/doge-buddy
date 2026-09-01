@@ -1,13 +1,7 @@
 import { formatCents } from '@doge-buddy/core'
 import { ticketStatus } from '@doge-buddy/db'
 import type { agentRuns, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
-import { chip, html, raw, relativeTime, type RawHtml } from './html.ts'
-
-/** One `.kv` row — same markup shape as render-dashboard.ts's own local `kv` helper (each
- * renderer keeps its own small copy rather than sharing one). */
-function kv(label: string, value: RawHtml | string): RawHtml {
-  return html`<div class="kv"><span>${label}</span><span class="v">${value}</span></div>`
-}
+import { chip, html, kv, raw, relativeTime, type RawHtml } from './html.ts'
 
 export type TicketRow = typeof supportTickets.$inferSelect
 export type MessageRow = typeof supportMessages.$inferSelect
@@ -133,7 +127,7 @@ function renderMessage(m: MessageRow): RawHtml {
 }
 
 function renderVerdictBlock(t: TicketRow): RawHtml {
-  return html`<section id="triage-verdict">
+  return html`<section id="triage-verdict" class="card">
     <h3>Triage</h3>
     <p>Category: ${t.category ?? '—'}</p>
     <p>Sentiment: ${t.sentiment ?? '—'}</p>
@@ -152,7 +146,7 @@ function renderVerdictBlock(t: TicketRow): RawHtml {
  */
 function renderLinkedOrderSection(order: LinkedOrderSummary | null, claimedOrderNumber: string | null): RawHtml {
   if (order) {
-    return html`<section id="linked-order">
+    return html`<section id="linked-order" class="card">
       <h3>Linked order</h3>
       <p>Order: ${order.shopifyOrderNumber ?? order.shopifyOrderGid}</p>
       <p>Customer: ${order.customerName ?? '—'} (${order.email ?? '—'})</p>
@@ -161,12 +155,12 @@ function renderLinkedOrderSection(order: LinkedOrderSummary | null, claimedOrder
     </section>`
   }
   if (claimedOrderNumber) {
-    return html`<section id="linked-order">
+    return html`<section id="linked-order" class="card">
       <h3>Linked order</h3>
       <p>claimed #${claimedOrderNumber} (unverified)</p>
     </section>`
   }
-  return html`<section id="linked-order">
+  return html`<section id="linked-order" class="card">
     <h3>Linked order</h3>
     <p>None.</p>
   </section>`
