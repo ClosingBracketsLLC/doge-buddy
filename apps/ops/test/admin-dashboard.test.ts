@@ -103,6 +103,8 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
     // Restore the killswitch setting to its code default so later tests (in this file or any
     // other) never observe a row this file left behind.
     await db.delete(settings).where(eq(settings.key, 'killswitch.global'))
+    // Task 4 review ruling (3): same hygiene for the wallet-alert-threshold-0 test below.
+    await db.delete(settings).where(eq(settings.key, 'fulfillment.wallet_alert_threshold_cents'))
     // gmail_sync_state is a singleton row (id=1) shared with support-poll-gmail.ts's own tests —
     // clean up whatever this file seeded so no row leaks into another suite's expectations.
     await db.delete(gmailSyncState).where(eq(gmailSyncState.id, 1))
@@ -583,6 +585,43 @@ describe('admin dashboard health strip + tickets/runs pages', () => {
       expect(res.body).toContain(`<div class="${cls}">`)
       await app.close()
     }
+  })
+
+  // Task 4 review ruling (3): a threshold of 0 means alerting is OFF, not "alert the moment the
+  // wallet has anything less than $0.00" — the old ratio math (`walletCents / 0` guarded to `1`)
+  // rendered this as a 'warn' tone, which lied about there being an active alert line at $0.00.
+  it('control center: wallet_alert_threshold_cents = 0 means alerting is off — plain tone, plain bar, "no alert threshold"', async () => {
+    const deps = makeDeps({ getWalletBalance: async () => ({ availableCents: 500, frozenCents: 0 }) })
+    await deps.settings.set('fulfillment.wallet_alert_threshold_cents', 0)
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('<div class="stat ok">$5.00</div>')
+    expect(res.body).toContain('<div class="bar ">')
+    expect(res.body).toContain('no alert threshold')
+    expect(res.body).not.toContain('alert threshold $0.00')
+
+    await app.close()
+  })
+
+  // Task 4 review ruling (1): a support poll that has NEVER succeeded (no gmail_sync_state row —
+  // same seed-absent scenario as test 7b above) must render distinctly from "succeeded a while
+  // ago" — chip('never'), not chip('ok').
+  it('control center: Support poll kv row renders chip(\'never\') when the poll has never succeeded', async () => {
+    const deps = makeDeps()
+    const app = buildServer({ pool, isQueueReady: () => true, admin: deps })
+    const cookie = await loginAndGetCookie(app, deps)
+
+    const res = await app.inject({ method: 'GET', url: '/admin', headers: { cookie } })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('<span>Support poll</span>')
+    expect(res.body).toContain('<span class="chip chip-muted">never</span>')
+
+    await app.close()
   })
 
   it('control center: agents & jobs + catalog rows, without and with data', async () => {

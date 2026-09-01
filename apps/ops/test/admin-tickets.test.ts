@@ -351,6 +351,10 @@ describe('tickets view, thread, and guarded actions', () => {
     expect(res.body).toContain(hostile.id)
     expect(res.body).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
     expect(res.body).not.toContain('<script>alert(1)</script>')
+    // Task 4: responsive table cell for the Subject column + the filter chip nav.
+    expect(res.body).toContain('<td data-label="Subject" class="wrap">')
+    expect(res.body).toContain('<nav class="chips" id="ticket-filters">')
+    expect(res.body).toContain('aria-current="page"')
 
     await app.close()
   })
@@ -369,6 +373,9 @@ describe('tickets view, thread, and guarded actions', () => {
     expect(res.body).not.toContain('<script>alert(1)</script>')
     expect(res.body).toContain('&lt;img onerror=x&gt;')
     expect(res.body).not.toContain('<img onerror=x>')
+    // Task 4: sticky actions bar with a confirm-before-resolve resolve button.
+    expect(res.body).toContain('<div class="actions sticky">')
+    expect(res.body).toContain('data-confirm="Resolve this ticket?"')
 
     await app.close()
   })

@@ -1,7 +1,13 @@
 import { formatCents } from '@doge-buddy/core'
 import { ticketStatus } from '@doge-buddy/db'
 import type { agentRuns, proposals, supportMessages, supportTickets } from '@doge-buddy/db'
-import { html, raw, type RawHtml } from './html.ts'
+import { chip, html, raw, relativeTime, type RawHtml } from './html.ts'
+
+/** One `.kv` row — same markup shape as render-dashboard.ts's own local `kv` helper (each
+ * renderer keeps its own small copy rather than sharing one). */
+function kv(label: string, value: RawHtml | string): RawHtml {
+  return html`<div class="kv"><span>${label}</span><span class="v">${value}</span></div>`
+}
 
 export type TicketRow = typeof supportTickets.$inferSelect
 export type MessageRow = typeof supportMessages.$inferSelect
@@ -58,11 +64,10 @@ export const TICKET_FILTER_CHIPS = ['all', ...TICKET_STATUSES, 'spam'] as const
 
 function renderStatusChips(current: string | undefined): RawHtml {
   const active = current && (TICKET_FILTER_CHIPS as readonly string[]).includes(current) ? current : 'all'
-  return html`<nav id="ticket-filters">
-    ${TICKET_FILTER_CHIPS.map((chip) => {
-      const href = chip === 'all' ? '/admin/tickets' : `/admin/tickets?status=${chip}`
-      const label = chip === active ? html`<strong>${chip}</strong>` : html`${chip}`
-      return html`<a href="${raw(href)}">${label}</a> `
+  return html`<nav class="chips" id="ticket-filters">
+    ${TICKET_FILTER_CHIPS.map((chipName) => {
+      const href = chipName === 'all' ? '/admin/tickets' : `/admin/tickets?status=${chipName}`
+      return html`<a href="${raw(href)}"${raw(chipName === active ? ' aria-current="page"' : '')}>${chipName}</a>`
     })}
   </nav>`
 }
@@ -81,14 +86,15 @@ function renderOrderCell(row: Pick<TicketListRow, 'orderId' | 'linkedOrderNumber
 }
 
 function renderTicketRow(row: TicketListRow): RawHtml {
+  const lastContact = row.lastInboundAt ?? row.createdAt
   return html`<tr>
-    <td>${row.status}</td>
-    <td>${row.category ?? '—'}</td>
-    <td>${row.sentiment ?? '—'}</td>
-    <td>${row.customerEmail ?? '—'}</td>
-    <td>${row.source === 'form' ? html`<span class="badge">via contact form</span> ` : html``}<a href="/admin/tickets/${row.id}">${row.subject ?? '(no subject)'}</a></td>
-    <td>${renderOrderCell(row)}</td>
-    <td>${(row.lastInboundAt ?? row.createdAt).toISOString()}</td>
+    <td data-label="Status">${chip(row.status)}</td>
+    <td data-label="Category">${row.category ?? '—'}</td>
+    <td data-label="Sentiment">${row.sentiment ?? '—'}</td>
+    <td data-label="Customer">${row.customerEmail ?? '—'}</td>
+    <td data-label="Subject" class="wrap">${row.source === 'form' ? html`<span class="badge">via contact form</span> ` : html``}<a href="/admin/tickets/${row.id}">${row.subject ?? '(no subject)'}</a></td>
+    <td data-label="Order">${renderOrderCell(row)}</td>
+    <td data-label="Last contact"><span title="${lastContact.toISOString()}">${relativeTime(lastContact)}</span></td>
   </tr>`
 }
 
@@ -103,11 +109,12 @@ export function renderTicketsList(rows: TicketListRow[], currentStatus: string |
   if (rows.length === 0) {
     return html`${chips}<p>No tickets.</p>`
   }
-  return html`${chips}<table>
+  return html`${chips}<div class="table-wrap"><table class="rows">
+    <thead><tr><th>Status</th><th>Category</th><th>Sentiment</th><th>Customer</th><th>Subject</th><th>Order</th><th>Last contact</th></tr></thead>
     <tbody>
       ${rows.map(renderTicketRow)}
     </tbody>
-  </table>`
+  </table></div>`
 }
 
 /**
@@ -178,18 +185,18 @@ function renderActionForms(t: TicketRow): RawHtml {
   const escalate =
     t.status === 'escalated'
       ? html``
-      : html`<form method="post" action="/admin/tickets/${t.id}/escalate">
+      : html`<form method="post" action="/admin/tickets/${t.id}/escalate" data-confirm="Escalate this ticket?">
           <input type="hidden" name="expectedStatus" value="${t.status}">
-          <button type="submit">Escalate</button>
+          <button type="submit" class="danger">Escalate</button>
         </form>`
   const resolve =
     t.status === 'resolved'
       ? html``
-      : html`<form method="post" action="/admin/tickets/${t.id}/resolve">
+      : html`<form method="post" action="/admin/tickets/${t.id}/resolve" data-confirm="Resolve this ticket?">
           <input type="hidden" name="expectedStatus" value="${t.status}">
-          <button type="submit">Resolve</button>
+          <button type="submit" class="primary">Resolve</button>
         </form>`
-  return html`${escalate}${resolve}`
+  return html`<div class="actions sticky">${escalate}${resolve}</div>`
 }
 
 /**
@@ -207,19 +214,20 @@ function renderTicketProposalsSection(rows: TicketProposalRow[]): RawHtml {
   }
   return html`<section id="ticket-proposals">
     <h3>Proposals</h3>
-    <table>
+    <div class="table-wrap"><table class="rows">
+      <thead><tr><th>Id</th><th>Type</th><th>Status</th><th>Summary</th><th>Created</th></tr></thead>
       <tbody>
         ${rows.map(
           (p) => html`<tr>
-            <td><a href="/admin/proposals/${p.id}">${p.id}</a></td>
-            <td>${p.type}</td>
-            <td>${p.status}</td>
-            <td>${p.summary}</td>
-            <td>${p.createdAt.toISOString()}</td>
+            <td data-label="Id" class="mono"><a href="/admin/proposals/${p.id}">${p.id}</a></td>
+            <td data-label="Type">${p.type}</td>
+            <td data-label="Status">${chip(p.status)}</td>
+            <td data-label="Summary" class="wrap">${p.summary}</td>
+            <td data-label="Created"><span title="${p.createdAt.toISOString()}">${relativeTime(p.createdAt)}</span></td>
           </tr>`,
         )}
       </tbody>
-    </table>
+    </table></div>
   </section>`
 }
 
@@ -257,10 +265,12 @@ export function renderTicketDetail(
   agentRunRows: TicketAgentRunRow[],
 ): RawHtml {
   return html`<h1>Ticket ${t.id}</h1>
-    <p>Status: ${t.status}</p>
-    <p>Subject: ${t.subject ?? '(no subject)'}</p>
-    <p>Customer: ${t.customerEmail ?? '—'}</p>
-    <p>Source: ${t.source === 'form' ? 'contact form' : 'email'}</p>
+    <div class="card">
+      ${kv('Status', chip(t.status))}
+      ${kv('Subject', t.subject ?? '(no subject)')}
+      ${kv('Customer', t.customerEmail ?? '—')}
+      <p>Source: ${t.source === 'form' ? 'contact form' : 'email'}</p>
+    </div>
     ${renderVerdictBlock(t)}
     ${renderLinkedOrderSection(linkedOrder, t.claimedOrderNumber)}
     ${renderActionForms(t)}

@@ -255,6 +255,8 @@ describe('proposals queue + detail pages', () => {
     expect(res.body).toContain(row.id)
     expect(res.body).toContain('&lt;Widget&gt; &quot;X&quot;')
     expect(res.body).not.toContain('<Widget>')
+    // Task 4: responsive table cell — free-text summary wraps.
+    expect(res.body).toContain('<td data-label="Summary" class="wrap">')
 
     await app.close()
   })
@@ -318,6 +320,10 @@ describe('proposals queue + detail pages', () => {
     expect(res.body).toContain('name="payload"')
     const approveFormCount = res.body.split(`action="/admin/proposals/${row.id}/approve"`).length - 1
     expect(approveFormCount).toBe(2) // plain approve + edit-then-approve
+    // Task 4: sticky actions bar + confirm-before-approve + primary approve button.
+    expect(res.body).toContain('<div class="actions sticky">')
+    expect(res.body).toContain('data-confirm="Approve this proposal?"')
+    expect(res.body).toContain('<button type="submit" class="primary">Approve</button>')
 
     await app.close()
   })

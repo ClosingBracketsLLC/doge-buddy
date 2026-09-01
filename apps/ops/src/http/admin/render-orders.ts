@@ -1,4 +1,4 @@
-import { html, type RawHtml } from './html.ts'
+import { chip, html, relativeTime, type RawHtml } from './html.ts'
 
 /**
  * One row of the /admin/orders view: a `supplier_orders` row joined to its parent `orders` row
@@ -26,13 +26,17 @@ export const RECOVERY_TARGETS = ['pending', 'confirmed', 'cancelled'] as const
 
 function renderRecoveryForm(rowId: string): RawHtml {
   const action = `/admin/orders/${rowId}/recover`
-  return html`<form method="post" action="${action}">
+  return html`<form class="actions" method="post" action="${action}" data-confirm="Recover this order to the selected state?">
       <select name="target">
         ${RECOVERY_TARGETS.map((target) => html`<option value="${target}">${target}</option>`)}
       </select>
-      <button type="submit">Recover</button>
+      <button type="submit" class="primary">Recover</button>
     </form>`
 }
+
+/** Shared `<thead>` for both sections below — same column set, pinned/other differ only in
+ * whether each row carries a recovery form. */
+const ORDERS_TABLE_HEAD = html`<thead><tr><th>Id</th><th>Order</th><th>Customer</th><th>Supplier</th><th>Status</th><th>Last error</th><th>Created</th><th>Action</th></tr></thead>`
 
 /**
  * One <tr> per joined row. `lastError` is a raw supplier-adapter string (CJ error text, etc.) —
@@ -42,14 +46,14 @@ function renderRecoveryForm(rowId: string): RawHtml {
  */
 function renderOrderRow(r: OrderJoinRow, opts: { withForm: boolean }): RawHtml {
   return html`<tr>
-    <td>${r.id}</td>
-    <td>${r.shopifyOrderNumber ?? r.shopifyOrderGid}</td>
-    <td>${r.customerName ?? ''}</td>
-    <td>${r.supplier}</td>
-    <td>${r.status}</td>
-    <td>${r.lastError ?? ''}</td>
-    <td>${r.createdAt.toISOString()}</td>
-    <td>${opts.withForm ? renderRecoveryForm(r.id) : html``}</td>
+    <td data-label="Id" class="mono">${r.id}</td>
+    <td data-label="Order">${r.shopifyOrderNumber ?? r.shopifyOrderGid}</td>
+    <td data-label="Customer">${r.customerName ?? ''}</td>
+    <td data-label="Supplier">${r.supplier}</td>
+    <td data-label="Status">${chip(r.status)}</td>
+    <td data-label="Last error" class="wrap">${r.lastError ?? ''}</td>
+    <td data-label="Created"><span title="${r.createdAt.toISOString()}">${relativeTime(r.createdAt)}</span></td>
+    <td data-label="Action">${opts.withForm ? renderRecoveryForm(r.id) : html``}</td>
   </tr>`
 }
 
@@ -69,11 +73,12 @@ export function renderNeedsAttentionSection(rows: OrderJoinRow[]): RawHtml {
   }
   return html`<section>
     <h2>Needs attention</h2>
-    <table>
+    <div class="table-wrap"><table class="rows">
+      ${ORDERS_TABLE_HEAD}
       <tbody>
         ${rows.map((r) => renderOrderRow(r, { withForm: true }))}
       </tbody>
-    </table>
+    </table></div>
   </section>`
 }
 
@@ -87,10 +92,11 @@ export function renderOtherOrdersSection(rows: OrderJoinRow[]): RawHtml {
   }
   return html`<section>
     <h2>Other orders</h2>
-    <table>
+    <div class="table-wrap"><table class="rows">
+      ${ORDERS_TABLE_HEAD}
       <tbody>
         ${rows.map((r) => renderOrderRow(r, { withForm: false }))}
       </tbody>
-    </table>
+    </table></div>
   </section>`
 }

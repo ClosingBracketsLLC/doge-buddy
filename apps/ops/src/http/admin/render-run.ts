@@ -1,5 +1,5 @@
 import type { agentRunEvents, agentRuns } from '@doge-buddy/db'
-import { html, type RawHtml } from './html.ts'
+import { chip, html, relativeTime, type RawHtml } from './html.ts'
 
 export type AgentRunRow = typeof agentRuns.$inferSelect
 export type AgentRunListRow = Pick<
@@ -32,16 +32,21 @@ function formatCostUsd(totalCostUsd: string | null, modelUsage: unknown): string
   return isEstimated(modelUsage) ? `${formatted} (est)` : formatted
 }
 
-/** One <tr> per agent run for the /admin/runs list: id links to the detail page. */
+/** One <tr> per agent run for the /admin/runs list: id links to the detail page.
+ *
+ * `finishedAt` stays a raw ISO string (not `relativeTime`) — an existing test pins this list
+ * cell's exact ISO text (admin-runs.test.ts test 2), so it's left alone per the task's "keep
+ * pinned cell TEXT exactly" rule; `createdAt` isn't pinned anywhere and switches to `relativeTime`.
+ */
 export function renderRunRow(r: AgentRunListRow): RawHtml {
   return html`<tr>
-    <td><a href="/admin/runs/${r.id}">${r.id}</a></td>
-    <td>${r.workflow}</td>
-    <td>${r.status}</td>
-    <td>${formatCostUsd(r.totalCostUsd, r.modelUsage)}</td>
-    <td>${r.numTurns ?? '—'}</td>
-    <td>${r.createdAt.toISOString()}</td>
-    <td>${r.finishedAt ? r.finishedAt.toISOString() : '—'}</td>
+    <td data-label="Id" class="mono"><a href="/admin/runs/${r.id}">${r.id}</a></td>
+    <td data-label="Workflow">${r.workflow}</td>
+    <td data-label="Status">${chip(r.status)}</td>
+    <td data-label="Cost">${formatCostUsd(r.totalCostUsd, r.modelUsage)}</td>
+    <td data-label="Turns">${r.numTurns ?? '—'}</td>
+    <td data-label="Created"><span title="${r.createdAt.toISOString()}">${relativeTime(r.createdAt)}</span></td>
+    <td data-label="Finished">${r.finishedAt ? r.finishedAt.toISOString() : '—'}</td>
   </tr>`
 }
 
@@ -94,23 +99,29 @@ function renderEvent(e: AgentRunEventRow): RawHtml {
   </details>`
 }
 
+/** One `.kv` row — same markup shape as render-dashboard.ts's own local `kv` helper (each
+ * renderer keeps its own small copy rather than sharing one, same idiom the test files use). */
+function kv(label: string, value: RawHtml | string): RawHtml {
+  return html`<div class="kv"><span>${label}</span><span class="v">${value}</span></div>`
+}
+
 /**
- * The /admin/runs/:id detail page: a header strip (workflow/status/model/started/finished/
+ * The /admin/runs/:id detail page: a header card (workflow/status/model/started/finished/
  * cost/turns/sessionId) followed by the full event stream, oldest first. `events` is passed in
  * pre-loaded (ordered by seq) rather than queried here — same seam as render-orders.ts's
  * `renderNeedsAttentionSection`, keeping this a pure render function.
  */
 export function renderRunDetail(run: AgentRunRow, events: AgentRunEventRow[]): RawHtml {
-  const header = html`<section id="run-header">
-    <p>Workflow: ${run.workflow}</p>
-    <p>Status: ${run.status}</p>
-    <p>Model: ${run.model ?? '—'}</p>
-    <p>Started: ${run.startedAt.toISOString()}</p>
-    <p>Finished: ${run.finishedAt ? run.finishedAt.toISOString() : '—'}</p>
-    <p>Cost: ${formatCostUsd(run.totalCostUsd, run.modelUsage)}</p>
-    <p>Turns: ${run.numTurns ?? '—'}</p>
-    <p>Session: ${run.sessionId ?? '—'}</p>
-  </section>`
+  const header = html`<div class="card" id="run-header">
+    ${kv('Workflow', run.workflow)}
+    ${kv('Status', chip(run.status))}
+    ${kv('Model', run.model ?? '—')}
+    ${kv('Started', html`<span title="${run.startedAt.toISOString()}">${relativeTime(run.startedAt)}</span>`)}
+    ${kv('Finished', run.finishedAt ? html`<span title="${run.finishedAt.toISOString()}">${relativeTime(run.finishedAt)}</span>` : '—')}
+    ${kv('Cost', formatCostUsd(run.totalCostUsd, run.modelUsage))}
+    ${kv('Turns', String(run.numTurns ?? '—'))}
+    ${kv('Session', run.sessionId ?? '—')}
+  </div>`
 
   const stream =
     events.length === 0 ? html`<p>No events.</p>` : html`<section id="run-events">${events.map(renderEvent)}</section>`

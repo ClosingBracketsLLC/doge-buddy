@@ -8,7 +8,13 @@ import {
 import type { proposals } from '@doge-buddy/db'
 import { validateDescriptionHtml } from '../../sourcing/guards.ts'
 import { SUPPORT_REDRAFT_MAX } from '../../support/redraft.ts'
-import { html, raw, type RawHtml } from './html.ts'
+import { chip, html, raw, relativeTime, type RawHtml } from './html.ts'
+
+/** One `.kv` row — same markup shape as render-dashboard.ts's own local `kv` helper (each
+ * renderer keeps its own small copy rather than sharing one). */
+function kv(label: string, value: RawHtml | string): RawHtml {
+  return html`<div class="kv"><span>${label}</span><span class="v">${value}</span></div>`
+}
 
 export type ProposalRow = typeof proposals.$inferSelect
 export type ProposalListRow = Pick<ProposalRow, 'id' | 'type' | 'status' | 'summary' | 'createdAt' | 'expiresAt'>
@@ -19,12 +25,12 @@ export type ProposalListRow = Pick<ProposalRow, 'id' | 'type' | 'status' | 'summ
  */
 export function renderProposalRow(p: ProposalListRow): RawHtml {
   return html`<tr>
-    <td><a href="/admin/proposals/${p.id}">${p.id}</a></td>
-    <td>${p.type}</td>
-    <td>${p.status}</td>
-    <td>${p.summary}</td>
-    <td>${p.createdAt.toISOString()}</td>
-    <td>${p.expiresAt.toISOString()}</td>
+    <td data-label="Id" class="mono"><a href="/admin/proposals/${p.id}">${p.id}</a></td>
+    <td data-label="Type">${p.type}</td>
+    <td data-label="Status">${chip(p.status)}</td>
+    <td data-label="Summary" class="wrap">${p.summary}</td>
+    <td data-label="Created"><span title="${p.createdAt.toISOString()}">${relativeTime(p.createdAt)}</span></td>
+    <td data-label="Expires"><span title="${p.expiresAt.toISOString()}">${relativeTime(p.expiresAt)}</span></td>
   </tr>`
 }
 
@@ -69,7 +75,7 @@ function renderNewListingPreview(payload: NewListingPayload): RawHtml {
     <p>Category: ${payload.categoryTag}</p>
     <p>Delivery: ${payload.deliveryMinDays}-${payload.deliveryMaxDays} days</p>
     <div class="listing-images">${payload.imageUrls.map((url) => html`<img src="${url}">`)}</div>
-    <table>
+    <div class="table-wrap"><table class="rows">
       <thead>
         <tr>
           <th>SKU</th>
@@ -80,13 +86,13 @@ function renderNewListingPreview(payload: NewListingPayload): RawHtml {
       <tbody>
         ${payload.variants.map(
           (v) => html`<tr>
-            <td>${v.sku}</td>
-            <td>${formatCents(v.priceCents)}</td>
-            <td>${formatCents(v.supplierCostCents)}</td>
+            <td data-label="SKU">${v.sku}</td>
+            <td data-label="Price">${formatCents(v.priceCents)}</td>
+            <td data-label="Supplier cost">${formatCents(v.supplierCostCents)}</td>
           </tr>`,
         )}
       </tbody>
-    </table>
+    </table></div>
     ${renderDescriptionSection(payload.descriptionHtml)}
   </section>`
 }
@@ -216,9 +222,9 @@ function renderRejectForm(p: ProposalRow, rejectAction: string, redraftCount: nu
     <p><label>Reason for the agent (optional — leave blank to escalate to you):<br>
       <textarea name="reason" rows="6" cols="70" maxlength="2000"></textarea></label></p>
     ${canRedraft
-      ? html`<button type="submit" name="action" value="redraft">Re-draft with this reason</button> `
+      ? html`<button type="submit" name="action" value="redraft" class="danger">Re-draft with this reason</button> `
       : html`<p>Re-drafted ${SUPPORT_REDRAFT_MAX}× already — rejecting again escalates to you.</p>`}
-    <button type="submit" name="action" value="escalate">Just escalate to me</button>
+    <button type="submit" name="action" value="escalate" class="danger">Just escalate to me</button>
   </form>`
 }
 
@@ -250,10 +256,12 @@ function renderRejectForm(p: ProposalRow, rejectAction: string, redraftCount: nu
 function renderDecisionForms(p: ProposalRow, redraftCount = 0): RawHtml {
   const approveAction = `/admin/proposals/${p.id}/approve`
   const rejectAction = `/admin/proposals/${p.id}/reject`
-  const approveReject = html`<form method="post" action="${approveAction}">
-      <button type="submit">Approve</button>
+  const approveReject = html`<div class="actions sticky">
+    <form method="post" action="${approveAction}" data-confirm="Approve this proposal?">
+      <button type="submit" class="primary">Approve</button>
     </form>
-    ${renderRejectForm(p, rejectAction, redraftCount)}`
+    ${renderRejectForm(p, rejectAction, redraftCount)}
+  </div>`
 
   if (p.type === 'refund') {
     return approveReject
@@ -266,7 +274,7 @@ function renderDecisionForms(p: ProposalRow, redraftCount = 0): RawHtml {
   if (p.type === 'support_reply') {
     const currentBody = (p.payload as Partial<SupportReplyPayload>).body ?? ''
     return html`${approveReject}
-    <form method="post" action="${approveAction}">
+    <form method="post" action="${approveAction}" data-confirm="Approve the EDITED payload?">
       <p>Edit body then approve:</p>
       <textarea name="body" rows="16" cols="80">${currentBody}</textarea>
       <button type="submit">Approve edited</button>
@@ -275,7 +283,7 @@ function renderDecisionForms(p: ProposalRow, redraftCount = 0): RawHtml {
 
   const prefill = JSON.stringify(p.payload, null, 2)
   return html`${approveReject}
-    <form method="post" action="${approveAction}">
+    <form method="post" action="${approveAction}" data-confirm="Approve the EDITED payload?">
       <p>Edit then approve:</p>
       <textarea name="payload" rows="16" cols="80">${prefill}</textarea>
       <button type="submit">Approve edited</button>
@@ -293,7 +301,7 @@ function renderDecisionForms(p: ProposalRow, redraftCount = 0): RawHtml {
  */
 function renderResendForm(p: ProposalRow): RawHtml {
   const action = `/admin/proposals/${p.id}/resend-apply`
-  return html`<form method="post" action="${action}">
+  return html`<form method="post" action="${action}" data-confirm="Re-send the apply job?">
     <button type="submit">Re-send apply</button>
   </form>`
 }
@@ -317,11 +325,15 @@ export function renderProposalDetail(p: ProposalRow, extras: ProposalDetailExtra
         ? renderResendForm(p)
         : html``
 
+  const header = html`<div class="card">
+    ${kv('Type', p.type)}
+    ${kv('Status', chip(p.status))}
+    ${kv('Summary', p.summary)}
+    ${kv('Created', html`<span title="${p.createdAt.toISOString()}">${relativeTime(p.createdAt)}</span>`)}
+    ${kv('Expires', html`<span title="${p.expiresAt.toISOString()}">${relativeTime(p.expiresAt)}</span>`)}
+  </div>`
+
   return html`<h1>Proposal ${p.id}</h1>
-    <p>Type: ${p.type}</p>
-    <p>Status: ${p.status}</p>
-    <p>Summary: ${p.summary}</p>
-    <p>Created: ${p.createdAt.toISOString()}</p>
-    <p>Expires: ${p.expiresAt.toISOString()}</p>
+    ${header}
     ${preview} ${actions}`
 }

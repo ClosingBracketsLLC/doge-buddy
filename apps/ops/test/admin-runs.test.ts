@@ -134,6 +134,9 @@ describe('runs list + detail pages', () => {
     expect(res.body).toContain('>4<')
     expect(res.body).toContain(run.finishedAt!.toISOString())
     expect(res.body).toContain(`href="/admin/runs/${run.id}"`)
+    // Task 4: responsive table cell for Workflow + a status chip (this run seeds as 'succeeded').
+    expect(res.body).toContain('<td data-label="Workflow">')
+    expect(res.body).toContain('<span class="chip chip-ok">succeeded</span>')
 
     await app.close()
   })

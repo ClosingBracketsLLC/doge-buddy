@@ -140,6 +140,10 @@ describe('orders view + recovery actions', () => {
     expect(res.body).toContain('<option value="pending">pending</option>')
     expect(res.body).toContain('<option value="confirmed">confirmed</option>')
     expect(res.body).toContain('<option value="cancelled">cancelled</option>')
+    // Task 4: responsive table cells + status chip + primary recovery button.
+    expect(res.body).toContain('<td data-label="Status">')
+    expect(res.body).toContain('<span class="chip chip-bad">needs_attention</span>')
+    expect(res.body).toContain('<button type="submit" class="primary">Recover</button>')
 
     const pinnedIdx = res.body.indexOf(parked.id)
     const otherHeadingIdx = res.body.indexOf('Other orders')

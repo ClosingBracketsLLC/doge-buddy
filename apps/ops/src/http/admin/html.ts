@@ -100,7 +100,7 @@ const CHIP_TONES: Record<string, ChipTone> = {
   // switches
   ON: 'bad', OFF: 'muted', auto: 'info', manual: 'muted',
   // control-center home
-  DEGRADED: 'bad', ok: 'ok',
+  DEGRADED: 'bad', ok: 'ok', never: 'muted',
 }
 
 export function chipTone(state: string): ChipTone {

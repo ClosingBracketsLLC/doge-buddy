@@ -43,7 +43,7 @@ import {
   validateSession,
 } from './auth.ts'
 import { loadHealthStrip } from './health.ts'
-import { html, layout, raw, type RawHtml } from './html.ts'
+import { html, layout, raw, relativeTime, type RawHtml } from './html.ts'
 import { loadNavCounts } from './nav.ts'
 import { RECOVERY_TARGETS, renderNeedsAttentionSection, renderOtherOrdersSection } from './render-orders.ts'
 import { renderDashboard } from './render-dashboard.ts'
@@ -154,11 +154,18 @@ function renderSettingRow(row: SettingRow): RawHtml {
       )
   }
 
-  return html`<form method="post" action="/admin/settings">
+  // Boolean/mode rows submit on change (data-autosubmit) so their own Save button is
+  // js-only-hidden (still there, and still the real submit path, for a no-JS browser); a number
+  // row keeps its Save visible and primary — there's no sane "change" event to autosubmit on
+  // free-typed digits.
+  const autosubmitAttr = row.kind === 'boolean' || row.kind === 'mode' ? raw(' data-autosubmit') : raw('')
+  const saveClass = raw(row.kind === 'number' ? ' class="primary"' : ' class="js-hide"')
+
+  return html`<form class="card toggle-row" method="post" action="/admin/settings"${autosubmitAttr}>
     <label>${row.key}</label>
     <input type="hidden" name="key" value="${row.key}">
     ${control}
-    <button type="submit">Save</button>
+    <button type="submit"${saveClass}>Save</button>
   </form>`
 }
 
@@ -174,8 +181,10 @@ function renderSignalPasteBox(): RawHtml {
   return html`<section id="signal-paste">
     <h2>Paste a sourcing signal</h2>
     <form method="post" action="/admin/signals">
-      <label>Keyword <input name="keyword"></label>
-      <label>Content <textarea name="content" rows="8" cols="60"></textarea></label>
+      <label for="signal-keyword">Keyword</label>
+      <input id="signal-keyword" name="keyword">
+      <label for="signal-content">Content</label>
+      <textarea id="signal-content" name="content" rows="8" cols="60"></textarea>
       <button type="submit">Save signal</button>
     </form>
   </section>`
@@ -213,17 +222,18 @@ function renderRecentSignals(rows: RecentSignalRow[]): RawHtml {
   }
   return html`<section id="recent-signals">
     <h2>Recently pasted signals</h2>
-    <table>
+    <div class="table-wrap"><table class="rows">
+      <thead><tr><th>Keyword</th><th>Pasted</th><th>Content</th></tr></thead>
       <tbody>
         ${rows.map(
           (r) => html`<tr>
-            <td>${r.keyword ?? ''}</td>
-            <td>${r.fetchedAt.toISOString()}</td>
-            <td>${truncate(r.content, 200)}</td>
+            <td data-label="Keyword">${r.keyword ?? ''}</td>
+            <td data-label="Pasted"><span title="${r.fetchedAt.toISOString()}">${relativeTime(r.fetchedAt)}</span></td>
+            <td data-label="Content" class="wrap">${truncate(r.content, 200)}</td>
           </tr>`,
         )}
       </tbody>
-    </table>
+    </table></div>
   </section>`
 }
 
@@ -284,7 +294,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         await deps.alert('warning', 'admin_route_error', { phase, error: message }).catch(() => {})
-        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Something went wrong.</p>`))
+        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<div class="login card"><p>Something went wrong.</p></div>`))
       }
     }
 
@@ -292,7 +302,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       return safeHandleLogin('login-form', reply, async () => {
         const body = layout(
           'Admin login',
-          html`<form method="post" action="/admin/login"><button type="submit">Send me a login link</button></form>`,
+          html`<div class="login card"><form method="post" action="/admin/login"><button type="submit" class="primary">Send me a login link</button></form></div>`,
         )
         return reply.code(200).type('text/html; charset=utf-8').send(body)
       })
@@ -301,7 +311,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
     fastify.post('/admin/login', async (_request, reply) => {
       return safeHandleLogin('login-send', reply, async () => {
         if ((await loginSendsLastHour(deps.db)) >= LOGIN_SENDS_HOURLY_CAP) {
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Try again later.</p>`))
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<div class="login card"><p>Try again later.</p></div>`))
         }
 
         const token = await createLoginToken(deps.db)
@@ -314,7 +324,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         if (!delivered) {
           // Alerting already happened inside notify() on the failure path — nothing more to do
           // here than tell the operator the link didn't go out.
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Could not send the link — notifications unconfigured or failing.</p>`))
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<div class="login card"><p>Could not send the link — notifications unconfigured or failing.</p></div>`))
         }
 
         await deps.db.insert(auditLog).values({
@@ -322,7 +332,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           action: 'admin.login_link_sent',
           entityType: 'admin',
         })
-        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>Link sent — check Telegram.</p>`))
+        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<div class="login card"><p>Link sent — check Telegram.</p></div>`))
       })
     })
 
@@ -339,11 +349,11 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           const action = `/admin/login/consume?t=${encodeURIComponent(t)}`
           const body = layout(
             'Confirm login',
-            html`<form method="post" action="${action}"><button type="submit">Log in</button></form>`,
+            html`<div class="login card"><form method="post" action="${action}"><button type="submit" class="primary">Log in</button></form></div>`,
           )
           return reply.code(200).type('text/html; charset=utf-8').send(body)
         }
-        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>${LOGIN_INVALID_COPY}</p>`))
+        return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<div class="login card"><p>${LOGIN_INVALID_COPY}</p></div>`))
       })
     })
 
@@ -352,7 +362,7 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         const { t } = request.query as { t?: string }
         const result = t ? await consumeLoginToken(deps.db, t) : null
         if (!result) {
-          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<p>${LOGIN_INVALID_COPY}</p>`))
+          return reply.code(200).type('text/html; charset=utf-8').send(layout('Admin login', html`<div class="login card"><p>${LOGIN_INVALID_COPY}</p></div>`))
         }
 
         await deps.db.insert(auditLog).values({
@@ -571,11 +581,12 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
           const body =
             rows.length === 0
               ? html`<p>No agent runs yet — Phase 5.</p>`
-              : html`<table>
+              : html`<div class="table-wrap"><table class="rows">
+                  <thead><tr><th>Id</th><th>Workflow</th><th>Status</th><th>Cost</th><th>Turns</th><th>Created</th><th>Finished</th></tr></thead>
                   <tbody>
                     ${rows.map(renderRunRow)}
                   </tbody>
-                </table>`
+                </table></div>`
 
           return reply.code(200).type('text/html; charset=utf-8').send(await page('Runs', body, request.url))
         })
@@ -676,6 +687,20 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
         return layout(title, body, { path, counts: await loadNavCounts(deps.db) })
       }
 
+      /** `?status=` filter chips for the proposals list — `all` plus every `proposal_status` enum
+       * value, same `<nav class="chips">` markup and `aria-current="page"` idiom as
+       * render-tickets.ts's `renderStatusChips`. */
+      function renderProposalFilterChips(current: string | undefined): RawHtml {
+        const chips = ['all', ...PROPOSAL_STATUSES] as const
+        const active = current && (PROPOSAL_STATUSES as readonly string[]).includes(current) ? current : 'all'
+        return html`<nav class="chips" id="proposal-filters">
+          ${chips.map((c) => {
+            const href = c === 'all' ? '/admin/proposals' : `/admin/proposals?status=${c}`
+            return html`<a href="${raw(href)}"${raw(c === active ? ' aria-current="page"' : '')}>${c}</a>`
+          })}
+        </nav>`
+      }
+
       // Queue + detail pages (Task 5). Both run the lazy-expiry sweep above for exactly what
       // they're about to show, then read fresh so a just-flipped row never renders stale.
       authed.get('/admin/proposals', async (request, reply) => {
@@ -707,11 +732,12 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
 
           const body = await page(
             'Proposals',
-            html`<table>
+            html`${renderProposalFilterChips(status)}<div class="table-wrap"><table class="rows">
+              <thead><tr><th>Id</th><th>Type</th><th>Status</th><th>Summary</th><th>Created</th><th>Expires</th></tr></thead>
               <tbody>
                 ${rows.map(renderProposalRow)}
               </tbody>
-            </table>`,
+            </table></div>`,
             request.url,
           )
           return reply.code(200).type('text/html; charset=utf-8').send(body)
@@ -1404,8 +1430,8 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
                   conflict. Max ${GUIDANCE_MAX_CHARS} characters.
                 </p>
                 <form method="post" action="/admin/guidance">
-                  <textarea name="guidance" rows="18" cols="90">${current}</textarea>
-                  <div><button type="submit">Save</button></div>
+                  <textarea name="guidance" rows="18">${current}</textarea>
+                  <div><button type="submit" class="primary">Save</button></div>
                 </form>`,
               request.url,
             ),

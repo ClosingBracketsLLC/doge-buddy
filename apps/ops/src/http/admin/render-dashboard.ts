@@ -45,12 +45,18 @@ function walletCard(h: HealthStrip): RawHtml {
   if (h.walletCents === null) {
     return html`<div class="card"><div class="label">CJ wallet</div><div class="stat">n/a</div><div class="empty">wallet read unavailable</div></div>`
   }
+  // Review ruling (3): a threshold of 0 means alerting is OFF, not "alert the instant the wallet
+  // has anything less than a threshold of $0.00" — the old ratio math (guarded to 1 when the
+  // threshold is 0) fell into the `< 2` branch and rendered a 'warn' tone + an "alert threshold
+  // $0.00" footer, which lied about there being an active alert line.
+  const noThreshold = h.walletAlertThresholdCents === 0
   const ratio = h.walletAlertThresholdCents > 0 ? h.walletCents / h.walletAlertThresholdCents : 1
-  const tone = ratio < 1 ? 'bad' : ratio < 2 ? 'warn' : 'ok'
+  const tone = noThreshold ? 'ok' : ratio < 1 ? 'bad' : ratio < 2 ? 'warn' : 'ok'
   const pct = Math.max(0, Math.min(100, Math.round((ratio / 2) * 100)))
+  const footer = noThreshold ? 'no alert threshold' : `alert threshold ${formatCents(h.walletAlertThresholdCents)}`
   return html`<div class="card"><div class="label">CJ wallet</div><div class="stat ${raw(tone)}">${formatCents(h.walletCents)}</div>
     <div class="bar ${raw(tone === 'ok' ? '' : tone)}"><i style="width:${raw(String(pct))}%"></i></div>
-    <div class="empty">alert threshold ${formatCents(h.walletAlertThresholdCents)}${h.pausedForFunds ? html` · ${chip('ON')} paused for funds` : html``}</div></div>`
+    <div class="empty">${footer}${h.pausedForFunds ? html` · ${chip('ON')} paused for funds` : html``}</div></div>`
 }
 
 function toggleCard(label: string, key: string, on: boolean, confirmWhenOn?: string): RawHtml {
@@ -65,7 +71,7 @@ function toggleCard(label: string, key: string, on: boolean, confirmWhenOn?: str
 function modeCard(label: string, key: string, current: 'manual' | 'auto'): RawHtml {
   const seg = (mode: 'manual' | 'auto') =>
     html`<button type="submit" name="value" value="${mode}" aria-pressed="${raw(String(current === mode))}">${mode}</button>`
-  return html`<div class="card"><form method="post" action="/admin/settings"${key === 'workflow.refund.mode' ? html`` : html``}>
+  return html`<div class="card"><form method="post" action="/admin/settings">
     <input type="hidden" name="key" value="${key}"><input type="hidden" name="returnTo" value="/admin">
     <div class="toggle"><label>${label}</label><span class="seg">${seg('manual')}${seg('auto')}</span></div></form></div>`
 }
@@ -101,7 +107,7 @@ export function renderDashboard(h: HealthStrip, now: Date = new Date()): RawHtml
       ${kv('Sourcing last run', runLine(h.sourcingLastRun), h.sourcingLastRun?.startedAt)}
       ${kv('Support agent today', html`${h.supportAgentRunsToday} / ${SUPPORT_AGENT_MAX_RUNS_PER_DAY}`)}
       ${kv('Support agent last run', runLine(h.supportAgentLastRun), h.supportAgentLastRun?.startedAt)}
-      ${kv('Support poll', h.supportPollConsecutiveFailures > 0 ? html`${chip('failed')} ${h.supportPollConsecutiveFailures} failures` : html`${chip('ok')} ${relativeTime(h.supportPollLastSuccessAt, now)}`, h.supportPollLastSuccessAt)}
+      ${kv('Support poll', h.supportPollConsecutiveFailures > 0 ? html`${chip('failed')} ${h.supportPollConsecutiveFailures} failures` : html`${chip(h.supportPollLastSuccessAt ? 'ok' : 'never')} ${relativeTime(h.supportPollLastSuccessAt, now)}`, h.supportPollLastSuccessAt)}
       ${kv('Scoring', h.scoringLastRunDate ? html`${h.scoringLastRunDate} · ${h.scoringProductsScored} scored` : 'never')}
       ${kv('Inventory sync', html`${relativeTime(h.inventorySyncLastAt, now)}${h.inventorySyncDegraded ? html` ${chip('DEGRADED')}` : html``}`, h.inventorySyncLastAt)}
       ${kv('Queue depth', String(h.queueDepth))}
