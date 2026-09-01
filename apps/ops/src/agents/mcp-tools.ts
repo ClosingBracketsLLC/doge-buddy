@@ -3,6 +3,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { z } from 'zod'
 import { PointsAllowance, PointsAllowanceExceededError } from './points.ts'
+import { MarketLookups, type MarketPriceProvider } from '../sourcing/market-price.ts'
 
 /** CJ points cost charged against the run's PointsAllowance for each tool call. */
 export const TOOL_POINT_COSTS = {
@@ -15,9 +16,16 @@ export const TOOL_POINT_COSTS = {
 const ALLOWANCE_EXHAUSTED_MESSAGE =
   'CJ points allowance exhausted for this run — conclude with the research you already have.'
 
+const MARKET_LOOKUP_UNAVAILABLE_MESSAGE =
+  'Market price lookup failed or the SerpApi budget is exhausted — proceed with the lookups you already have.'
+
 export interface SourcingMcpDeps {
   adapter: Pick<SupplierAdapter, 'getProduct' | 'getProductReviews' | 'getVariantStock' | 'quoteShipping'>
   allowance: PointsAllowance
+  /** Both present => the lookup_market_price tool is registered (SERPAPI_KEY configured);
+   *  absent => the tool does not exist and the prompt says the gate is skipped (spec Decision 5). */
+  marketPrice?: MarketPriceProvider | null
+  marketLookups?: MarketLookups
 }
 
 function ok(result: unknown): CallToolResult {
@@ -49,11 +57,13 @@ function trySpend(allowance: PointsAllowance, cost: number, name: string): CallT
   }
 }
 
-/** Builds the four tool handlers as plain async functions, independent of any MCP server
+/** Builds the five tool handlers as plain async functions, independent of any MCP server
  * wrapping — this is what tests call directly, and what createSourcingMcpServer wires into
- * `tool()` definitions below. */
+ * `tool()` definitions below. The fifth (lookup_market_price) is always available on the
+ * handlers object (for tests), but the MCP server only registers it when both market deps are
+ * present. */
 export function createSourcingToolHandlers(deps: SourcingMcpDeps) {
-  const { adapter, allowance } = deps
+  const { adapter, allowance, marketPrice, marketLookups } = deps
 
   return {
     // Second `_extra` param is unused but kept so these handlers structurally match the SDK's
@@ -109,44 +119,75 @@ export function createSourcingToolHandlers(deps: SourcingMcpDeps) {
         return errorResult(scrubMessage(err))
       }
     },
+
+    async lookup_market_price(args: { supplierProductId: string; query: string }, _extra?: unknown): Promise<CallToolResult> {
+      if (!marketPrice || !marketLookups) {
+        return errorResult(MARKET_LOOKUP_UNAVAILABLE_MESSAGE)
+      }
+      const cached = marketLookups.find(args.supplierProductId, args.query)
+      if (cached) {
+        const { snapshot: _snapshot, ...body } = cached
+        return ok(body)
+      }
+      try {
+        const offers = await marketPrice.fetchOffers(args.query)
+        if (offers === null) return errorResult(MARKET_LOOKUP_UNAVAILABLE_MESSAGE)
+        const lookup = marketLookups.record({ supplierProductId: args.supplierProductId, query: args.query, offers })
+        const { snapshot: _snapshot, ...body } = lookup
+        return ok(body)
+      } catch (err) {
+        return errorResult(scrubMessage(err))
+      }
+    },
   }
 }
 
-/** Read-only, in-process MCP server exposing four CJ lookup tools to the sourcing agent, each
- * metered against `deps.allowance`. No mutation methods (placeOrder, payOrder, etc.) are
- * reachable through this server by construction — `deps.adapter` is narrowed to the four
- * read-only SupplierAdapter methods above. */
+/** Read-only, in-process MCP server exposing CJ lookup tools to the sourcing agent, each
+ * metered against `deps.allowance`. Four tools (product, reviews, stock, freight) are always
+ * registered. A fifth tool (lookup_market_price) is registered only when a MarketPriceProvider
+ * is wired. No mutation methods (placeOrder, payOrder, etc.) are reachable through this server
+ * by construction — `deps.adapter` is narrowed to read-only SupplierAdapter methods above. */
 export function createSourcingMcpServer(deps: SourcingMcpDeps): ReturnType<typeof createSdkMcpServer> {
   const handlers = createSourcingToolHandlers(deps)
 
-  return createSdkMcpServer({
-    name: 'sourcing',
-    version: '1.0.0',
-    tools: [
+  const tools = [
+    tool(
+      'get_product_detail',
+      'Full CJ product detail: title, description, variants with costs, images.',
+      { supplierProductId: z.string().min(1) },
+      handlers.get_product_detail,
+    ),
+    tool(
+      'get_reviews',
+      'Buyer reviews for a CJ product (rating 1-5 + text).',
+      { supplierProductId: z.string().min(1), page: z.number().int().min(1).optional() },
+      handlers.get_reviews,
+    ),
+    tool(
+      'get_stock',
+      'Per-warehouse stock for a CJ variant.',
+      { supplierVariantId: z.string().min(1) },
+      handlers.get_stock,
+    ),
+    tool(
+      'quote_freight',
+      'US shipping options (price cents + day range) for a CJ variant, qty 1.',
+      { supplierVariantId: z.string().min(1) },
+      handlers.quote_freight,
+    ),
+  ]
+  if (deps.marketPrice && deps.marketLookups) {
+    tools.push(
       tool(
-        'get_product_detail',
-        'Full CJ product detail: title, description, variants with costs, images.',
-        { supplierProductId: z.string().min(1) },
-        handlers.get_product_detail,
+        'lookup_market_price',
+        'Google Shopping offers for a query: median/p25/p75 price in cents, offer count, the 5 cheapest offers. ' +
+          'Query as a US shopper would type it ("orthopedic dog bed large"), never a CJ title. ' +
+          '>= 5 offers = conclusive; fewer -> broaden the query once. Returns a lookupId you MUST put ' +
+          'on the winner as marketLookupId (its supplierProductId must match the winner).',
+        { supplierProductId: z.string().min(1), query: z.string().min(2).max(120) },
+        handlers.lookup_market_price,
       ),
-      tool(
-        'get_reviews',
-        'Buyer reviews for a CJ product (rating 1-5 + text).',
-        { supplierProductId: z.string().min(1), page: z.number().int().min(1).optional() },
-        handlers.get_reviews,
-      ),
-      tool(
-        'get_stock',
-        'Per-warehouse stock for a CJ variant.',
-        { supplierVariantId: z.string().min(1) },
-        handlers.get_stock,
-      ),
-      tool(
-        'quote_freight',
-        'US shipping options (price cents + day range) for a CJ variant, qty 1.',
-        { supplierVariantId: z.string().min(1) },
-        handlers.quote_freight,
-      ),
-    ],
-  })
+    )
+  }
+  return createSdkMcpServer({ name: 'sourcing', version: '1.0.0', tools })
 }

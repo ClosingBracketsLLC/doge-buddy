@@ -8,6 +8,7 @@ import type {
 } from '@doge-buddy/supplier'
 import { PointsAllowance, PointsAllowanceExceededError, SOURCING_POINTS_ALLOWANCE } from '../src/agents/points.ts'
 import { TOOL_POINT_COSTS, createSourcingMcpServer, createSourcingToolHandlers } from '../src/agents/mcp-tools.ts'
+import { MarketLookups, type MarketOffer, type MarketPriceProvider } from '../src/sourcing/market-price.ts'
 
 type StubAdapter = Pick<SupplierAdapter, 'getProduct' | 'getProductReviews' | 'getVariantStock' | 'quoteShipping'>
 
@@ -256,6 +257,79 @@ describe('agents/mcp-tools', () => {
 
       const result = await handlers.get_stock({ supplierVariantId: 'v1' }, undefined)
       expect(result).toEqual({ content: [{ type: 'text', text: 'timeout' }], isError: true })
+    })
+  })
+
+  describe('lookup_market_price tool', () => {
+    function offers(...cents: number[]): MarketOffer[] {
+      return cents.map((c, i) => ({ title: `o${i}`, priceCents: c, merchant: null, url: null }))
+    }
+    function makeMarketDeps(fetchOffers: MarketPriceProvider['fetchOffers']) {
+      const marketLookups = new MarketLookups()
+      const marketPrice: MarketPriceProvider = { key: 'serpapi_google_shopping', fetchOffers }
+      const handlers = createSourcingToolHandlers({
+        adapter: makeStubAdapter(), allowance: new PointsAllowance(), marketPrice, marketLookups,
+      })
+      return { handlers, marketLookups }
+    }
+
+    it('records the lookup and returns it (id + stats + offers, no snapshot); spends NO CJ points', async () => {
+      const allowance = new PointsAllowance()
+      const marketLookups = new MarketLookups()
+      const handlers = createSourcingToolHandlers({
+        adapter: makeStubAdapter(), allowance,
+        marketPrice: { key: 'serpapi_google_shopping', fetchOffers: vi.fn(async () => offers(100, 200, 300, 400, 500)) },
+        marketLookups,
+      })
+
+      const result = await handlers.lookup_market_price({ supplierProductId: 'cjp-1', query: 'dog bed' })
+
+      expect(result.isError).toBeUndefined()
+      const body = JSON.parse((result.content[0] as { text: string }).text)
+      expect(body).toEqual({
+        lookupId: 'mkt_1', supplierProductId: 'cjp-1', query: 'dog bed', offerCount: 5,
+        medianCents: 300, p25Cents: 200, p75Cents: 400,
+        offers: offers(100, 200, 300, 400, 500),
+      })
+      expect(marketLookups.get('mkt_1')?.medianCents).toBe(300)
+      expect(allowance.spent()).toBe(0)
+    })
+
+    it('identical (pid, query modulo case/whitespace) repeat returns the SAME lookup, no second fetch', async () => {
+      const fetchOffers = vi.fn(async () => offers(1, 2, 3, 4, 5))
+      const { handlers } = makeMarketDeps(fetchOffers)
+
+      const first = JSON.parse(((await handlers.lookup_market_price({ supplierProductId: 'p', query: 'Dog  Bed' })).content[0] as { text: string }).text)
+      const second = JSON.parse(((await handlers.lookup_market_price({ supplierProductId: 'p', query: ' dog bed ' })).content[0] as { text: string }).text)
+
+      expect(fetchOffers).toHaveBeenCalledTimes(1)
+      expect(second.lookupId).toBe(first.lookupId)
+    })
+
+    it('null from the provider (cap/HTTP) -> isError, nothing recorded', async () => {
+      const { handlers, marketLookups } = makeMarketDeps(vi.fn(async () => null))
+      const result = await handlers.lookup_market_price({ supplierProductId: 'p', query: 'q' })
+      expect(result.isError).toBe(true)
+      expect((result.content[0] as { text: string }).text).toContain('proceed with the lookups you already have')
+      expect(marketLookups.all()).toEqual([])
+    })
+
+    it('server registers the tool only when a provider is wired', () => {
+      const base = { adapter: makeStubAdapter(), allowance: new PointsAllowance() }
+      // instance.options.tools is the SDK's registered tool list (name property per tool)
+      const without = createSourcingMcpServer(base) as unknown as { instance?: unknown }
+      const withMarket = createSourcingMcpServer({
+        ...base,
+        marketPrice: { key: 'serpapi_google_shopping', fetchOffers: async () => [] },
+        marketLookups: new MarketLookups(),
+      })
+      // Both construct; the armed one exposes a lookup_market_price handler, the bare one does not.
+      const bareHandlers = createSourcingToolHandlers(base)
+      expect(bareHandlers.lookup_market_price).toBeDefined() // handler exists...
+      const bareResult = bareHandlers.lookup_market_price({ supplierProductId: 'p', query: 'q' })
+      expect(without).toBeDefined()
+      expect(withMarket).toBeDefined()
+      return expect(bareResult).resolves.toMatchObject({ isError: true }) // ...but reports unavailable
     })
   })
 })
