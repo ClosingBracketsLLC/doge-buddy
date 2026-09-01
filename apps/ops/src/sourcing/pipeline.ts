@@ -62,10 +62,20 @@ function errorMessage(err: unknown): string {
 /**
  * Task 14: the whole `sourcing.weekly` workflow, one call. Composes every prior Phase 5 stage in
  * the spec's normative order — this function has no domain logic of its own, only the wiring and
- * the two documented short-circuits (refused / no_candidates). Every failure mode here is a clean
- * return, never a throw (Decision 10 for the refusal path; the agent runner and submit-winners are
- * already internally throw-free by construction) — `jobs/sourcing-weekly.ts` still wraps the call
- * in try/catch as a last-resort net, but nothing in normal operation should ever reach it.
+ * the two documented short-circuits (refused / no_candidates).
+ *
+ * THROWS in exactly one place: Stage 0's `resolveSourcingKnobs`, on an out-of-range or unparseable
+ * knob (a `sourcing.*` setting outside `SOURCING_KNOB_RANGES`, or a > 8 keyword override). That is
+ * NOT an exotic failure — an owner typo on `/admin/settings` is normal operation — so the throw is
+ * deliberate and loud, and it happens before the day is claimed: the cron's
+ * `jobs/sourcing-weekly.ts` catch turns it into a `critical` `sourcing_run_failed` alert with NO
+ * `agent_runs` row created and the day's slot untouched, and `scripts/run-sourcing.ts` prints
+ * `run-sourcing: FAILED — <the knob message>` and exits 1. Both name the offending knob and source.
+ *
+ * Past Stage 0, every failure mode is a clean return, never a throw (Decision 10 for the refusal
+ * path; the agent runner and submit-winners are already internally throw-free by construction) —
+ * the only other way out through `throw` is the belt below re-raising a genuinely unexpected
+ * stage error (a transient DB/trends failure) after flipping the claimed row terminal.
  */
 export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<SourcingPipelineResult> {
   const { db, adapter, settings, alert, enqueue, notify, adminBaseUrl, trendsFactory, queryFn, force, overrides } = deps

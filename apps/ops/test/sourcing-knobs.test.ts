@@ -71,9 +71,23 @@ describe('resolveSourcingKnobs', () => {
     expect(knobs.keywords).toEqual(['dog puzzle', 'dog snuffle mat'])
   })
 
-  it('keywords: an all-empty override falls back to HARVEST_KEYWORDS rather than harvesting nothing', async () => {
+  it('keywords: an all-empty override from a PROGRAMMATIC caller falls back to HARVEST_KEYWORDS', async () => {
+    // The CLI refuses this instead (see parseRunSourcingArgs below) — a human who typed
+    // --keywords must not be silently reverted to the default five.
     const knobs = await resolveSourcingKnobs(fakeSettings(), { keywords: ['', '  '] })
     expect(knobs.keywords).toEqual([...HARVEST_KEYWORDS])
+  })
+
+  it('keywords: deduped case-insensitively, first occurrence wins', async () => {
+    const knobs = await resolveSourcingKnobs(fakeSettings(), { keywords: ['dog', 'Dog', 'dog bed'] })
+    expect(knobs.keywords).toEqual(['dog', 'dog bed'])
+  })
+
+  it('keywords: the ≤ 8 cap counts DEDUPED keywords, not raw entries', async () => {
+    // 10 raw entries that collapse to 6 distinct keywords must be accepted, not rejected.
+    const raw = ['dog toy', 'Dog Toy', 'dog bed', 'DOG BED', 'dog leash', 'dog bowl', 'dog brush', 'dog crate', 'dog toy', ' dog bed ']
+    const knobs = await resolveSourcingKnobs(fakeSettings(), { keywords: raw })
+    expect(knobs.keywords).toEqual(['dog toy', 'dog bed', 'dog leash', 'dog bowl', 'dog brush', 'dog crate'])
   })
 
   it(`keywords: exactly ${MAX_OVERRIDE_KEYWORDS} is accepted, more throws a clear error`, async () => {
@@ -147,6 +161,24 @@ describe('parseRunSourcingArgs', () => {
       force: false,
       overrides: { keywords: ['dog toy', 'dog bed'] },
     })
+  })
+
+  it('deduplicates keywords case-insensitively, first occurrence wins', () => {
+    expect(parseRunSourcingArgs(['--keywords', 'dog,Dog,dog bed'])).toEqual({
+      force: false,
+      overrides: { keywords: ['dog', 'dog bed'] },
+    })
+  })
+
+  it.each<[string, string[]]>([
+    ['--keywords ""', ['--keywords', '']],
+    ['--keywords ","', ['--keywords', ',']],
+    ['--keywords " , "', ['--keywords', ' , ']],
+    ['--keywords=', ['--keywords=']],
+    ['--keywords=,,', ['--keywords=,,']],
+  ])('an explicitly supplied %s yields nothing and is an error, never a silent fallback', (_label, args) => {
+    expect(() => parseRunSourcingArgs(args)).toThrow(/--keywords was given but contains no keywords/i)
+    expect(() => parseRunSourcingArgs(args)).toThrow(/usage/i)
   })
 
   it('an unknown flag throws with the usage line', () => {

@@ -433,7 +433,10 @@ if (config.anthropic) {
     retryLimit: 0,
     expireInSeconds: 3600,
   })
-  app.log.info('sourcing.weekly cron ARMED — Mondays 13:00 UTC, sonnet-5, $2.00 stop-loss')
+  // No number in this line on purpose: since the catalog-p0 knobs (spec §5) the stop-loss is
+  // resolved PER RUN from `sourcing.max_budget_cents` (`sourcing/knobs.ts`), which the owner can
+  // change on /admin/settings at any time — a figure printed once at boot would go stale and lie.
+  app.log.info('sourcing.weekly cron ARMED — Mondays 13:00 UTC, sonnet-5, stop-loss from sourcing.max_budget_cents (resolved per run)')
 }
 
 // `support.poll-gmail` (Phase 6A, Task 12): the minute-cadence Gmail poll — ingest → triage →

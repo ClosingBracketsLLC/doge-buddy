@@ -58,10 +58,27 @@ function checkRange(knob: NumericKnob, value: number, label: string): number {
   return value
 }
 
-/** Trims, drops empties, and enforces the ≤ 8 cap. Returns null when nothing survives, so the
- * caller falls back to `HARVEST_KEYWORDS` rather than harvesting nothing at all. */
+/**
+ * Trims, drops empties, dedupes case-insensitively (first occurrence wins, so the operator's own
+ * casing survives), and enforces the ≤ 8 cap on what is LEFT — `"dog,Dog"` is one keyword, not two,
+ * and must not eat two of the eight slots or two round-robin harvest passes over the same results.
+ *
+ * Returns null when nothing survives, so a PROGRAMMATIC caller falls back to `HARVEST_KEYWORDS`
+ * rather than harvesting nothing at all. `parseRunSourcingArgs` deliberately does NOT accept that
+ * fallback: a human who typed `--keywords` meant to steer the run, and silently reverting them to
+ * the default five is the wrong answer to `--keywords ","`.
+ */
 export function normalizeKeywords(raw: readonly string[]): string[] | null {
-  const cleaned = raw.map((k) => k.trim()).filter((k) => k.length > 0)
+  const seen = new Set<string>()
+  const cleaned: string[] = []
+  for (const entry of raw) {
+    const trimmed = entry.trim()
+    if (trimmed.length === 0) continue
+    const key = trimmed.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    cleaned.push(trimmed)
+  }
   if (cleaned.length > MAX_OVERRIDE_KEYWORDS) {
     throw new Error(`--keywords accepts at most ${MAX_OVERRIDE_KEYWORDS} keywords, got ${cleaned.length}`)
   }
@@ -147,8 +164,12 @@ export function parseRunSourcingArgs(argv: readonly string[]): { force: boolean;
     }
 
     if (flag === '--keywords') {
-      const keywords = normalizeKeywords(takeValue().split(','))
-      if (keywords) overrides.keywords = keywords
+      const raw = takeValue()
+      const keywords = normalizeKeywords(raw.split(','))
+      if (!keywords) {
+        throw new Error(`run-sourcing: --keywords was given but contains no keywords ("${raw}")\n${USAGE}`)
+      }
+      overrides.keywords = keywords
       continue
     }
 
