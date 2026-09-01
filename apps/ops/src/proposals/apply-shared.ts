@@ -39,7 +39,9 @@ type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: R
  */
 export interface ProposalShopifyOps {
   findProductByHandle(handle: string): Promise<{ id: string } | null>
-  productSet(input: Record<string, unknown>): Promise<{ productId: string; variants: { id: string; sku?: string }[] }>
+  productSet(
+    input: Record<string, unknown>,
+  ): Promise<{ productId: string; variants: { id: string; sku?: string; inventoryItemId: string }[] }>
   listPublications(): Promise<{ id: string; name: string }[]>
   publishablePublish(productId: string, publicationId: string): Promise<void>
   /**
@@ -60,7 +62,7 @@ export interface ProposalShopifyOps {
    * upsert matched by sku, not a hard failure) — which breaks fulfillment's `loadMappings`, which
    * filters on that column being non-null. See `executeApplyProposal`'s resume branch.
    */
-  productVariantsByProductId(productGid: string): Promise<{ id: string; sku?: string }[]>
+  productVariantsByProductId(productGid: string): Promise<{ id: string; sku?: string; inventoryItemId: string }[]>
 }
 
 /**

@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   ShopifyAdminClient, ShopifyTokenManager, ShopifyUserError,
   collectionCreate, findProductByHandle, fulfillmentCreate, fulfillmentTrackingInfoUpdate,
-  inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
+  inventoryItemUpdate, inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
   listWebhookSubscriptions, metafieldDefinitionCreate, orderFulfillmentOrders, orderRefundState,
-  ordersUpdatedSince, productDelete,
+  ordersUpdatedSince, primaryLocationId, productDelete, productUpdate,
   productSet, productVariantsByProductId, publishablePublish, publishableUnpublish, refundCreate, webhookSubscriptionCreate,
   webhookSubscriptionDelete,
 } from '@doge-buddy/shopify-admin'
@@ -43,18 +43,33 @@ describe('listPublications', () => {
 
 describe('productSet', () => {
   const input = { title: 'DogeShirt' }
-  it('sends the input, maps product + variants', async () => {
+  it('sends the input, maps product + variants (including inventoryItemId)', async () => {
     const { client, calls } = makeClient(() =>
       gql({
         productSet: {
-          product: { id: 'gid://shopify/Product/9', variants: { nodes: [{ id: 'gid://shopify/ProductVariant/91', sku: 'DB-1' }] } },
+          product: {
+            id: 'gid://shopify/Product/9',
+            variants: {
+              nodes: [
+                {
+                  id: 'gid://shopify/ProductVariant/91',
+                  sku: 'DB-1',
+                  inventoryItem: { id: 'gid://shopify/InventoryItem/1' },
+                },
+              ],
+            },
+          },
           userErrors: [],
         },
       }))
     const result = await productSet(client, input)
-    expect(result).toEqual({ productId: 'gid://shopify/Product/9', variants: [{ id: 'gid://shopify/ProductVariant/91', sku: 'DB-1' }] })
+    expect(result).toEqual({
+      productId: 'gid://shopify/Product/9',
+      variants: [{ id: 'gid://shopify/ProductVariant/91', sku: 'DB-1', inventoryItemId: 'gid://shopify/InventoryItem/1' }],
+    })
     const { query, variables } = lastGraphqlCall(calls)
     expect(query).toMatch(/mutation[\s\S]*productSet/)
+    expect(query).toMatch(/inventoryItem\s*\{\s*id\s*\}/)
     expect(variables).toEqual({ input })
   })
   it('throws ShopifyUserError on userErrors', async () => {
@@ -381,6 +396,30 @@ describe('collectionCreate', () => {
       },
     })
   })
+  it('forwards descriptionHtml when given', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ collectionCreate: { collection: { id: 'gid://shopify/Collection/1' }, userErrors: [] } }))
+    await collectionCreate(client, { ...input, descriptionHtml: '<p>Doge tees</p>' })
+    const { variables } = lastGraphqlCall(calls)
+    expect(variables).toEqual({
+      input: {
+        title: 'Doge Tees',
+        handle: 'doge-tees',
+        descriptionHtml: '<p>Doge tees</p>',
+        ruleSet: {
+          appliedDisjunctively: false,
+          rules: [{ column: 'TAG', relation: 'EQUALS', condition: 'doge-tees' }],
+        },
+      },
+    })
+  })
+  it('omits descriptionHtml entirely when not given', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ collectionCreate: { collection: { id: 'gid://shopify/Collection/1' }, userErrors: [] } }))
+    await collectionCreate(client, input)
+    const { variables } = lastGraphqlCall(calls)
+    expect((variables as any).input).not.toHaveProperty('descriptionHtml')
+  })
   it('throws ShopifyUserError on userErrors', async () => {
     const { client } = makeClient(() =>
       gql({ collectionCreate: { collection: null, userErrors: [{ message: 'Handle already in use' }] } }))
@@ -418,26 +457,76 @@ describe('findProductByHandle', () => {
 })
 
 describe('productVariantsByProductId', () => {
-  it('sends the product gid, maps variant id + sku', async () => {
+  it('sends the product gid, maps variant id + sku + inventoryItemId', async () => {
     const { client, calls } = makeClient(() =>
       gql({
         product: {
           variants: {
             nodes: [
-              { id: 'gid://shopify/ProductVariant/91', sku: 'DB-1' },
-              { id: 'gid://shopify/ProductVariant/92', sku: null },
+              { id: 'gid://shopify/ProductVariant/91', sku: 'DB-1', inventoryItem: { id: 'gid://shopify/InventoryItem/1' } },
+              { id: 'gid://shopify/ProductVariant/92', sku: null, inventoryItem: { id: 'gid://shopify/InventoryItem/2' } },
             ],
           },
         },
       }))
     const result = await productVariantsByProductId(client, 'gid://shopify/Product/9')
     expect(result).toEqual([
-      { id: 'gid://shopify/ProductVariant/91', sku: 'DB-1' },
-      { id: 'gid://shopify/ProductVariant/92', sku: undefined },
+      { id: 'gid://shopify/ProductVariant/91', sku: 'DB-1', inventoryItemId: 'gid://shopify/InventoryItem/1' },
+      { id: 'gid://shopify/ProductVariant/92', sku: undefined, inventoryItemId: 'gid://shopify/InventoryItem/2' },
     ])
     const { query, variables } = lastGraphqlCall(calls)
     expect(query).toMatch(/query[\s\S]*variants/)
+    expect(query).toMatch(/inventoryItem\s*\{\s*id\s*\}/)
     expect(variables).toEqual({ id: 'gid://shopify/Product/9' })
+  })
+})
+
+describe('primaryLocationId', () => {
+  it('returns the first active location node id', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ locations: { nodes: [{ id: 'gid://shopify/Location/1' }] } }))
+    const result = await primaryLocationId(client)
+    expect(result).toBe('gid://shopify/Location/1')
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/query[\s\S]*locations/)
+    expect(query).toContain('active:true')
+    expect(variables).toBeUndefined()
+  })
+  it('throws when the store has no active location', async () => {
+    const { client } = makeClient(() => gql({ locations: { nodes: [] } }))
+    await expect(primaryLocationId(client)).rejects.toThrow(/no active location/)
+  })
+})
+
+describe('productUpdate', () => {
+  const input = { id: 'gid://shopify/Product/9', handle: 'doge-tee', tags: ['a', 'b'], productType: 'Shirts', seo: { title: 'T', description: 'D' } }
+  it('sends the input, resolves void', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ productUpdate: { product: { id: 'gid://shopify/Product/9' }, userErrors: [] } }))
+    await expect(productUpdate(client, input)).resolves.toBeUndefined()
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/mutation[\s\S]*productUpdate/)
+    expect(variables).toEqual({ input })
+  })
+  it('throws ShopifyUserError on userErrors', async () => {
+    const { client } = makeClient(() =>
+      gql({ productUpdate: { product: null, userErrors: [{ message: 'Handle already in use' }] } }))
+    await expect(productUpdate(client, input)).rejects.toThrow(ShopifyUserError)
+  })
+})
+
+describe('inventoryItemUpdate', () => {
+  it('sends id + input, resolves void', async () => {
+    const { client, calls } = makeClient(() => gql({ inventoryItemUpdate: { inventoryItem: { id: 'gid://shopify/InventoryItem/1' }, userErrors: [] } }))
+    await expect(inventoryItemUpdate(client, 'gid://shopify/InventoryItem/1', { tracked: true })).resolves.toBeUndefined()
+    const { query, variables } = lastGraphqlCall(calls)
+    expect(query).toMatch(/mutation[\s\S]*inventoryItemUpdate/)
+    expect(variables).toEqual({ id: 'gid://shopify/InventoryItem/1', input: { tracked: true } })
+  })
+  it('throws ShopifyUserError on userErrors', async () => {
+    const { client } = makeClient(() =>
+      gql({ inventoryItemUpdate: { inventoryItem: null, userErrors: [{ message: 'not found' }] } }))
+    await expect(inventoryItemUpdate(client, 'gid://shopify/InventoryItem/1', { tracked: true })).rejects.toThrow(ShopifyUserError)
   })
 })
 

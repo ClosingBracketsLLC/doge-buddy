@@ -28,6 +28,7 @@ function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopi
       n += 1
       const variants = ((input as { variants?: { sku?: string }[] }).variants ?? [{}]).map((v, i) => ({
         id: `gid://shopify/ProductVariant/${n}00${i}`, sku: v.sku,
+        inventoryItemId: `gid://shopify/InventoryItem/${n}00${i}`,
       }))
       return { productId: `gid://shopify/Product/${n}`, variants }
     },
@@ -388,7 +389,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const shopify = fakeShopify({
       findProductByHandle: async () => ({ id: preInserted!.shopifyProductGid! }),
       productVariantsByProductId: async () => [
-        { id: 'gid://shopify/ProductVariant/resume-3', sku: payload.variants[0]!.sku },
+        { id: 'gid://shopify/ProductVariant/resume-3', sku: payload.variants[0]!.sku, inventoryItemId: 'gid://shopify/InventoryItem/resume-3' },
       ],
     })
     const alert = vi.fn(async () => {})
@@ -431,7 +432,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       return { id: 'gid://shopify/Product/9' }
     }
     shopify.productVariantsByProductId = async () => [
-      { id: 'gid://shopify/ProductVariant/resume-4', sku: payload.variants[0]!.sku },
+      { id: 'gid://shopify/ProductVariant/resume-4', sku: payload.variants[0]!.sku, inventoryItemId: 'gid://shopify/InventoryItem/resume-4' },
     ]
     const alert = vi.fn(async () => {})
 
@@ -632,7 +633,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
 
     const shopify = fakeShopify({
       findProductByHandle: async () => ({ id: preProduct!.shopifyProductGid! }),
-      productVariantsByProductId: async () => [{ id: 'gid://shopify/ProductVariant/backfill', sku }],
+      productVariantsByProductId: async () => [{ id: 'gid://shopify/ProductVariant/backfill', sku, inventoryItemId: 'gid://shopify/InventoryItem/backfill' }],
     })
     const alert = vi.fn(async () => {})
 

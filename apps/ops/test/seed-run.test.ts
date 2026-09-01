@@ -109,7 +109,10 @@ describe('runSeed', () => {
         }
         return gql({
           productSet: {
-            product: { id: 'gid://shopify/Product/500', variants: { nodes: [{ id: 'gid://shopify/ProductVariant/500', sku: null }] } },
+            product: {
+              id: 'gid://shopify/Product/500',
+              variants: { nodes: [{ id: 'gid://shopify/ProductVariant/500', sku: null, inventoryItem: { id: 'gid://shopify/InventoryItem/500' } }] },
+            },
             userErrors: [],
           },
         })

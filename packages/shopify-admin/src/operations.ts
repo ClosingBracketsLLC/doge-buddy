@@ -34,13 +34,16 @@ export async function listPublications(client: ShopifyAdminClient): Promise<{ id
 // productSet
 // ---------------------------------------------------------------------------
 
+// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:
+//  - `ProductVariant.inventoryItem` is a non-null singular field (every variant tracks exactly one
+//    inventory item), so `inventoryItem { id }` needs no null-guard on the selection itself.
 const PRODUCT_SET_MUTATION = `#graphql
   mutation ProductSet($input: ProductSetInput!) {
     productSet(input: $input) {
       product {
         id
         variants(first: 250) {
-          nodes { id sku }
+          nodes { id sku inventoryItem { id } }
         }
       }
       userErrors { field message }
@@ -50,7 +53,7 @@ const PRODUCT_SET_MUTATION = `#graphql
 
 interface ProductSetData {
   productSet: {
-    product: { id: string; variants: { nodes: { id: string; sku?: string | null }[] } }
+    product: { id: string; variants: { nodes: { id: string; sku?: string | null; inventoryItem: { id: string } }[] } }
     userErrors: ShopifyUserErrorEntry[]
   }
 }
@@ -58,12 +61,16 @@ interface ProductSetData {
 export async function productSet(
   client: ShopifyAdminClient,
   input: ProductSetInput,
-): Promise<{ productId: string; variants: { id: string; sku?: string }[] }> {
+): Promise<{ productId: string; variants: { id: string; sku?: string; inventoryItemId: string }[] }> {
   const data = await client.graphql<ProductSetData>(PRODUCT_SET_MUTATION, { input })
   assertNoUserErrors(data, 'productSet')
   return {
     productId: data.productSet.product.id,
-    variants: data.productSet.product.variants.nodes.map((v) => ({ id: v.id, sku: v.sku ?? undefined })),
+    variants: data.productSet.product.variants.nodes.map((v) => ({
+      id: v.id,
+      sku: v.sku ?? undefined,
+      inventoryItemId: v.inventoryItem.id,
+    })),
   }
 }
 
@@ -520,15 +527,18 @@ interface CollectionCreateData {
 
 export async function collectionCreate(
   client: ShopifyAdminClient,
-  input: { title: string; handle: string; tagCondition: string },
+  input: { title: string; handle: string; tagCondition: string; descriptionHtml?: string },
 ): Promise<{ id: string }> {
-  const collectionInput = {
+  const collectionInput: Record<string, unknown> = {
     title: input.title,
     handle: input.handle,
     ruleSet: {
       appliedDisjunctively: false,
       rules: [{ column: 'TAG', relation: 'EQUALS', condition: input.tagCondition }],
     },
+  }
+  if (input.descriptionHtml !== undefined) {
+    collectionInput.descriptionHtml = input.descriptionHtml
   }
   const data = await client.graphql<CollectionCreateData>(COLLECTION_CREATE_MUTATION, { input: collectionInput })
   assertNoUserErrors(data, 'collectionCreate')
@@ -583,26 +593,28 @@ export async function findProductByHandle(client: ShopifyAdminClient, handle: st
 // productVariantsByProductId
 // ---------------------------------------------------------------------------
 
+// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run: same
+// `ProductVariant.inventoryItem` non-null assumption as PRODUCT_SET_MUTATION above.
 const PRODUCT_VARIANTS_BY_PRODUCT_ID_QUERY = `#graphql
   query ProductVariantsByProductId($id: ID!) {
     product(id: $id) {
       variants(first: 100) {
-        nodes { id sku }
+        nodes { id sku inventoryItem { id } }
       }
     }
   }
 `
 
 interface ProductVariantsByProductIdData {
-  product: { variants: { nodes: { id: string; sku?: string | null }[] } }
+  product: { variants: { nodes: { id: string; sku?: string | null; inventoryItem: { id: string } }[] } }
 }
 
 export async function productVariantsByProductId(
   client: ShopifyAdminClient,
   productGid: string,
-): Promise<{ id: string; sku?: string }[]> {
+): Promise<{ id: string; sku?: string; inventoryItemId: string }[]> {
   const data = await client.graphql<ProductVariantsByProductIdData>(PRODUCT_VARIANTS_BY_PRODUCT_ID_QUERY, { id: productGid })
-  return data.product.variants.nodes.map((n) => ({ id: n.id, sku: n.sku ?? undefined }))
+  return data.product.variants.nodes.map((n) => ({ id: n.id, sku: n.sku ?? undefined, inventoryItemId: n.inventoryItem.id }))
 }
 
 // ---------------------------------------------------------------------------
@@ -652,4 +664,88 @@ export async function webhookSubscriptionDelete(
 ): Promise<void> {
   const data = await client.graphql<WebhookSubscriptionDeleteData>(WEBHOOK_SUBSCRIPTION_DELETE_MUTATION, { id })
   assertNoUserErrors(data, 'webhookSubscriptionDelete')
+}
+
+// ---------------------------------------------------------------------------
+// primaryLocationId
+// ---------------------------------------------------------------------------
+
+// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:
+//  - `locations(query: "active:true")` is a valid search filter that returns only active
+//    locations, and `first: 1` on it is sufficient to get "the" primary location for stores (like
+//    this one) with exactly one active location. A store with several active locations would need
+//    a real "is this the primary location" signal instead of just taking the first result — out of
+//    scope here.
+const PRIMARY_LOCATION_QUERY = `#graphql
+  query PrimaryLocation {
+    locations(first: 1, query: "active:true") {
+      nodes { id }
+    }
+  }
+`
+
+interface PrimaryLocationData {
+  locations: { nodes: { id: string }[] }
+}
+
+export async function primaryLocationId(client: ShopifyAdminClient): Promise<string> {
+  const data = await client.graphql<PrimaryLocationData>(PRIMARY_LOCATION_QUERY)
+  const id = data.locations.nodes[0]?.id
+  if (!id) throw new Error('primaryLocationId: the store has no active location')
+  return id
+}
+
+// ---------------------------------------------------------------------------
+// productUpdate
+// ---------------------------------------------------------------------------
+
+const PRODUCT_UPDATE_MUTATION = `#graphql
+  mutation ProductUpdate($input: ProductInput!) {
+    productUpdate(input: $input) {
+      product { id }
+      userErrors { field message }
+    }
+  }
+`
+
+interface ProductUpdateData {
+  productUpdate: { product: { id: string } | null; userErrors: ShopifyUserErrorEntry[] }
+}
+
+export async function productUpdate(
+  client: ShopifyAdminClient,
+  input: { id: string; handle?: string; tags?: string[]; productType?: string; seo?: { title?: string; description?: string } },
+): Promise<void> {
+  const data = await client.graphql<ProductUpdateData>(PRODUCT_UPDATE_MUTATION, { input })
+  assertNoUserErrors(data, 'productUpdate')
+}
+
+// ---------------------------------------------------------------------------
+// inventoryItemUpdate
+// ---------------------------------------------------------------------------
+
+// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:
+//  - `inventoryItemUpdate(id:, input:)` takes an `InventoryItemInput` with a boolean `tracked`
+//    field, and returns the updated `inventoryItem { id }` alongside `userErrors` — same shape
+//    family as every other `*Update` mutation in this file.
+const INVENTORY_ITEM_UPDATE_MUTATION = `#graphql
+  mutation InventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
+    inventoryItemUpdate(id: $id, input: $input) {
+      inventoryItem { id }
+      userErrors { field message }
+    }
+  }
+`
+
+interface InventoryItemUpdateData {
+  inventoryItemUpdate: { inventoryItem: { id: string } | null; userErrors: ShopifyUserErrorEntry[] }
+}
+
+export async function inventoryItemUpdate(
+  client: ShopifyAdminClient,
+  inventoryItemId: string,
+  input: { tracked: boolean },
+): Promise<void> {
+  const data = await client.graphql<InventoryItemUpdateData>(INVENTORY_ITEM_UPDATE_MUTATION, { id: inventoryItemId, input })
+  assertNoUserErrors(data, 'inventoryItemUpdate')
 }
