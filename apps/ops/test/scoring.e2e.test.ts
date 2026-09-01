@@ -215,6 +215,7 @@ describe('scoring E2E — nightly verdicts → weekly digest → recovery → ap
       findProductByHandle: mustNotTouch('findProductByHandle') as ProposalShopifyOps['findProductByHandle'],
       publishablePublish: mustNotTouch('publishablePublish') as ProposalShopifyOps['publishablePublish'],
       productVariantsByProductId: mustNotTouch('productVariantsByProductId') as ProposalShopifyOps['productVariantsByProductId'],
+      primaryLocationId: mustNotTouch('primaryLocationId') as ProposalShopifyOps['primaryLocationId'],
       productSet: async (input) => {
         calls.push(`productSet:${String((input as { status?: string }).status)}`)
         return { productId: String((input as { id?: string }).id), variants: [] }

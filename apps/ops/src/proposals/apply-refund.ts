@@ -6,7 +6,7 @@ import {
   PROPOSAL_APPLY_FAILED_ACTION,
   failStaleAndHandBack,
   notifyOwnerBestEffort,
-  proposalHandle,
+  proposalRefundNote,
   type ApplyProposalDeps,
   type ProposalRow,
 } from './apply-shared.ts'
@@ -45,10 +45,10 @@ type OrderRow = typeof orders.$inferSelect
  *     has a hole. Shopify's `@idempotent(key)` collapses a *fast* duplicate (a redelivered job, a
  *     retry after a lost response) into one refund — but those keys live only ~24h, so a proposal
  *     re-entered after that window would key nothing. The durable half is the refund **note**:
- *     every refund this executor creates carries `db-proposal-<proposalId>` (the same
- *     `proposalHandle` string `new_listing` uses for its product handle, for the same reason), and
- *     a re-entered apply reads the order's refunds back and treats its own note as proof the money
- *     already moved.
+ *     every refund this executor creates carries `db-proposal-<proposalId>` (`proposalRefundNote`,
+ *     derived from the proposal id alone and frozen byte-for-byte — refunds already issued LIVE
+ *     carry it), and a re-entered apply reads the order's refunds back and treats its own note as
+ *     proof the money already moved.
  *  2. **Never more than the order is worth.** `amountCents <= total_cents - totalRefundedCents`,
  *     re-verified HERE and not just at draft time: sibling proposals, a second agent run, or a
  *     human in the Shopify admin may have refunded against this order since the validator ran.
@@ -81,7 +81,7 @@ export async function applyRefund(deps: ApplyProposalDeps, row: ProposalRow): Pr
   const { db } = deps
   const proposalId = row.id
   const payload = RefundPayloadSchema.parse(row.payload)
-  const note = proposalHandle(proposalId)
+  const note = proposalRefundNote(proposalId)
 
   // Load both up front; the *refusal* on a missing ticket is deferred until after the pre-check
   // (see the step-order note above) — a ticket is not needed to recognise an already-issued refund.

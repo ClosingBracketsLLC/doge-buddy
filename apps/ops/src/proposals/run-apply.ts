@@ -15,7 +15,7 @@ import { clearRedraftCycle } from '../support/redraft.ts'
  * here formed a two-way ESM cycle. See `apply-shared.ts`'s own doc comment. Existing importers
  * (tests included) keep working unchanged.
  */
-export { proposalHandle } from './apply-shared.ts'
+export { proposalHandle, proposalRefundNote } from './apply-shared.ts'
 export type { ApplyProposalDeps, OrderRefundState, ProposalRow, ProposalShopifyOps, RefundOps } from './apply-shared.ts'
 
 /**

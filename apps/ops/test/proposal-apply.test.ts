@@ -1,6 +1,11 @@
+import { categoryByTag, categoryTagValue, slugify } from '@doge-buddy/core'
 import { auditLog, createDb, products, productVariants, proposals, supplierVariantMappings, supportTickets } from '@doge-buddy/db'
+import type { WarehouseStock } from '@doge-buddy/supplier'
 import { eq, inArray } from 'drizzle-orm'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SendOpts } from '../src/fulfillment/types.ts'
+import { INVENTORY_SYNC_QUEUE } from '../src/jobs/inventory-sync.ts'
+import { resetLocationCache } from '../src/proposals/apply-new-listing.ts'
 import {
   deadLetterApplyProposal, executeApplyProposal, proposalHandle, type ProposalShopifyOps,
 } from '../src/proposals/run-apply.ts'
@@ -15,6 +20,21 @@ function newListingPayload() {
     variants: [{ sku: `SKU-${crypto.randomUUID()}`, priceCents: 2999, supplierCostCents: 1414,
       supplier: 'cj', supplierProductId: 'cjp-1', supplierVariantId: 'cjv-1' }],
   }
+}
+
+/** The one active location `primaryLocationId` resolves to for every test in this file. */
+const FIXTURE_LOCATION_ID = 'gid://shopify/Location/1'
+
+/** CJ's `getVariantStock` answer for the fixture variant: two US warehouse rows plus a CN one.
+ * The executor must sum ONLY the US rows (4 + 3 = 7) and ignore CN entirely — a Chinese warehouse
+ * cannot serve the 3-7 day US delivery promise the listing's own metafields make. */
+const FIXTURE_US_STOCK = 7
+function fixtureStock(): WarehouseStock[] {
+  return [
+    { countryCode: 'US', quantity: 4, verified: true },
+    { countryCode: 'US', quantity: 3, verified: true },
+    { countryCode: 'CN', quantity: 99, verified: true },
+  ]
 }
 
 function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopifyOps & { calls: string[] } {
@@ -33,6 +53,11 @@ function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopi
       return { productId: `gid://shopify/Product/${n}`, variants }
     },
     listPublications: async () => [{ id: 'pub-1', name: 'Online Store' }, { id: 'pub-2', name: 'Shop' }],
+    // Deliberately NOT recorded in `calls`: the worker memoizes this at module level, so whether a
+    // given apply actually issues the call depends on which test ran first — recording it would
+    // make every exact-`calls` assertion in this file order-dependent. The memo test below counts
+    // it with its own `vi.spyOn` after `resetLocationCache()` instead.
+    primaryLocationId: async () => FIXTURE_LOCATION_ID,
     publishablePublish: async (_p, pub) => { calls.push(`publish:${pub}`) },
     // `deprecate_product`'s apply (Task 10) is the only executor that calls this; `new_listing`'s
     // tests never reach it, so recording here leaves their `calls` assertions unchanged.
@@ -54,10 +79,24 @@ function fakeShopify(overrides: Partial<ProposalShopifyOps> = {}): ProposalShopi
  * still succeeds. `getDisputeOptions`/`openDispute` are unused by this file's `new_listing`-only
  * tests (Task 16's `refund` executor is what actually calls them) — stubbed here purely to satisfy
  * `ApplyProposalDeps.adapter`'s grown `Pick`. */
-function fakeAdapter(overrides: { subscribeProductWebhook?: (supplierProductId: string) => Promise<void> } = {}) {
+function fakeAdapter(
+  overrides: {
+    subscribeProductWebhook?: (supplierProductId: string) => Promise<void>
+    getVariantStock?: (supplierVariantId: string) => Promise<WarehouseStock[]>
+  } = {},
+) {
   const subscribedProductIds: string[] = []
+  const stockReads: string[] = []
   return {
     subscribedProductIds,
+    // Task 4: the listing worker reads CJ's per-warehouse stock for every payload variant, on the
+    // create AND the resume path (the mapping's `last_known_stock` has to land either way).
+    // Overridable so a test can make the read throw and assert the listing still ships at 0.
+    stockReads,
+    getVariantStock: async (supplierVariantId: string) => {
+      stockReads.push(supplierVariantId)
+      return overrides.getVariantStock ? await overrides.getVariantStock(supplierVariantId) : fixtureStock()
+    },
     subscribeProductWebhook: overrides.subscribeProductWebhook ?? (async (supplierProductId: string) => {
       subscribedProductIds.push(supplierProductId)
     }),
@@ -82,13 +121,18 @@ function fakeAdapter(overrides: { subscribeProductWebhook?: (supplierProductId: 
  * `enqueue`/`adminBaseUrl` — the two new dead-letter tests below override `notify` with their own
  * spy. Keeps every other call site's deps-construction purely mechanical (Task 14 brief).
  */
-function baseDeps(overrides: { notify?: ReturnType<typeof vi.fn> } = {}) {
+function baseDeps(
+  overrides: {
+    notify?: ReturnType<typeof vi.fn>
+    enqueue?: (name: string, data: object, opts?: SendOpts) => Promise<void>
+  } = {},
+) {
   return {
     gmail: null,
     refundOps: null,
     supportAddress: '',
     notify: overrides.notify ?? vi.fn(async () => true),
-    enqueue: vi.fn(async () => {}),
+    enqueue: overrides.enqueue ?? vi.fn(async () => {}),
     adminBaseUrl: 'https://admin.example.com',
   }
 }
@@ -140,6 +184,11 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
   let createdProposalIds: string[] = []
   let createdProductIds: string[] = []
   let createdTicketIds: string[] = []
+
+  // The worker memoizes the primary location id at module level (one Shopify round-trip per
+  // process, not per listing). That cache outlives a single test, so clear it between tests —
+  // otherwise whichever test ran first silently satisfies every later test's location lookup.
+  beforeEach(() => resetLocationCache())
 
   afterEach(async () => {
     if (createdProductIds.length > 0) {
@@ -241,7 +290,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     expect(productRow).toBeDefined()
     createdProductIds.push(productRow!.id)
     expect(productRow!.shopifyProductGid).toBe('gid://shopify/Product/1')
-    expect(productRow!.handle).toBe(proposalHandle(row.id))
+    expect(productRow!.handle).toBe(proposalHandle(row.id, payload.title))
 
     const variantRows = await db.select().from(productVariants).where(eq(productVariants.productId, productRow!.id))
     expect(variantRows).toHaveLength(1)
@@ -267,14 +316,16 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const draftCall = productSetSpy.mock.calls.find(([input]) => (input as { status?: string }).status === 'DRAFT')
     expect(draftCall).toBeDefined()
     const draftInput = draftCall![0] as Record<string, unknown>
-    expect(draftInput.handle).toBe(proposalHandle(row.id))
+    expect(draftInput.handle).toBe(proposalHandle(row.id, payload.title))
     expect(draftInput.metafields).toEqual(
       expect.arrayContaining([expect.objectContaining({ namespace: 'dogebuddy', key: 'ships_from' })]),
     )
     const draftVariants = draftInput.variants as { inventoryItem?: unknown }[]
     expect(draftVariants.length).toBeGreaterThan(0)
     for (const v of draftVariants) {
-      expect(v.inventoryItem).toEqual({ tracked: false })
+      // Task 4 flipped this from `{ tracked: false }`: every variant is now inventory-tracked so
+      // the sync job (Task 5) has something to write CJ's stock into. Test 14 pins the quantities.
+      expect(v.inventoryItem).toEqual({ tracked: true })
     }
 
     const applied = await auditRowsFor(row.id, 'proposal.applied')
@@ -376,7 +427,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       .insert(products)
       .values({
         shopifyProductGid: `gid://shopify/Product/pre-${row.id}`,
-        handle: proposalHandle(row.id),
+        handle: proposalHandle(row.id, 'Dog Snuff Pad'),
         title: 'Dog Snuff Pad',
         status: 'active',
         categoryTag: 'toys',
@@ -413,6 +464,9 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     // The Critical fix: resume paths must recover the real gid via `productVariantsByProductId`
     // instead of leaving it permanently null (fulfillment's `loadMappings` filters on this column).
     expect(variantRows[0]!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/resume-3')
+    // Same argument, same column family: the inventory-item gid the sync job (Task 5) needs is
+    // read off `productVariantsByProductId` on the resume path, not just off `productSet`.
+    expect(variantRows[0]!.shopifyInventoryItemGid).toBe('gid://shopify/InventoryItem/resume-3')
     const mappingRows = await db
       .select()
       .from(supplierVariantMappings)
@@ -456,6 +510,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       .where(eq(productVariants.sku, payload.variants[0]!.sku))
     expect(variantRows).toHaveLength(1)
     expect(variantRows[0]!.shopifyVariantGid).toBe('gid://shopify/ProductVariant/resume-4')
+    expect(variantRows[0]!.shopifyInventoryItemGid).toBe('gid://shopify/InventoryItem/resume-4')
   })
 
   // ---------------------------------------------------------------------------
@@ -621,7 +676,7 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
       .insert(products)
       .values({
         shopifyProductGid: `gid://shopify/Product/pre-${row.id}`,
-        handle: proposalHandle(row.id), title: 'Dog Snuff Pad', status: 'active',
+        handle: proposalHandle(row.id, 'Dog Snuff Pad'), title: 'Dog Snuff Pad', status: 'active',
         categoryTag: 'toys', createdFromProposalId: row.id,
       })
       .returning()
@@ -804,5 +859,186 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     expect(afterTicket!.escalationReason).toBeNull()
 
     expect(notify).not.toHaveBeenCalled()
+  })
+
+  // ---------------------------------------------------------------------------
+  // 14. Catalog fields (Task 4): the DRAFT `productSet` input a listing is BORN with — slug handle,
+  // category tag + productType, SEO pair, and inventory tracked at CJ's US stock.
+  // ---------------------------------------------------------------------------
+  it('14. productSet DRAFT input: slug handle, category tag/type, SEO, tracked inventory at US stock', async () => {
+    const payload = newListingPayload()
+    payload.title = 'Dog Snuffle Mat — Slow Feeder'
+    payload.descriptionHtml = `<p>A <b>calming</b> mat.</p>\n<p>${'x'.repeat(300)}</p>`
+    const row = await seedProposal({ status: 'approved', payload })
+    const shopify = fakeShopify()
+    const productSetSpy = vi.spyOn(shopify, 'productSet')
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    const draftCall = productSetSpy.mock.calls.find(([input]) => (input as { status?: string }).status === 'DRAFT')
+    const draftInput = draftCall![0] as Record<string, unknown>
+
+    // (a) Handle: a human-readable slug of the title, disambiguated by the proposal id's first 8
+    // hex chars — still deterministic from (proposalId, title) alone, which is what keeps the
+    // crash-resume `findProductByHandle` probe able to re-find its own product.
+    const handle = proposalHandle(row.id, payload.title)
+    expect(handle).toBe(`${slugify(payload.title)}-${row.id.slice(0, 8)}`)
+    expect(handle).toMatch(/^[a-z0-9-]+-[0-9a-f]{8}$/)
+    expect(draftInput.handle).toBe(handle)
+    expect(productRow!.handle).toBe(handle)
+
+    // (b) Tag + type come from the single category source (`@doge-buddy/core`'s CATEGORIES), which
+    // is also what the automated collections key on.
+    expect(draftInput.tags).toEqual([categoryTagValue('toys')])
+    expect(draftInput.productType).toBe(categoryByTag('toys').productType)
+
+    // (c) SEO: title verbatim (well under 70), description = the description HTML as plain text,
+    // whitespace-collapsed and capped at 155 chars.
+    const seo = draftInput.seo as { title: string; description: string }
+    expect(seo.title).toBe(payload.title)
+    expect(seo.title.length).toBeLessThanOrEqual(70)
+    expect(seo.description).toBe(`A calming mat. ${'x'.repeat(140)}`)
+    expect(seo.description).toHaveLength(155)
+
+    // (d) Tracked inventory, seeded with the summed US stock (4 + 3, CN's 99 ignored).
+    const draftVariants = draftInput.variants as { inventoryItem?: unknown; inventoryQuantities?: unknown }[]
+    expect(draftVariants).toHaveLength(1)
+    expect(draftVariants[0]!.inventoryItem).toEqual({ tracked: true })
+    expect(draftVariants[0]!.inventoryQuantities).toEqual([
+      { locationId: FIXTURE_LOCATION_ID, name: 'available', quantity: FIXTURE_US_STOCK },
+    ])
+    expect(adapter.stockReads).toEqual([payload.variants[0]!.supplierVariantId])
+
+    // (e) The inventory-item gid `productSet` handed back is persisted — Task 5's sync job addresses
+    // Shopify inventory by that gid, and re-deriving it later would cost a round-trip per variant.
+    const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, payload.variants[0]!.sku))
+    expect(variantRow!.shopifyInventoryItemGid).toBe('gid://shopify/InventoryItem/1000')
+
+    // (f) The mapping records what CJ said and when, so the sync job can reason about staleness.
+    const [mapping] = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantRow!.id))
+    expect(mapping!.lastKnownStock).toBe(FIXTURE_US_STOCK)
+    expect(mapping!.stockCheckedAt).toBeInstanceOf(Date)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 15. A CJ stock read that throws must not cost us the listing: quantity 0 (safe: nothing
+  // oversells), the product still ships, and the owner gets a warning.
+  // ---------------------------------------------------------------------------
+  it('15. stock read failure: quantity 0, listing still applied, listing_stock_read_failed warning', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const payload = row.payload as ReturnType<typeof newListingPayload>
+    const shopify = fakeShopify()
+    const productSetSpy = vi.spyOn(shopify, 'productSet')
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter({
+      getVariantStock: async () => {
+        throw new Error('cj stock unavailable')
+      },
+    })
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applied')
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    const draftCall = productSetSpy.mock.calls.find(([input]) => (input as { status?: string }).status === 'DRAFT')
+    const draftVariants = (draftCall![0] as Record<string, unknown>).variants as {
+      inventoryQuantities: { quantity: number }[]
+    }[]
+    expect(draftVariants[0]!.inventoryQuantities[0]!.quantity).toBe(0)
+
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'listing_stock_read_failed',
+      expect.objectContaining({
+        supplierVariantId: payload.variants[0]!.supplierVariantId,
+        error: 'cj stock unavailable',
+      }),
+    )
+
+    const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, payload.variants[0]!.sku))
+    const [mapping] = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantRow!.id))
+    expect(mapping!.lastKnownStock).toBe(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 16. Post-listing inventory sync enqueue (Task 4 -> Task 5's job).
+  // ---------------------------------------------------------------------------
+  it('16. inventory sync is enqueued once, keyed on the local product id', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+    const enqueue = vi.fn(async (_name: string, _data: object, _opts?: SendOpts) => {})
+
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps({ enqueue }) }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    const syncSends = enqueue.mock.calls.filter(([name]) => name === INVENTORY_SYNC_QUEUE)
+    expect(syncSends).toHaveLength(1)
+    expect(syncSends[0]![1]).toEqual({ productId: productRow!.id })
+    expect(syncSends[0]![2]).toEqual(expect.objectContaining({ singletonKey: productRow!.id }))
+  })
+
+  // ---------------------------------------------------------------------------
+  // 17. ...and a listing NEVER fails because that enqueue couldn't be placed. The product is live
+  // on the storefront by then; a missing sync job is a warning, not a rollback.
+  // ---------------------------------------------------------------------------
+  it('17. inventory-sync enqueue failure leaves the listing applied, fires listing_sync_enqueue_failed', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+    const enqueue = vi.fn(async (name: string, _data: object, _opts?: SendOpts) => {
+      if (name === INVENTORY_SYNC_QUEUE) throw new Error('boss is down')
+    })
+
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps({ enqueue }) }, row.id)
+
+    const after = await loadProposal(row.id)
+    expect(after!.status).toBe('applied')
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'listing_sync_enqueue_failed',
+      expect.objectContaining({ proposalId: row.id, productId: productRow!.id, error: 'boss is down' }),
+    )
+  })
+
+  // ---------------------------------------------------------------------------
+  // 18. The primary location is a per-process constant, not a per-listing lookup.
+  // ---------------------------------------------------------------------------
+  it('18. primaryLocationId is fetched once and memoized across applies', async () => {
+    const rowA = await seedProposal({ status: 'approved' })
+    const rowB = await seedProposal({ status: 'approved' })
+    const shopify = fakeShopify()
+    const locationSpy = vi.spyOn(shopify, 'primaryLocationId')
+    const alert = vi.fn(async () => {})
+
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, rowA.id)
+    await executeApplyProposal({ db, alert, shopify, adapter: fakeAdapter(), ...baseDeps() }, rowB.id)
+
+    const productA = await loadProduct(rowA.id)
+    const productB = await loadProduct(rowB.id)
+    createdProductIds.push(productA!.id, productB!.id)
+
+    expect((await loadProposal(rowA.id))!.status).toBe('applied')
+    expect((await loadProposal(rowB.id))!.status).toBe('applied')
+    expect(locationSpy).toHaveBeenCalledTimes(1)
   })
 })

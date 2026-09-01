@@ -42,6 +42,10 @@ function fakeShopify(
     publishablePublish: mustNotTouch('publishablePublish') as ProposalShopifyOps['publishablePublish'],
     productVariantsByProductId:
       mustNotTouch('productVariantsByProductId') as ProposalShopifyOps['productVariantsByProductId'],
+    // Task 4 added this to `ProposalShopifyOps` for the *listing* executor; the deprecation
+    // pipeline has no business looking up an inventory location, so it joins the must-not-touch
+    // list rather than getting a benign stub.
+    primaryLocationId: mustNotTouch('primaryLocationId') as ProposalShopifyOps['primaryLocationId'],
     productSet:
       overrides.productSet ??
       (async (input) => {

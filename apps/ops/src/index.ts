@@ -8,6 +8,7 @@ import {
   orderFulfillmentOrders,
   orderRefundState,
   ordersUpdatedSince,
+  primaryLocationId,
   productSet,
   productVariantsByProductId,
   publishablePublish,
@@ -226,6 +227,7 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       publishablePublish: (productId, publicationId) => publishablePublish(shopifyClient, productId, publicationId),
       publishableUnpublish: (productId, publicationId) => publishableUnpublish(shopifyClient, productId, publicationId),
       productVariantsByProductId: (productGid) => productVariantsByProductId(shopifyClient, productGid),
+      primaryLocationId: () => primaryLocationId(shopifyClient),
     }
   : {
       findProductByHandle: shopifyNotConfigured,
@@ -234,6 +236,7 @@ const proposalShopify: ProposalShopifyOps = shopifyClient
       publishablePublish: shopifyNotConfigured,
       publishableUnpublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
+      primaryLocationId: shopifyNotConfigured,
     }
 
 // Same shape again, for `proposal.apply`'s `refund` executor (Task 16). `null` — not a

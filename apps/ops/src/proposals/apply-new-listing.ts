@@ -1,8 +1,77 @@
-import { centsToUsd, NewListingPayloadSchema } from '@doge-buddy/core'
+import { categoryByTag, categoryTagValue, centsToUsd, NewListingPayloadSchema } from '@doge-buddy/core'
 import { auditLog, products, productVariants, supplierVariantMappings } from '@doge-buddy/db'
 import { eq, sql } from 'drizzle-orm'
+import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts } from '../jobs/inventory-sync.ts'
 import { applyProposalTransition } from './transitions.ts'
-import { proposalHandle, type ApplyProposalDeps, type ProposalRow } from './apply-shared.ts'
+import { proposalHandle, type ApplyProposalDeps, type ProposalRow, type ProposalShopifyOps } from './apply-shared.ts'
+
+/** Shopify truncates a longer `seo.title` in the SERP anyway; cut it ourselves so what we store is
+ * what shows. Same reasoning for the 155-char meta description. */
+const SEO_TITLE_MAX = 70
+const SEO_DESCRIPTION_MAX = 155
+
+/**
+ * Process-lifetime memo for the store's one active location id.
+ *
+ * The store is single-location by design, so this is a constant, not per-listing state — but it
+ * costs a Shopify round-trip to learn, and every variant of every listing needs it. Cached at
+ * module level rather than on `deps` because `ApplyProposalDeps` is rebuilt per job by the queue
+ * wiring, which would defeat any cache living there. Deliberately caches the *resolved value* and
+ * not the in-flight promise: a failed lookup must be retried by the next apply, not memoized as a
+ * permanent failure.
+ */
+let cachedLocationId: string | null = null
+
+/** Test seam: clears the memo above so a test can prove the lookup happens exactly once. */
+export function resetLocationCache(): void {
+  cachedLocationId = null
+}
+
+async function getLocationId(shopify: ProposalShopifyOps): Promise<string> {
+  cachedLocationId ??= await shopify.primaryLocationId()
+  return cachedLocationId
+}
+
+/**
+ * `seo.description` from the listing's own description HTML: tags out, whitespace collapsed,
+ * capped. Entities are left exactly as they are — `&amp;` in a meta description renders as `&`,
+ * and a half-hearted decode is how you get `&lt;script` back out the other side.
+ */
+function seoDescription(descriptionHtml: string): string {
+  return descriptionHtml
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, SEO_DESCRIPTION_MAX)
+}
+
+/**
+ * How many units CJ can ship from a US warehouse for one supplier variant — the quantity a new
+ * listing's Shopify inventory is born with.
+ *
+ * US-only on purpose: the listing's own `ships_from`/delivery metafields promise a US-warehouse
+ * dispatch, so CN stock is not stock we can sell against without breaking that promise. A read
+ * that throws yields 0 rather than propagating: a listing the owner already approved must not be
+ * lost to a flaky supplier call, and 0 is the safe direction — it under-sells (the sync job,
+ * Task 5, corrects it on its next pass) where a guessed number would oversell.
+ *
+ * Task 5 moves the pure sum into the sync job's module, where both producers can share it.
+ */
+async function readUsStock(deps: ApplyProposalDeps, supplierVariantId: string): Promise<number> {
+  try {
+    const warehouses = await deps.adapter.getVariantStock(supplierVariantId)
+    const us = warehouses.filter((w) => w.countryCode === 'US').reduce((sum, w) => sum + w.quantity, 0)
+    return Math.max(0, us)
+  } catch (err) {
+    await deps
+      .alert('warning', 'listing_stock_read_failed', {
+        supplierVariantId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      .catch(() => {})
+    return 0
+  }
+}
 
 /**
  * `new_listing` proposal executor (Task 14): turns an `approved`/`applying` new_listing proposal
@@ -14,16 +83,30 @@ import { proposalHandle, type ApplyProposalDeps, type ProposalRow } from './appl
  * Resumable by design: a crash between any two steps below is recovered by simply re-running this
  * function against the same proposal — exactly what happens, since pg-boss retries the job on a
  * thrown error and `proposal.apply` is enqueued with `singletonKey: proposalId` (see `submit.ts`'s
- * `enqueueProposalApply`). Every DB write below is `onConflictDoNothing`, and Shopify product
- * resolution checks the local row first, then a handle-based Shopify lookup, before ever creating a
- * new product — so a resumed run never double-creates.
+ * `enqueueProposalApply`). Every DB write below is conflict-tolerant — `onConflictDoNothing`, or an
+ * upsert that only ever backfills a null identity column (the two gids) or refreshes a timestamped
+ * observation (the mapping's stock pair) — and Shopify product resolution checks the local row
+ * first, then a handle-based Shopify lookup, before ever creating a new product, so a resumed run
+ * never double-creates.
  */
 export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow): Promise<void> {
   const { db } = deps
   const proposalId = row.id
 
   const payload = NewListingPayloadSchema.parse(row.payload)
-  const handle = proposalHandle(proposalId)
+  const handle = proposalHandle(proposalId, payload.title)
+  const category = categoryByTag(payload.categoryTag)
+
+  // 0. CJ's US stock per payload variant, read BEFORE the product is resolved so both paths below
+  // get it: the create path seeds Shopify's inventory levels with it, and every path — create or
+  // resume — records it on the mapping row. Doing this only inside the create branch would leave
+  // a resumed listing's `last_known_stock` permanently null, which is exactly the class of
+  // resume-path hole the variant-gid backfill in step 3 below already had to be fixed for.
+  const stockCheckedAt = new Date()
+  const stockBySku = new Map<string, number>()
+  for (const v of payload.variants) {
+    stockBySku.set(v.sku, await readUsStock(deps, v.supplierVariantId))
+  }
 
   // 1. Resolve the Shopify product exactly once, across crashes: local row first, then handle probe.
   const [existing] = await db.select().from(products).where(eq(products.createdFromProposalId, proposalId))
@@ -31,15 +114,29 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
   if (!productGid) {
     productGid = (await deps.shopify.findProductByHandle(handle))?.id ?? null
   }
-  let variantGids: { id: string; sku?: string }[] = []
+  let variantGids: { id: string; sku?: string; inventoryItemId: string }[] = []
   if (!productGid) {
-    // FIXTURE-ASSUMPTION (2026-07 API): ProductSetInput shape per verify-live.ts precedent —
-    // verify on the first credential-gated run (Task 8).
+    // The location every `inventoryQuantities` entry below is addressed to. Resolved lazily, and
+    // only on this branch: a resumed apply that finds its product already created never touches
+    // Shopify inventory, so it must not pay (or fail on) a location lookup it has no use for.
+    const locationId = await getLocationId(deps.shopify)
+    // The `ProductSetInput` fields below (`handle`, `tags`, `productType`, `seo`, and the variants'
+    // `inventoryItem`/`inventoryQuantities`) were LIVE-VERIFIED against the 2026-07 Admin API —
+    // this is no longer a fixture guess. See the catalog-p0 ledger.
     const created = await deps.shopify.productSet({
       title: payload.title,
       handle,
       descriptionHtml: payload.descriptionHtml,
       status: 'DRAFT',
+      // The tag the automated collections key on, and the storefront's own category vocabulary —
+      // both derived from `@doge-buddy/core`'s CATEGORIES so a product cannot be born into a
+      // category the store doesn't render.
+      tags: [categoryTagValue(payload.categoryTag)],
+      productType: category.productType,
+      seo: {
+        title: payload.title.slice(0, SEO_TITLE_MAX),
+        description: seoDescription(payload.descriptionHtml),
+      },
       productOptions: [{
         name: 'Title',
         values: payload.variants.map((v, i, all) => ({ name: all.length === 1 ? 'Default Title' : v.sku })),
@@ -54,7 +151,14 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
         sku: v.sku,
         price: centsToUsd(v.priceCents),
         ...(v.compareAtCents ? { compareAtPrice: centsToUsd(v.compareAtCents) } : {}),
-        inventoryItem: { tracked: false },
+        // Tracked from birth, seeded with what CJ has in the US right now. Untracked (the old
+        // behaviour) means Shopify will happily sell a variant CJ cannot ship; tracked-but-unseeded
+        // means the storefront shows every brand-new product as sold out until the sync job's first
+        // pass. Both are wrong on day one, which is why the quantity ships with the create call.
+        inventoryItem: { tracked: true },
+        inventoryQuantities: [
+          { locationId, name: 'available', quantity: stockBySku.get(v.sku) ?? 0 },
+        ],
         optionValues: [{ optionName: 'Title', name: all.length === 1 ? 'Default Title' : v.sku }],
       })),
     })
@@ -81,14 +185,23 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
   // that DOES have the real gid, rather than that null being permanent. Every other column keeps
   // first-write-wins semantics (price/cost are never overwritten on conflict).
   for (const v of payload.variants) {
-    const gid = variantGids.find((g) => g.sku === v.sku)?.id ?? null
+    const shopifyVariant = variantGids.find((g) => g.sku === v.sku)
+    const gid = shopifyVariant?.id ?? null
+    // The inventory-item gid is how Task 5's sync job addresses this variant's stock; it arrives on
+    // the same two paths the variant gid does (`productSet`'s return, or `productVariantsByProductId`
+    // on a resume) and gets the same coalesce-backfill treatment on conflict, for the same reason:
+    // a row that landed null on an earlier partial run must be able to self-heal.
+    const inventoryItemGid = shopifyVariant?.inventoryItemId ?? null
     await db.insert(productVariants).values({
-      productId: productRow!.id, shopifyVariantGid: gid, sku: v.sku,
+      productId: productRow!.id, shopifyVariantGid: gid, shopifyInventoryItemGid: inventoryItemGid, sku: v.sku,
       priceCents: v.priceCents, compareAtCents: v.compareAtCents ?? null,
       supplierCostCents: v.supplierCostCents,
     }).onConflictDoUpdate({
       target: productVariants.sku,
-      set: { shopifyVariantGid: sql`coalesce(${productVariants.shopifyVariantGid}, excluded.shopify_variant_gid)` },
+      set: {
+        shopifyVariantGid: sql`coalesce(${productVariants.shopifyVariantGid}, excluded.shopify_variant_gid)`,
+        shopifyInventoryItemGid: sql`coalesce(${productVariants.shopifyInventoryItemGid}, excluded.shopify_inventory_item_gid)`,
+      },
     })
     const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.sku, v.sku))
     // Sku-keyed re-select above can cross-wire onto a DIFFERENT product's variant row if the same
@@ -101,10 +214,35 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     if (variantRow!.productId !== productRow!.id) {
       throw new Error(`sku collision: ${v.sku} already belongs to another product`)
     }
+    // Unlike the identity columns above, the stock pair is NOT first-write-wins: it is a
+    // timestamped observation, and a re-applied listing has just taken a fresher one. Overwriting
+    // is the point — a stale `last_known_stock` is worse than no read at all.
     await db.insert(supplierVariantMappings).values({
       variantId: variantRow!.id, supplier: v.supplier,
       supplierProductId: v.supplierProductId, supplierVariantId: v.supplierVariantId,
-    }).onConflictDoNothing()
+      lastKnownStock: stockBySku.get(v.sku) ?? 0, stockCheckedAt,
+    }).onConflictDoUpdate({
+      target: [supplierVariantMappings.variantId, supplierVariantMappings.supplier],
+      set: {
+        lastKnownStock: sql`excluded.last_known_stock`,
+        stockCheckedAt: sql`excluded.stock_checked_at`,
+      },
+    })
+  }
+
+  // 3b. Hand the product to the inventory sync job (Task 5). Strictly after the local rows exist —
+  // the job resolves the product by its local id — and strictly best-effort: the listing itself is
+  // already correct in Shopify by this point, so a queue that is momentarily unreachable costs us
+  // a refresh, not the listing. The queue's `singletonKey` is the product id, so the retry a
+  // thrown apply triggers cannot pile up duplicate syncs either.
+  try {
+    await deps.enqueue(INVENTORY_SYNC_QUEUE, { productId: productRow!.id }, inventorySyncSendOpts(productRow!.id))
+  } catch (err) {
+    await deps.alert('warning', 'listing_sync_enqueue_failed', {
+      proposalId,
+      productId: productRow!.id,
+      error: err instanceof Error ? err.message : String(err),
+    }).catch(() => {})
   }
   // 4. ACTIVE + publish. Online Store success is required for 'applied'; others alert-and-continue.
   await deps.shopify.productSet({ id: productGid, status: 'ACTIVE' })

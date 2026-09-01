@@ -1,3 +1,4 @@
+import { slugify } from '@doge-buddy/core'
 import { auditLog, proposals, supportTickets, type createDb } from '@doge-buddy/db'
 import type { GmailClient } from '@doge-buddy/gmail'
 import type { OrderRefundState } from '@doge-buddy/shopify-admin'
@@ -63,6 +64,14 @@ export interface ProposalShopifyOps {
    * filters on that column being non-null. See `executeApplyProposal`'s resume branch.
    */
   productVariantsByProductId(productGid: string): Promise<{ id: string; sku?: string; inventoryItemId: string }[]>
+  /**
+   * The store's one active location (`locations(first:1, query:"active:true")`), which is the
+   * location every `inventoryQuantities` entry a new listing is born with has to name — Shopify
+   * rejects an inventory quantity that isn't addressed to a real location. Single-location store
+   * by design (spec §1), so this is a per-process constant: `applyNewListing` memoizes it rather
+   * than paying a round-trip per listing.
+   */
+  primaryLocationId(): Promise<string>
 }
 
 /**
@@ -91,10 +100,14 @@ export interface ApplyProposalDeps {
    * The supplier-adapter surface the executors need: `subscribeProductWebhook` for `new_listing`'s
    * post-apply CJ webhook subscribe, `getDisputeOptions`/`openDispute` for `refund`'s apply
    * (Task 16), `unsubscribeProductWebhook` for `deprecate_product`'s safe post-apply CJ unsubscribe
-   * (Task 10). A strict, hand-picked subset of `SupplierAdapter`'s full surface, same spirit as
-   * `ProposalShopifyOps` above.
+   * (Task 10), `getVariantStock` for `new_listing`'s per-variant US stock read (Task 4). A strict,
+   * hand-picked subset of `SupplierAdapter`'s full surface, same spirit as `ProposalShopifyOps`
+   * above.
    */
-  adapter: Pick<SupplierAdapter, 'subscribeProductWebhook' | 'unsubscribeProductWebhook' | 'getDisputeOptions' | 'openDispute'>
+  adapter: Pick<
+    SupplierAdapter,
+    'subscribeProductWebhook' | 'unsubscribeProductWebhook' | 'getDisputeOptions' | 'openDispute' | 'getVariantStock'
+  >
   /**
    * Gmail client backing `support_reply`'s apply (Task 15). `null` when Gmail isn't configured —
    * `applySupportReply` must fail loudly (alert) in that case, never throw a bare `TypeError` on a
@@ -119,13 +132,31 @@ export type ProposalRow = typeof proposals.$inferSelect
 /**
  * Deterministic Shopify handle for a proposal's product — stable across crashes/retries so
  * `findProductByHandle` can always re-find a product this pipeline created on a prior attempt.
+ * That determinism is the entire crash-safety story of `applyNewListing`, so the ONLY inputs are
+ * the proposal id and its payload title: both are immutable for the life of the proposal.
  *
- * The `refund` executor reuses the exact same string as its Shopify refund `note` (Task 16): the
- * note is that executor's crash-recovery marker, for the same reason and with the same shape —
- * derived from the proposal id alone, so a re-entered apply can always recognise its own prior
- * work. See `apply-refund.ts`'s pre-check.
+ * Task 4 gave it a readable shape — `dog-snuffle-mat-3f2a1b0c` rather than the old opaque
+ * `db-proposal-<uuid>` — because this string is the storefront URL (`/products/<handle>`), which
+ * customers see and search engines index. The 8-hex proposal-id suffix keeps two listings of the
+ * same product from colliding on one handle.
  */
-export function proposalHandle(proposalId: string): string {
+export function proposalHandle(proposalId: string, title: string): string {
+  return `${slugify(title)}-${proposalId.slice(0, 8)}`
+}
+
+/**
+ * The `refund` executor's durable crash-recovery marker, written as the Shopify refund's `note`
+ * (Task 16): a re-entered apply reads the order's refunds back and treats its own note as proof
+ * the money already moved.
+ *
+ * This used to BE `proposalHandle` — one string serving both purposes, since both wanted "derived
+ * from the proposal id alone". Task 4 reshaped the handle around the product title (see above),
+ * which this must not follow for two independent reasons: a refund proposal has no title to slug,
+ * and — decisively — notes already written against LIVE refunds say `db-proposal-<id>`. Changing
+ * this string would make a re-entered apply fail to recognise a refund that already went out and
+ * pay the customer twice. It is frozen, byte-for-byte, forever.
+ */
+export function proposalRefundNote(proposalId: string): string {
   return `db-proposal-${proposalId}`
 }
 

@@ -163,6 +163,7 @@ export async function startQueue(connectionString: string, deps: FulfillmentQueu
       publishablePublish: shopifyNotConfigured,
       publishableUnpublish: shopifyNotConfigured,
       productVariantsByProductId: shopifyNotConfigured,
+      primaryLocationId: shopifyNotConfigured,
     },
     // The full supplier adapter every other queue here already threads through covers this Pick
     // unconditionally (subscribeProductWebhook for new_listing, getDisputeOptions/openDispute for
