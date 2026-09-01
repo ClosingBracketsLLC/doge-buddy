@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createSerpApiTrends, SERPAPI_MAX_REQUESTS_PER_RUN } from '../src/sourcing/trends.ts'
+import { createSerpApiTrends } from '../src/sourcing/trends.ts'
+import { createSerpApiClient } from '../src/sourcing/serpapi.ts'
 
 // Never a real key — SerpApi calls are always mocked via fetchFn in this suite.
 const FAKE_API_KEY = 'fake-serp-key-for-tests-only'
+
+function provider(fetchFn: typeof fetch, maxRequests?: number) {
+  return createSerpApiTrends({ client: createSerpApiClient({ apiKey: FAKE_API_KEY, fetchFn, maxRequests }) })
+}
 
 interface FixturePoint {
   date: string
@@ -31,8 +36,8 @@ describe('createSerpApiTrends', () => {
   })
 
   it('exposes key "serpapi"', () => {
-    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: vi.fn() as unknown as typeof fetch })
-    expect(provider.key).toBe('serpapi')
+    const p = provider(vi.fn() as unknown as typeof fetch)
+    expect(p.key).toBe('serpapi')
   })
 
   it('batches keywords 5 at a time, comma-joined into q — 7 keywords => exactly 2 requests (5 + 2)', async () => {
@@ -41,9 +46,9 @@ describe('createSerpApiTrends', () => {
       calls.push(String(url))
       return jsonResponse(serpApiFixture([]))
     })
-    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+    const p = provider(fetchFn as unknown as typeof fetch)
 
-    await provider.fetchInterest(['k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7'])
+    await p.fetchInterest(['k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7'])
 
     expect(fetchFn).toHaveBeenCalledTimes(2)
     const url1 = new URL(calls[0]!)
@@ -74,9 +79,9 @@ describe('createSerpApiTrends', () => {
       },
     ])
     const fetchFn = vi.fn(async () => jsonResponse(fixture))
-    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+    const p = provider(fetchFn as unknown as typeof fetch)
 
-    const [leash, tree] = await provider.fetchInterest(['dog leash', 'cat tree'])
+    const [leash, tree] = await p.fetchInterest(['dog leash', 'cat tree'])
 
     expect(leash!.score).toBe(25) // mean(20, 30)
     expect(tree!.score).toBe(50) // mean(40, 60)
@@ -90,9 +95,9 @@ describe('createSerpApiTrends', () => {
   it('maps defensively: a keyword absent from the response series scores null while its batch-mate still scores', async () => {
     const fixture = serpApiFixture([{ date: 'Week 1', values: [{ query: 'dog leash', extracted_value: 10 }] }])
     const fetchFn = vi.fn(async () => jsonResponse(fixture))
-    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+    const p = provider(fetchFn as unknown as typeof fetch)
 
-    const [leash, ghost] = await provider.fetchInterest(['dog leash', 'ghost keyword'])
+    const [leash, ghost] = await p.fetchInterest(['dog leash', 'ghost keyword'])
 
     expect(leash!.score).toBe(10)
     expect(ghost!.score).toBeNull()
@@ -107,9 +112,9 @@ describe('createSerpApiTrends', () => {
     // allowed at all — 'ghost' must resolve to null, not to 40.
     const fixture = serpApiFixture([{ date: 'Week 1', values: [{ query: 'real', extracted_value: 40 }] }])
     const fetchFn = vi.fn(async () => jsonResponse(fixture))
-    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+    const p = provider(fetchFn as unknown as typeof fetch)
 
-    const [ghost, real] = await provider.fetchInterest(['ghost', 'real'])
+    const [ghost, real] = await p.fetchInterest(['ghost', 'real'])
 
     expect(ghost!.score).toBeNull()
     expect(ghost!.snapshot).toEqual({ timelineData: [] })
@@ -126,29 +131,24 @@ describe('createSerpApiTrends', () => {
       },
     }
     const fetchFn = vi.fn(async () => jsonResponse(untagged))
-    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+    const p = provider(fetchFn as unknown as typeof fetch)
 
-    const [first, second] = await provider.fetchInterest(['first kw', 'second kw'])
+    const [first, second] = await p.fetchInterest(['first kw', 'second kw'])
 
     expect(first!.score).toBe(20) // mean(15, 25) — resolved by position 0
     expect(second!.score).toBe(40) // mean(35, 45) — resolved by position 1
   })
 
-  it(`caps requests at SERPAPI_MAX_REQUESTS_PER_RUN (${SERPAPI_MAX_REQUESTS_PER_RUN}); tail keywords beyond the cap come back score: null with no request fired`, async () => {
-    const fetchFn = vi.fn(async () => jsonResponse(serpApiFixture([])))
-    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+  it('a capped client degrades remaining batches to score-null signals instead of throwing', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse(serpApiFixture([
+      { date: 'Jan 1', values: [{ query: 'k1', extracted_value: 50 }] },
+    ])))
+    const p = provider(fetchFn as unknown as typeof fetch, 1) // cap after ONE request
+    const signals = await p.fetchInterest(['k1', 'k2', 'k3', 'k4', 'k5', 'k6']) // 2 batches
 
-    const keywords = Array.from({ length: 60 }, (_, i) => `kw${i}`)
-    const signals = await provider.fetchInterest(keywords)
-
-    // 60 keywords / 5 per batch = 12 batches; only the first 10 are allowed to fire.
-    expect(fetchFn).toHaveBeenCalledTimes(SERPAPI_MAX_REQUESTS_PER_RUN)
-    expect(signals).toHaveLength(60)
-    expect(signals.map((s) => s.keyword)).toEqual(keywords)
-
-    const tail = signals.slice(SERPAPI_MAX_REQUESTS_PER_RUN * 5) // kw50..kw59, never requested
-    expect(tail).toHaveLength(10)
-    expect(tail.every((s) => s.score === null)).toBe(true)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(signals.find((s) => s.keyword === 'k1')?.score).toBe(50)
+    expect(signals.find((s) => s.keyword === 'k6')?.score).toBeNull() // second batch never fired
   })
 
   it('does not throw on fetch rejection; that batch comes back score: null and the api key never appears in a log line', async () => {
@@ -156,9 +156,9 @@ describe('createSerpApiTrends', () => {
     const fetchFn = vi.fn(async (url: string | URL | Request) => {
       throw new Error(`network down while calling ${String(url)}`)
     })
-    const provider = createSerpApiTrends({ apiKey: FAKE_API_KEY, fetchFn: fetchFn as unknown as typeof fetch })
+    const p = provider(fetchFn as unknown as typeof fetch)
 
-    const signals = await provider.fetchInterest(['a', 'b'])
+    const signals = await p.fetchInterest(['a', 'b'])
 
     expect(signals).toEqual([
       { keyword: 'a', score: null, snapshot: {} },

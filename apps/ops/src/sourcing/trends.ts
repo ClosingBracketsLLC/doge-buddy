@@ -1,3 +1,5 @@
+import type { SerpApiClient } from './serpapi.ts'
+
 /**
  * TrendsProvider: swappable Google Trends interest signal source for the sourcing pipeline.
  * `createSerpApiTrends` is the current adapter (SerpApi's `google_trends` engine, TIMESERIES
@@ -16,18 +18,8 @@ export interface TrendsProvider {
   fetchInterest(keywords: string[]): Promise<TrendSignal[]>
 }
 
-/**
- * Run-scoped ceiling on SerpApi requests this adapter will fire (one createSerpApiTrends()
- * instance = one sourcing run). Guards against a runaway keyword list burning the SerpApi quota
- * in a single run. Once the cap is hit, remaining batches never fire a request — their keywords
- * come back as `score: null` signals instead of throwing, so a used-up cap degrades the run
- * rather than aborting it.
- */
-export const SERPAPI_MAX_REQUESTS_PER_RUN = 10
-
 /** SerpApi's google_trends TIMESERIES engine accepts at most 5 comma-joined `q` terms per request. */
 const SERPAPI_BATCH_SIZE = 5
-const SERPAPI_URL = 'https://serpapi.com/search'
 /** Fixed lookback window for every request this adapter makes. */
 const SERPAPI_DATE_RANGE = 'today 3-m'
 
@@ -59,23 +51,6 @@ function chunk<T>(items: T[], size: number): T[][] {
 
 function nullSignalsFor(keywords: string[]): TrendSignal[] {
   return keywords.map((keyword) => ({ keyword, score: null, snapshot: {} }))
-}
-
-function buildUrl(keywords: string[], apiKey: string): string {
-  const params = new URLSearchParams({
-    engine: 'google_trends',
-    data_type: 'TIMESERIES',
-    q: keywords.join(','),
-    date: SERPAPI_DATE_RANGE,
-    api_key: apiKey,
-  })
-  return `${SERPAPI_URL}?${params.toString()}`
-}
-
-/** Guarantees the raw api key value can never survive into a log line or error message. */
-function scrubApiKey(text: string, apiKey: string): string {
-  if (!apiKey) return text
-  return text.split(apiKey).join('[redacted]')
 }
 
 /**
@@ -123,35 +98,25 @@ function extractSignal(keyword: string, batchIndex: number, timelineData: SerpAp
 }
 
 /**
- * SerpApi `google_trends` adapter (TIMESERIES). Batches keywords 5 at a time (SerpApi's
- * per-request term limit), self-enforces a run-scoped SERPAPI_MAX_REQUESTS_PER_RUN cap, and
- * never throws: a capped or failed request degrades to `score: null` signals for its keywords so
- * one bad batch — or a used-up cap — never aborts the rest of the run.
+ * SerpApi `google_trends` adapter (TIMESERIES). Batches keywords 5 at a time and never throws: a
+ * failed request — or a client whose shared per-run cap is spent — yields `score: null` signals for
+ * that batch's keywords, so trends problems degrade the run rather than aborting it. The request
+ * budget itself lives on the SHARED SerpApiClient (serpapi.ts), spent jointly with the
+ * market-price provider; one instance of the client = one run.
  */
-export function createSerpApiTrends(deps: { apiKey: string; fetchFn?: typeof fetch }): TrendsProvider {
-  const { apiKey } = deps
-  const fetchFn = deps.fetchFn ?? globalThis.fetch
-  let requestsMade = 0
+export function createSerpApiTrends(deps: { client: SerpApiClient }): TrendsProvider {
+  const { client } = deps
 
   async function fetchBatch(batch: string[]): Promise<TrendSignal[]> {
-    if (requestsMade >= SERPAPI_MAX_REQUESTS_PER_RUN) {
-      return nullSignalsFor(batch)
-    }
-    requestsMade += 1
-
-    try {
-      const res = await fetchFn(buildUrl(batch, apiKey))
-      if (!res.ok) {
-        throw new Error(`SerpApi responded with HTTP ${res.status}`)
-      }
-      const json = (await res.json()) as SerpApiTrendsResponse
-      const timelineData = json.interest_over_time?.timeline_data ?? []
-      return batch.map((keyword, index) => extractSignal(keyword, index, timelineData))
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      console.error('[serpapi-trends] request failed:', scrubApiKey(message, apiKey))
-      return nullSignalsFor(batch)
-    }
+    const json = (await client.get({
+      engine: 'google_trends',
+      data_type: 'TIMESERIES',
+      q: batch.join(','),
+      date: SERPAPI_DATE_RANGE,
+    })) as SerpApiTrendsResponse | null
+    if (json === null) return nullSignalsFor(batch)
+    const timelineData = json.interest_over_time?.timeline_data ?? []
+    return batch.map((keyword, index) => extractSignal(keyword, index, timelineData))
   }
 
   return {
