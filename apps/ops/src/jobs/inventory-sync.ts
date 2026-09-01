@@ -1,15 +1,21 @@
+import { auditLog, type createDb, products, productVariants, supplierVariantMappings } from '@doge-buddy/db'
+import type { SupplierAdapter, WarehouseStock } from '@doge-buddy/supplier'
+import { and, asc, eq, isNotNull, isNull, ne, or, type SQL, sql } from 'drizzle-orm'
+import type PgBoss from 'pg-boss'
+import { PointsAllowance, PointsAllowanceExceededError } from '../agents/points.ts'
 import type { SendOpts } from '../fulfillment/types.ts'
+
+type Db = ReturnType<typeof createDb>['db']
+type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
 
 /**
  * `inventory.sync` — the queue that pushes CJ's per-variant US stock into Shopify's inventory
  * levels for one local product.
  *
- * STUB (Task 4). Only the queue name and the send options live here for now, because the listing
- * worker (`apply-new-listing.ts`) is the queue's first producer and has to name it *before* the
- * consumer exists: a listing is born inventory-tracked with whatever stock CJ reported at apply
- * time, and that snapshot starts going stale immediately. Task 5 fills in the handler (and the
- * pure US-stock sum the worker currently keeps locally) behind these same two exports, so nothing
- * about the producer changes when it lands.
+ * The listing worker (`apply-new-listing.ts`) is the queue's first producer: a listing is born
+ * inventory-tracked with whatever stock CJ reported at apply time, and that snapshot starts going
+ * stale immediately. The cron (`inventory.sync-cron`, every 6h — see `index.ts`) is the other
+ * producer's counterpart: it re-reads the whole active catalog on a schedule.
  */
 export const INVENTORY_SYNC_QUEUE = 'inventory.sync'
 
@@ -29,3 +35,364 @@ export const inventorySyncSendOpts = (key: string): SendOpts => ({
   retryBackoff: true,
   expireInSeconds: 600,
 })
+
+/**
+ * Variants one cycle will read CJ stock for (spec §4). A courtesy bound on CJ's 1-request-per-
+ * second bucket, not a correctness bound: anything past the cap simply waits for the next 6-hourly
+ * cycle (and is reported by the `inventory_sync_cap_exceeded` alert so the backlog is visible).
+ */
+export const INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE = 200
+
+/**
+ * Fraction of a cycle's ATTEMPTED variants that may fail before the cycle alerts once as degraded.
+ * The comparison is strictly greater-than: exactly one failure in four is the noise floor of a
+ * supplier that occasionally 500s, not a signal worth paging on; two in four is.
+ */
+export const INVENTORY_SYNC_DEGRADED_RATIO = 0.25
+
+/** CJ points charged per `getVariantStock` call — the cost `CJSupplierAdapter` itself declares for
+ * `/product/stock/queryByVid`, and the same number `agents/mcp-tools.ts` charges its `get_stock`
+ * tool. */
+export const STOCK_READ_POINTS = 10
+
+/**
+ * Per-cycle ceiling on CJ points, mirroring the sourcing agent's run-scoped allowance
+ * (`agents/points.ts`). Sized to exactly the variant cap's worth of stock reads, so the two bounds
+ * bite together rather than one silently masking the other; it exists so a runaway cycle (an
+ * unexpectedly huge catalog, a retry storm) can never eat the shared daily CJ points budget
+ * fulfillment also draws on.
+ */
+export const INVENTORY_SYNC_POINTS_ALLOWANCE = INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE * STOCK_READ_POINTS
+
+/** The two Shopify ops a sync cycle needs. `null` (not a throwing stub) when Shopify isn't
+ * configured — see `executeInventorySync`'s own handling: a dev boot without creds must no-op
+ * loudly-once, not fail every variant. */
+export interface InventorySyncShopifyOps {
+  inventorySetQuantities(input: Record<string, unknown>, idempotencyKey: string): Promise<void>
+  primaryLocationId(): Promise<string>
+}
+
+/** The `PointsAllowance` surface a cycle actually uses — a structural type so a test can inject a
+ * tiny allowance (or a stand-in) without constructing the real class. */
+export type PointsBudget = Pick<PointsAllowance, 'spend' | 'spent' | 'remaining'>
+
+export interface InventorySyncDeps {
+  db: Db
+  adapter: Pick<SupplierAdapter, 'getVariantStock'>
+  shopify: InventorySyncShopifyOps | null
+  alert: Alert
+  now?: () => Date
+  /**
+   * Optional per-cycle CJ points budget. OMITTED BY PRODUCTION WIRING ON PURPOSE: a
+   * `PointsAllowance` accumulates for the life of the instance, so a single one shared by every
+   * cycle would permanently trip after ~one cycle's worth of reads and silently no-op the sync
+   * forever (the exact bug the sourcing pipeline's `trendsFactory` had to be fixed for). Left
+   * unset, each cycle constructs its own fresh allowance below.
+   */
+  points?: PointsBudget
+}
+
+/** One cycle's scope: a single local product (the post-listing job) or the whole active catalog
+ * (the 6-hourly cron). */
+export interface InventorySyncScope {
+  productId?: string
+}
+
+export interface InventorySyncResult {
+  updated: number
+  unchanged: number
+  failed: number
+  skipped: number
+}
+
+/**
+ * The sellable quantity for one supplier variant: the LARGEST SINGLE US warehouse, floored at 0.
+ *
+ * Not the sum, and this is the whole subtlety. `fulfillment/plan.ts`'s Gate 4 refuses an order
+ * unless ONE US warehouse entry covers the entire needed quantity
+ * (`usEntries.some((entry) => entry.quantity >= needed)`) — CJ ships an order from a single
+ * warehouse, not by splitting it. Advertising 4 + 3 = 7 units across two warehouses would
+ * therefore promise stock that the fulfillment pipeline will later refuse to ship: an oversell
+ * that surfaces as a `stockout` needs-attention *after* the customer has paid.
+ *
+ * US-only for a separate reason: a listing's own `ships_from`/delivery metafields promise a
+ * US-warehouse dispatch, so CN stock is not stock we can sell against without breaking that
+ * promise.
+ *
+ * Lives here rather than in the listing worker (which is where it was born, and which now imports
+ * it from here): the number this job pushes on every later pass has to mean exactly the same thing
+ * as the number the listing was born with, and the sync is the one that keeps saying it.
+ */
+export function usQuantity(stock: WarehouseStock[]): number {
+  const us = stock.filter((w) => w.countryCode === 'US').map((w) => w.quantity)
+  return us.length === 0 ? 0 : Math.max(0, ...us)
+}
+
+/** `yyyymmddHH` in UTC — the hour bucket of an idempotency key. Sliced off the ISO string rather
+ * than built from `getUTCMonth()`-style parts so there's no off-by-one/zero-padding to get wrong. */
+function hourStamp(now: Date): string {
+  const iso = now.toISOString()
+  return `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}${iso.slice(11, 13)}`
+}
+
+/**
+ * Records one variant's caught failure — same shape as `cj-wallet-monitor.ts`'s `auditRowFailure`:
+ * a durable `audit_log` row plus the loop that caught it moving on to the next variant instead of
+ * aborting the cycle. Deliberately NOT an alert: a per-variant CJ hiccup is noise, and the
+ * cycle-level `inventory_sync_degraded` alert below is what turns a *pattern* of them into a page.
+ */
+async function auditVariantFailure(db: Db, variantId: string, err: unknown): Promise<void> {
+  await db.insert(auditLog).values({
+    actor: 'system',
+    action: 'inventory_sync.variant_failed',
+    entityType: 'product_variant',
+    entityId: variantId,
+    detail: { message: err instanceof Error ? err.message : String(err) },
+  })
+}
+
+/**
+ * One `inventory.sync` cycle (spec §4): make Shopify's tracked inventory equal CJ's US stock for
+ * every variant in scope.
+ *
+ * **Selection.** Every `product_variants` row whose product is ACTIVE, that has a
+ * `supplier_variant_mappings` row, and whose `shopify_inventory_item_gid` is non-null — the gid is
+ * how Shopify addresses a variant's stock, so a null one simply cannot be synced (the
+ * `backfill-listings` script is what fixes those). Variants failing any of those three tests are
+ * counted `skipped`, not silently dropped: "how many variants can this job NOT keep honest" is the
+ * number that tells an operator to run the backfill. The eligible set is inherently small (one row
+ * per listed, inventory-tracked variant), so it's read whole and sliced in memory — the
+ * `INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE` bound exists to cap CJ calls per cycle, not memory.
+ *
+ * **Per variant.** Read CJ stock, take `usQuantity`, and compare with `last_known_stock`:
+ * unchanged means NO Shopify call at all (the common case by far — most variants don't move in six
+ * hours) but still a fresh `stock_checked_at`, so "we looked" and "it changed" stay separable.
+ * Changed means one `inventorySetQuantities` — an unconditional set of the `available` quantity at
+ * the store's one active location — followed by the local cache write. That ordering is
+ * deliberate: a crash between the two re-pushes the same value next cycle (harmless, and the
+ * hourly idempotency key collapses it), whereas writing the cache first would record a push that
+ * never happened and leave the storefront stale until CJ's number moves again.
+ *
+ * **Isolation.** Every variant's work is wrapped: a throw is counted `failed`, audit-logged, and
+ * the cycle moves on — one flaky supplier read must never cost the other 199 variants their sync.
+ * A failed variant's `last_known_stock` is left exactly as it was; "CJ was unreachable" is not an
+ * observation that the warehouse is empty.
+ */
+export async function executeInventorySync(
+  deps: InventorySyncDeps,
+  scope: InventorySyncScope,
+): Promise<InventorySyncResult> {
+  const { db } = deps
+  const now = deps.now?.() ?? new Date()
+  const points = deps.points ?? new PointsAllowance(INVENTORY_SYNC_POINTS_ALLOWANCE)
+  const scopeFilter: SQL | undefined = scope.productId ? eq(productVariants.productId, scope.productId) : undefined
+
+  const selected = await db
+    .select({
+      variantId: productVariants.id,
+      inventoryItemGid: productVariants.shopifyInventoryItemGid,
+      mappingId: supplierVariantMappings.id,
+      supplierVariantId: supplierVariantMappings.supplierVariantId,
+      lastKnownStock: supplierVariantMappings.lastKnownStock,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .innerJoin(supplierVariantMappings, eq(supplierVariantMappings.variantId, productVariants.id))
+    .where(and(eq(products.status, 'active'), isNotNull(productVariants.shopifyInventoryItemGid), scopeFilter))
+    // Oldest variant first so the per-cycle cap is spent in a stable order across cycles rather
+    // than on whatever the planner happens to return first.
+    .orderBy(asc(productVariants.createdAt), asc(productVariants.id))
+
+  // A variant could in principle carry mappings for two suppliers (the unique index is on
+  // (variant, supplier)), which would yield two rows here for one inventory item — and both would
+  // share this hour's idempotency key, so the second push would be silently swallowed by Shopify
+  // rather than winning. Only ever one supplier per variant today; take the first deterministically
+  // rather than leaving that to chance.
+  const byVariant = new Map<string, (typeof selected)[number]>()
+  for (const row of selected) {
+    if (!byVariant.has(row.variantId)) byVariant.set(row.variantId, row)
+  }
+  const eligible = [...byVariant.values()]
+
+  // Everything in scope the cycle cannot sync: product not active, no mapping, or no inventory-item
+  // gid. Counted in SQL (one aggregate, no rows transferred) — the catalog holds far more of these
+  // than of eligible variants.
+  const [skippedRow] = await db
+    .select({ n: sql<string>`count(distinct ${productVariants.id})` })
+    .from(productVariants)
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .leftJoin(supplierVariantMappings, eq(supplierVariantMappings.variantId, productVariants.id))
+    .where(
+      and(
+        or(
+          ne(products.status, 'active'),
+          isNull(supplierVariantMappings.id),
+          isNull(productVariants.shopifyInventoryItemGid),
+        ),
+        scopeFilter,
+      ),
+    )
+  let skipped = Number(skippedRow?.n ?? 0)
+  let updated = 0
+  let unchanged = 0
+  let failed = 0
+
+  /** Writes the cycle's audit row (spec §4) and hands back the counts. A whole-catalog cycle
+   * belongs to no single entity, so it audits under the sentinel id `'all'` — one queryable row
+   * per cycle either way, rather than a null-keyed row nothing can look up. */
+  const finish = async (): Promise<InventorySyncResult> => {
+    const result = { updated, unchanged, failed, skipped }
+    await db.insert(auditLog).values({
+      actor: 'system',
+      action: 'inventory.synced',
+      entityType: scope.productId ? 'product' : 'inventory_sync',
+      entityId: scope.productId ?? 'all',
+      detail: { ...result, ...(scope.productId ? { productId: scope.productId } : {}) },
+    })
+    return result
+  }
+
+  // Dev boot without Shopify creds. Nothing can be pushed, so nothing is READ either — a cycle
+  // that burns CJ points to compute numbers it cannot deliver is pure waste. One info alert (not a
+  // warning: on a credential-less dev box this is the expected state, and a warning here would
+  // train operators to ignore the kind).
+  const shopify = deps.shopify
+  if (!shopify) {
+    skipped += eligible.length
+    await deps
+      .alert('info', 'inventory_sync_no_shopify', { skipped, ...(scope.productId ? { productId: scope.productId } : {}) })
+      .catch(() => {})
+    return finish()
+  }
+
+  const batch = eligible.slice(0, INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE)
+  if (eligible.length > batch.length) {
+    const deferred = eligible.length - batch.length
+    skipped += deferred
+    await deps
+      .alert('warning', 'inventory_sync_cap_exceeded', {
+        cap: INVENTORY_SYNC_MAX_VARIANTS_PER_CYCLE,
+        eligible: eligible.length,
+        deferred,
+      })
+      .catch(() => {})
+  }
+
+  /**
+   * The store's one active location, resolved at most once per cycle and only when a variant
+   * actually needs a push (a cycle where nothing moved must not pay for — or fail on — a lookup it
+   * has no use for). Caches the resolved VALUE only, never a failed attempt: a location lookup
+   * that fails is charged to that one variant and retried by the next, exactly like the listing
+   * worker's own memo.
+   */
+  let locationId: string | null = null
+  const getLocationId = async (): Promise<string> => (locationId ??= await shopify.primaryLocationId())
+
+  const stamp = hourStamp(now)
+  for (const [index, row] of batch.entries()) {
+    // Points first, and BEFORE the read it pays for — a spend that would cross the cap is rejected
+    // without consuming any of the allowance, so the cycle stops on the boundary rather than
+    // overshooting it.
+    try {
+      points.spend(STOCK_READ_POINTS, 'inventory.sync getVariantStock')
+    } catch (err) {
+      if (!(err instanceof PointsAllowanceExceededError)) throw err
+      const remaining = batch.length - index
+      skipped += remaining
+      await deps
+        .alert('warning', 'inventory_sync_points_capped', {
+          spentPoints: points.spent(),
+          synced: updated + unchanged,
+          remaining,
+        })
+        .catch(() => {})
+      break
+    }
+
+    try {
+      const quantity = usQuantity(await deps.adapter.getVariantStock(row.supplierVariantId))
+      if (quantity === row.lastKnownStock) {
+        // Nothing to push, but the observation is still worth recording: `stock_checked_at` is how
+        // an operator tells "CJ says 4" from "nobody has looked since Tuesday".
+        await db
+          .update(supplierVariantMappings)
+          .set({ stockCheckedAt: now })
+          .where(eq(supplierVariantMappings.id, row.mappingId))
+        unchanged += 1
+        continue
+      }
+      await shopify.inventorySetQuantities(
+        {
+          name: 'available',
+          reason: 'correction',
+          // LIVE-VERIFIED 2026-08-31 against the 2026-07 Admin API: there is no
+          // `ignoreCompareQuantity` field on `InventorySetQuantitiesInput`, and omitting the
+          // per-entry `changeFromQuantity` CAS makes this an unconditional set — which is what we
+          // want: CJ is the source of truth here, not whatever Shopify last held.
+          quantities: [{ inventoryItemId: row.inventoryItemGid, locationId: await getLocationId(), quantity }],
+        },
+        `inv-${row.variantId}-${stamp}`,
+      )
+      await db
+        .update(supplierVariantMappings)
+        .set({ lastKnownStock: quantity, stockCheckedAt: now })
+        .where(eq(supplierVariantMappings.id, row.mappingId))
+      updated += 1
+    } catch (err) {
+      failed += 1
+      await auditVariantFailure(db, row.variantId, err).catch(() => {})
+    }
+  }
+
+  const attempted = updated + unchanged + failed
+  if (attempted > 0 && failed / attempted > INVENTORY_SYNC_DEGRADED_RATIO) {
+    await deps
+      .alert('warning', 'inventory_sync_degraded', {
+        failed,
+        attempted,
+        ratio: INVENTORY_SYNC_DEGRADED_RATIO,
+        ...(scope.productId ? { productId: scope.productId } : {}),
+      })
+      .catch(() => {})
+  }
+
+  return finish()
+}
+
+/**
+ * Only the fields this handler reads off a pg-boss job — the same strict structural subset of
+ * `PgBoss.JobWithMetadata<T>` `fulfillment-pay-order.ts` documents, so test fixtures don't have to
+ * fake out a dozen metadata fields nothing here looks at.
+ */
+type InventorySyncJob = Pick<
+  PgBoss.JobWithMetadata<InventorySyncScope>,
+  'id' | 'name' | 'data' | 'retryCount' | 'retryLimit'
+>
+
+/**
+ * Worker callback for the `inventory.sync` queue (the on-demand, post-listing producer; the
+ * 6-hourly cron calls `executeInventorySync` directly through its own queue — see `index.ts`).
+ *
+ * A cycle only throws on an infrastructure failure — per-variant supplier/Shopify errors are
+ * counted, never thrown — so a throw here is a real "retry this job" signal. The first one is HELD
+ * rather than thrown immediately: pg-boss can hand a batch of jobs to one call, and the second
+ * product's sync must not lose its run because the first product's happened to fail. It is
+ * rethrown once the batch is done so pg-boss still fails (and retries) the job.
+ */
+export function inventorySyncHandler(deps: InventorySyncDeps) {
+  return async (jobs: InventorySyncJob[]): Promise<void> => {
+    let firstError: unknown
+    let threw = false
+    for (const job of jobs) {
+      try {
+        await executeInventorySync(deps, job.data?.productId ? { productId: job.data.productId } : {})
+      } catch (err) {
+        if (!threw) {
+          threw = true
+          firstError = err
+        }
+      }
+    }
+    if (threw) throw firstError
+  }
+}

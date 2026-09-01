@@ -1,8 +1,7 @@
 import { categoryByTag, categoryTagValue, centsToUsd, NewListingPayloadSchema } from '@doge-buddy/core'
 import { auditLog, products, productVariants, supplierVariantMappings } from '@doge-buddy/db'
-import type { WarehouseStock } from '@doge-buddy/supplier'
 import { eq, sql } from 'drizzle-orm'
-import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts } from '../jobs/inventory-sync.ts'
+import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts, usQuantity } from '../jobs/inventory-sync.ts'
 import { applyProposalTransition } from './transitions.ts'
 import { proposalHandle, type ApplyProposalDeps, type ProposalRow, type ProposalShopifyOps } from './apply-shared.ts'
 
@@ -47,30 +46,9 @@ function seoDescription(descriptionHtml: string): string {
 }
 
 /**
- * The sellable quantity for one supplier variant: the LARGEST SINGLE US warehouse, floored at 0.
- *
- * Not the sum, and this is the whole subtlety. `fulfillment/plan.ts`'s Gate 4 refuses an order
- * unless ONE US warehouse entry covers the entire needed quantity
- * (`usEntries.some((entry) => entry.quantity >= needed)`) — CJ ships an order from a single
- * warehouse, not by splitting it. Listing 4 + 3 = 7 units across two warehouses would therefore
- * advertise stock that the fulfillment pipeline will later refuse to ship: an oversell that
- * surfaces as a `stockout` needs-attention *after* the customer has paid.
- *
- * US-only for a separate reason: the listing's own `ships_from`/delivery metafields promise a
- * US-warehouse dispatch, so CN stock is not stock we can sell against without breaking that
- * promise.
- *
- * Exported because Task 5's sync job must apply the identical rule — the number it pushes on every
- * later pass has to mean the same thing as the number the listing was born with. It moves into the
- * sync job's module when that lands.
- */
-export function usQuantity(stock: WarehouseStock[]): number {
-  const us = stock.filter((w) => w.countryCode === 'US').map((w) => w.quantity)
-  return us.length === 0 ? 0 : Math.max(0, ...us)
-}
-
-/**
- * `usQuantity` over a live CJ read, or `null` when the read itself failed.
+ * `usQuantity` (the LARGEST SINGLE US warehouse, floored at 0 — see its doc comment in
+ * `jobs/inventory-sync.ts`, which now owns it) over a live CJ read, or `null` when the read itself
+ * failed.
  *
  * `null` is NOT the same as 0 and the two must not be conflated. Shopify's brand-new listing still
  * gets 0 for a failed read (safe: it under-sells, and the sync job corrects it on its next pass) —

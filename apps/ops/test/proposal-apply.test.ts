@@ -4,8 +4,8 @@ import type { WarehouseStock } from '@doge-buddy/supplier'
 import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SendOpts } from '../src/fulfillment/types.ts'
-import { INVENTORY_SYNC_QUEUE } from '../src/jobs/inventory-sync.ts'
-import { resetLocationCache, usQuantity } from '../src/proposals/apply-new-listing.ts'
+import { INVENTORY_SYNC_QUEUE, usQuantity } from '../src/jobs/inventory-sync.ts'
+import { resetLocationCache } from '../src/proposals/apply-new-listing.ts'
 import {
   deadLetterApplyProposal, executeApplyProposal, proposalHandle, type ProposalShopifyOps,
 } from '../src/proposals/run-apply.ts'

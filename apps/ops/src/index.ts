@@ -4,6 +4,7 @@ import {
   findProductByHandle,
   fulfillmentCreate,
   fulfillmentTrackingInfoUpdate,
+  inventorySetQuantities,
   listPublications,
   orderFulfillmentOrders,
   orderRefundState,
@@ -31,6 +32,13 @@ import type { WebhookDeps } from './http/webhooks.ts'
 import { cjDisputePollHandler, type DisputePollDeps } from './jobs/cj-dispute-poll.ts'
 import { cjWalletMonitorHandler, type WalletMonitorDeps } from './jobs/cj-wallet-monitor.ts'
 import { fulfillmentReconcileHandler } from './jobs/fulfillment-reconcile.ts'
+import {
+  executeInventorySync,
+  INVENTORY_SYNC_QUEUE,
+  inventorySyncHandler,
+  type InventorySyncDeps,
+  type InventorySyncShopifyOps,
+} from './jobs/inventory-sync.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
 import { scoringNightlyHandler, SCORING_NIGHTLY_QUEUE, type ScoringNightlyDeps } from './jobs/scoring-nightly.ts'
 import { scoringWeeklyHandler, SCORING_WEEKLY_QUEUE, type ScoringWeeklyDeps } from './jobs/scoring-weekly-digest.ts'
@@ -250,6 +258,17 @@ const refundOps: RefundOps | null = shopifyClient
     }
   : null
 
+// `inventory.sync`'s two-op Shopify surface (Task 5). `null` — not a throwing stub — when Shopify
+// is unconfigured, same stance as `refundOps` just above and for a related reason: a dev boot
+// without creds must make the sync a loud-once no-op (one `inventory_sync_no_shopify` info alert
+// per cycle, no CJ points burned), not fail every variant of every cycle forever.
+const inventorySyncShopify: InventorySyncShopifyOps | null = shopifyClient
+  ? {
+      inventorySetQuantities: (input, idempotencyKey) => inventorySetQuantities(shopifyClient, input, idempotencyKey),
+      primaryLocationId: () => primaryLocationId(shopifyClient),
+    }
+  : null
+
 // Built here — before `startQueue` — because `proposal.apply`'s `support_reply` executor
 // (Task 15) needs a `gmail` dep at registration time via `ApplyProposalDeps`, same reasoning as
 // `shopifyClient` above. `null` whenever `config.gmail` is unset (dev without Gmail creds) —
@@ -308,6 +327,40 @@ await registerCron(queue.boss, 'cj.wallet-monitor', '0 */4 * * *', cjWalletMonit
 // needs only the supplier adapter/alert deps `queue` already provides by this point.
 const disputePollDeps: DisputePollDeps = { db, adapter: supplierAdapter, alert }
 await registerCron(queue.boss, 'cj.dispute-poll', '0 */6 * * *', cjDisputePollHandler(disputePollDeps))
+
+// `inventory.sync` (catalog-p0 Task 5): CJ's US stock → Shopify's tracked inventory. TWO
+// producers, deliberately on TWO queue names:
+//
+//   - `inventory.sync` — the on-demand, per-product job the listing worker enqueues right after a
+//     listing lands (`apply-new-listing.ts`, singletonKey = product id). `policy: 'stately'` for
+//     the same reason `support.agent-run` needs it: its producer sets a `singletonKey` expecting
+//     at most one job per product *outstanding* (created OR active), and pg-boss's `'singleton'`
+//     policy only dedupes the ACTIVE state, so a burst of listings/retries could otherwise stack
+//     duplicate syncs for one product. `createQueueRetrying` + the explicit `updateQueue` is the
+//     same two-call pattern every other stately queue here uses — `createQueue` is a no-op on an
+//     existing queue, so only the update makes the policy stick on redeploy.
+//   - `inventory.sync-cron` — the 6-hourly whole-catalog cycle, on its own queue name so the
+//     schedule never contends with the stately on-demand queue's per-product dedup (a cron job
+//     landing on that queue would carry no singletonKey and could be collapsed against — or
+//     collapse — a real post-listing job).
+//
+// `inventorySyncDeps` deliberately omits `points`: each cycle builds its own fresh
+// `PointsAllowance`, because one shared instance would accumulate across cycles and permanently
+// trip (see the dep's own doc comment, and `trendsFactory`'s identical fix above).
+const inventorySyncDeps: InventorySyncDeps = {
+  db, adapter: supplierAdapter, shopify: inventorySyncShopify, alert, now: () => new Date(),
+}
+await createQueueRetrying(queue.boss, INVENTORY_SYNC_QUEUE, { name: INVENTORY_SYNC_QUEUE, policy: 'stately' })
+await queue.boss.updateQueue(INVENTORY_SYNC_QUEUE, { name: INVENTORY_SYNC_QUEUE, policy: 'stately' })
+await queue.boss.work(INVENTORY_SYNC_QUEUE, { includeMetadata: true }, inventorySyncHandler(inventorySyncDeps))
+await registerCron(queue.boss, 'inventory.sync-cron', '0 */6 * * *', async () => {
+  await executeInventorySync(inventorySyncDeps, {})
+})
+app.log.info(
+  inventorySyncShopify
+    ? `${INVENTORY_SYNC_QUEUE} ARMED — stately worker + 6-hourly catalog cron`
+    : `${INVENTORY_SYNC_QUEUE} worker/cron registered but INERT: Shopify not configured (one info alert per cycle)`,
+)
 
 // `proposal.expire-sweep` (Task 7): daily proposal expiry sweep — transitions any pending
 // proposals that have expired to 'expired' status and audits each transition.
