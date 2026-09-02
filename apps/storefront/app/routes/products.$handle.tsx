@@ -9,12 +9,18 @@ import {
   useSelectedOptionInUrlParam,
 } from '@shopify/hydrogen';
 import {ProductPrice} from '~/components/ProductPrice';
-import {ProductImage} from '~/components/ProductImage';
 import {ProductForm} from '~/components/ProductForm';
 import {redirectIfHandleIsLocalized} from '~/lib/redirect';
 import {DeliveryBadge} from '~/components/brand/DeliveryBadge';
 import {productJsonLd} from '~/lib/seo';
 import {parseProductContent} from '~/lib/product-content';
+import {ProductGallery} from '~/components/product/ProductGallery';
+import {TrustBadges} from '~/components/product/TrustBadges';
+import {ProductHighlights} from '~/components/product/ProductHighlights';
+import {ProductSpecs} from '~/components/product/ProductSpecs';
+import {WhatsInBox} from '~/components/product/WhatsInBox';
+import {ShippingReturnsAccordion} from '~/components/product/ShippingReturnsAccordion';
+import {SupplierReviews} from '~/components/product/SupplierReviews';
 
 export const meta: Route.MetaFunction = ({data}) => {
   if (!data?.product) return [];
@@ -109,7 +115,7 @@ function loadDeferredData({context, params}: Route.LoaderArgs) {
 }
 
 export default function Product() {
-  const {product} = useLoaderData<typeof loader>();
+  const {product, content} = useLoaderData<typeof loader>();
 
   // Optimistically selects a variant with given available variant information
   const selectedVariant = useOptimisticVariant(
@@ -130,35 +136,54 @@ export default function Product() {
   const {title, descriptionHtml} = product;
 
   return (
-    <div className="mx-auto grid max-w-5xl gap-8 px-4 py-8 md:grid-cols-2">
-      <ProductImage image={selectedVariant?.image} />
-      <div>
-        <h1 className="font-display text-4xl text-ink">{title}</h1>
-        <div className="mt-3 inline-block rounded border-2 border-ink bg-badge px-3 py-1 font-display text-xl text-ink">
-          <ProductPrice
-            price={selectedVariant?.price}
-            compareAtPrice={selectedVariant?.compareAtPrice}
+    <div className="mx-auto max-w-5xl px-4 py-8">
+      <div className="grid gap-8 md:grid-cols-2">
+        <ProductGallery
+          media={product.media?.nodes ?? []}
+          variantImage={selectedVariant?.image}
+        />
+        <div>
+          <h1 className="font-display text-4xl text-ink">{title}</h1>
+          <div className="mt-3 inline-block rounded border-2 border-ink bg-badge px-3 py-1 font-display text-xl text-ink">
+            <ProductPrice
+              price={selectedVariant?.price}
+              compareAtPrice={selectedVariant?.compareAtPrice}
+            />
+          </div>
+          <div className="mt-4">
+            <DeliveryBadge
+              shipsFrom={product.shipsFrom?.value}
+              minDays={product.deliveryMinDays?.value}
+              maxDays={product.deliveryMaxDays?.value}
+            />
+          </div>
+          <div className="mt-6">
+            <ProductForm
+              productOptions={productOptions}
+              selectedVariant={selectedVariant}
+            />
+          </div>
+          <TrustBadges />
+          <ProductHighlights highlights={content.highlights} />
+          <h2 className="mt-10 font-display text-2xl text-ink">Description</h2>
+          <div
+            className="mt-2 leading-relaxed text-ink"
+            dangerouslySetInnerHTML={{__html: descriptionHtml}}
           />
-        </div>
-        <div className="mt-4">
-          <DeliveryBadge
+          <ProductSpecs
+            specs={content.specs}
+            variantWeight={selectedVariant?.weight}
+            variantWeightUnit={selectedVariant?.weightUnit}
+          />
+          <WhatsInBox text={content.whatsInBox} />
+          <ShippingReturnsAccordion
             shipsFrom={product.shipsFrom?.value}
             minDays={product.deliveryMinDays?.value}
             maxDays={product.deliveryMaxDays?.value}
           />
         </div>
-        <div className="mt-6">
-          <ProductForm
-            productOptions={productOptions}
-            selectedVariant={selectedVariant}
-          />
-        </div>
-        <h2 className="mt-10 font-display text-2xl text-ink">Description</h2>
-        <div
-          className="mt-2 leading-relaxed text-ink"
-          dangerouslySetInnerHTML={{__html: descriptionHtml}}
-        />
       </div>
+      <SupplierReviews data={content.supplierReviews} />
       <Analytics.ProductView
         data={{
           products: [
