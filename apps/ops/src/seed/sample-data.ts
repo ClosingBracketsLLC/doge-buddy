@@ -19,6 +19,10 @@ export const METAFIELD_DEFINITIONS: MetafieldDefinition[] = [
   { name: 'Ships from', namespace: 'dogebuddy', key: 'ships_from', type: 'single_line_text_field', ownerType: 'PRODUCT' },
   { name: 'Delivery min days', namespace: 'dogebuddy', key: 'delivery_min_days', type: 'number_integer', ownerType: 'PRODUCT' },
   { name: 'Delivery max days', namespace: 'dogebuddy', key: 'delivery_max_days', type: 'number_integer', ownerType: 'PRODUCT' },
+  { name: 'Highlights', namespace: 'dogebuddy', key: 'highlights', type: 'json', ownerType: 'PRODUCT' },
+  { name: 'Specs', namespace: 'dogebuddy', key: 'specs', type: 'json', ownerType: 'PRODUCT' },
+  { name: 'Supplier reviews', namespace: 'dogebuddy', key: 'supplier_reviews', type: 'json', ownerType: 'PRODUCT' },
+  { name: "What's in the box", namespace: 'dogebuddy', key: 'whats_in_box', type: 'single_line_text_field', ownerType: 'PRODUCT' },
 ]
 
 export interface SeedCollection {

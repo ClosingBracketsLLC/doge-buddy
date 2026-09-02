@@ -1,6 +1,6 @@
 import { categoryByTag, categoryTagValue, slugify } from '@doge-buddy/core'
 import { auditLog, createDb, products, productVariants, proposals, supplierVariantMappings, supportTickets } from '@doge-buddy/db'
-import type { WarehouseStock } from '@doge-buddy/supplier'
+import type { SupplierProductReview, WarehouseStock } from '@doge-buddy/supplier'
 import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SendOpts } from '../src/fulfillment/types.ts'
@@ -17,10 +17,16 @@ const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/dog
 function newListingPayload() {
   return {
     type: 'new_listing', title: 'Dog Snuff Pad', descriptionHtml: '<p>x</p>',
-    categoryTag: 'toys', imageUrls: ['https://cf.cjdropshipping.com/x.png'], shipsFrom: 'US',
+    categoryTag: 'toys',
+    imageUrls: ['https://cf.cjdropshipping.com/x.png', 'https://cdn.example.com/variant-1.jpg'],
+    shipsFrom: 'US',
     deliveryMinDays: 3, deliveryMaxDays: 7,
+    highlights: ['Durable rope core', 'Machine washable', 'Non-slip grip'],
+    specs: [{ label: 'Material', value: 'Cotton' }],
+    whatsInBox: '1x rope toy',
     variants: [{ sku: `SKU-${crypto.randomUUID()}`, priceCents: 2999, supplierCostCents: 1414,
-      supplier: 'cj', supplierProductId: 'cjp-1', supplierVariantId: 'cjv-1' }],
+      supplier: 'cj', supplierProductId: 'cjp-1', supplierVariantId: 'cjv-1',
+      imageUrl: 'https://cdn.example.com/variant-1.jpg' }],
   }
 }
 
@@ -88,10 +94,12 @@ function fakeAdapter(
   overrides: {
     subscribeProductWebhook?: (supplierProductId: string) => Promise<void>
     getVariantStock?: (supplierVariantId: string) => Promise<WarehouseStock[]>
+    getProductReviews?: (supplierProductId: string) => Promise<SupplierProductReview[]>
   } = {},
 ) {
   const subscribedProductIds: string[] = []
   const stockReads: string[] = []
+  const reviewReads: string[] = []
   return {
     subscribedProductIds,
     // Task 4: the listing worker reads CJ's per-warehouse stock for every payload variant, on the
@@ -101,6 +109,19 @@ function fakeAdapter(
     getVariantStock: async (supplierVariantId: string) => {
       stockReads.push(supplierVariantId)
       return overrides.getVariantStock ? await overrides.getVariantStock(supplierVariantId) : fixtureStock()
+    },
+    // v2 (Task 7): the listing worker fetches the supplier's marketplace reviews at apply time, on
+    // the CREATE path only. Default: two clean, rated reviews (average 4.5) so most tests exercise
+    // the happy path for free; overridable so a test can make the fetch throw.
+    reviewReads,
+    getProductReviews: async (supplierProductId: string) => {
+      reviewReads.push(supplierProductId)
+      return overrides.getProductReviews
+        ? await overrides.getProductReviews(supplierProductId)
+        : [
+          { rating: 5, content: 'Great toy, my dog loves it', reviewDate: '2026-06-01', countryCode: 'US' },
+          { rating: 4, content: 'Sturdy and washable' },
+        ]
     },
     subscribeProductWebhook: overrides.subscribeProductWebhook ?? (async (supplierProductId: string) => {
       subscribedProductIds.push(supplierProductId)
@@ -1256,5 +1277,176 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     expect(mapping!.stockCheckedAt).not.toBeNull()
 
     await db.delete(auditLog).where(eq(auditLog.entityId, productRow.id))
+  })
+
+  // ---------------------------------------------------------------------------
+  // 24.-28. Task 7: variant files, v2 content metafields, and the apply-time supplier-review
+  // fetch — CREATE-only (the ACTIVE flip stays byte-identical to today, see comment at
+  // apply-new-listing.ts's flip call).
+  // ---------------------------------------------------------------------------
+  it('24. CREATE productSet carries per-variant file, the v2 metafields, and product files exclude variant images', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const inputs: Record<string, unknown>[] = []
+    const shopify = fakeShopify({
+      productSet: async (input) => {
+        inputs.push(input as Record<string, unknown>)
+        return {
+          productId: 'gid://shopify/Product/901',
+          variants: [{
+            id: 'gid://shopify/ProductVariant/9001',
+            sku: (input as { variants?: { sku?: string }[] }).variants?.[0]?.sku,
+            inventoryItemId: 'gid://shopify/InventoryItem/9001',
+          }],
+        }
+      },
+    })
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+
+    const create = inputs[0] as any
+    expect(create.variants[0].file).toEqual({ originalSource: 'https://cdn.example.com/variant-1.jpg', contentType: 'IMAGE' })
+    const keys = (create.metafields as { key: string; value: string }[]).map((m) => m.key)
+    expect(keys).toEqual(expect.arrayContaining(['highlights', 'specs', 'whats_in_box', 'supplier_reviews', 'ships_from']))
+    const reviews = JSON.parse((create.metafields as any[]).find((m) => m.key === 'supplier_reviews').value)
+    expect(reviews).toMatchObject({ average: 4.5, count: 2 })
+    expect(reviews.reviews).toHaveLength(2)
+    // the variant's image URL must not double as a product-level file
+    expect(create.files.map((f: { originalSource: string }) => f.originalSource)).not.toContain('https://cdn.example.com/variant-1.jpg')
+
+    const flip = inputs[1] as any
+    expect(flip.status).toBe('ACTIVE')
+    // Metafields ride the CREATE call ONLY — see apply-new-listing.ts's comment above the flip.
+    expect(flip.metafields).toBeUndefined()
+    expect(flip.variants).toBeUndefined()
+    expect(flip.files).toBeUndefined()
+  })
+
+  it('25. review fetch failure: listing proceeds, info alert listing_reviews_unavailable, no supplier_reviews metafield', async () => {
+    const row = await seedProposal({ status: 'approved' })
+    const inputs: Record<string, unknown>[] = []
+    const shopify = fakeShopify({
+      productSet: async (input) => {
+        inputs.push(input as Record<string, unknown>)
+        const variants = ((input as { variants?: { sku?: string }[] }).variants ?? [{}]).map((v, i) => ({
+          id: `gid://shopify/ProductVariant/rev-${i}`, sku: v.sku, inventoryItemId: `gid://shopify/InventoryItem/rev-${i}`,
+        }))
+        return { productId: 'gid://shopify/Product/902', variants }
+      },
+    })
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter({
+      getProductReviews: async () => {
+        throw new Error('cj 500')
+      },
+    })
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+
+    expect(alert).toHaveBeenCalledWith('info', 'listing_reviews_unavailable', expect.objectContaining({ error: 'cj 500' }))
+    const keys = (inputs[0] as any).metafields.map((m: { key: string }) => m.key)
+    expect(keys).not.toContain('supplier_reviews')
+  })
+
+  it('26. claims backstop: a stored payload with a claim in a highlight applies WITHOUT content metafields + warning alert', async () => {
+    const payload = newListingPayload()
+    payload.highlights = ['Durable rope core', 'clinically proven comfort', 'Non-slip grip']
+    const row = await seedProposal({ status: 'approved', payload })
+    const inputs: Record<string, unknown>[] = []
+    const shopify = fakeShopify({
+      productSet: async (input) => {
+        inputs.push(input as Record<string, unknown>)
+        const variants = ((input as { variants?: { sku?: string }[] }).variants ?? [{}]).map((v, i) => ({
+          id: `gid://shopify/ProductVariant/claim-${i}`, sku: v.sku, inventoryItemId: `gid://shopify/InventoryItem/claim-${i}`,
+        }))
+        return { productId: 'gid://shopify/Product/903', variants }
+      },
+    })
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+
+    const keys = (inputs[0] as any).metafields.map((m: { key: string }) => m.key)
+    expect(keys).not.toContain('highlights')
+    expect(keys).not.toContain('specs')
+    expect(keys).not.toContain('whats_in_box')
+    expect(alert).toHaveBeenCalledWith(
+      'warning', 'listing_content_claims_blocked', expect.objectContaining({ terms: ['clinically proven'] }),
+    )
+  })
+
+  it('27. whatsInBox with an embedded newline is normalized to one line (single_line_text_field must not fail the create)', async () => {
+    const payload = newListingPayload()
+    payload.whatsInBox = '1x rope toy\n1x care card'
+    const row = await seedProposal({ status: 'approved', payload })
+    const inputs: Record<string, unknown>[] = []
+    const shopify = fakeShopify({
+      productSet: async (input) => {
+        inputs.push(input as Record<string, unknown>)
+        const variants = ((input as { variants?: { sku?: string }[] }).variants ?? [{}]).map((v, i) => ({
+          id: `gid://shopify/ProductVariant/nl-${i}`, sku: v.sku, inventoryItemId: `gid://shopify/InventoryItem/nl-${i}`,
+        }))
+        return { productId: 'gid://shopify/Product/904', variants }
+      },
+    })
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+
+    const whatsInBox = (inputs[0] as any).metafields.find((m: { key: string }) => m.key === 'whats_in_box')
+    expect(whatsInBox.value).toBe('1x rope toy 1x care card')
+  })
+
+  it('28. legacy payload (no v2 fields): applies clean with only the original three metafields', async () => {
+    const payload = newListingPayload() as Record<string, unknown>
+    delete payload.highlights
+    delete payload.specs
+    delete payload.whatsInBox
+    delete (payload.variants as Record<string, unknown>[])[0]!.imageUrl
+    const row = await seedProposal({ status: 'approved', payload })
+    const inputs: Record<string, unknown>[] = []
+    const shopify = fakeShopify({
+      productSet: async (input) => {
+        inputs.push(input as Record<string, unknown>)
+        const variants = ((input as { variants?: { sku?: string }[] }).variants ?? [{}]).map((v, i) => ({
+          id: `gid://shopify/ProductVariant/legacy-${i}`, sku: v.sku, inventoryItemId: `gid://shopify/InventoryItem/legacy-${i}`,
+        }))
+        return { productId: 'gid://shopify/Product/905', variants }
+      },
+    })
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+
+    const create = inputs[0] as any
+    const keys = create.metafields.map((m: { key: string }) => m.key)
+    expect(keys).not.toContain('highlights')
+    expect(keys).not.toContain('specs')
+    expect(keys).not.toContain('whats_in_box')
+    expect(create.variants[0].file).toBeUndefined()
   })
 })

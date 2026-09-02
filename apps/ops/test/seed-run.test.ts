@@ -64,7 +64,7 @@ describe('runSeed', () => {
 
     const result = await runSeed(client, (line) => logLines.push(line))
 
-    expect(result.skipped).toEqual({ definitions: 3, collections: 4, products: 10 })
+    expect(result.skipped).toEqual({ definitions: 7, collections: 4, products: 10 })
     expect(result.created).toEqual({ definitions: 0, collections: 0, products: 0 })
     expect(result.failures).toEqual([])
 
@@ -136,7 +136,7 @@ describe('runSeed', () => {
 
     // (iii) the run doesn't throw on partial failure — the full summary is still returned.
     expect(result.created).toEqual({ definitions: 0, collections: 0, products: 1 })
-    expect(result.skipped).toEqual({ definitions: 3, collections: 4, products: 8 })
+    expect(result.skipped).toEqual({ definitions: 7, collections: 4, products: 8 })
 
     // (ii) both the failed create and the failed publish are surfaced, not swallowed — scoped to
     // the product failures; collection publishing never fails in this fixture (see above).

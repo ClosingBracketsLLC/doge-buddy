@@ -3,6 +3,8 @@ import { auditLog, products, productVariants, supplierVariantMappings } from '@d
 import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { eq, sql } from 'drizzle-orm'
 import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts, usQuantity } from '../jobs/inventory-sync.ts'
+import { findClaimViolations } from '../sourcing/guards.ts'
+import { buildSupplierReviews } from './supplier-reviews.ts'
 import { applyProposalTransition } from './transitions.ts'
 import { proposalHandle, type ApplyProposalDeps, type ProposalRow, type ProposalShopifyOps } from './apply-shared.ts'
 
@@ -143,6 +145,8 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     },
   }
 
+  let supplierReviews: ReturnType<typeof buildSupplierReviews> = null
+
   // 1. Resolve the Shopify product exactly once, across crashes: local row first, then handle
   // probe. Deliberately BEFORE the CJ stock read below, because which of the two paths this apply
   // is on decides whether that read may happen at all — see step 2.
@@ -183,6 +187,71 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     // only on this branch: a resumed apply that finds its product already created never touches
     // Shopify inventory, so it must not pay (or fail on) a location lookup it has no use for.
     const locationId = await getLocationId(deps.shopify)
+
+    // v2 (spec 2026-09-01 §A4.3): fetch the supplier's marketplace reviews — plain code, never
+    // the agent; the worker's own fetch is the only version ever published (Decision 3). Assumed
+    // 10 CJ points from the listing's normal flow (cj-api-notes lists productComments' points
+    // cost as UNVERIFIED — the backfill live run confirms it; this worker has no PointsAllowance,
+    // it is not agent-driven). The wire shape is equally unverified: the adapter maps it
+    // all-optional and rating-less reviews are never published, so failure or zero usable
+    // reviews just means the listing proceeds without the metafield.
+    const supplierPid = payload.variants[0]!.supplierProductId
+    let reviewFetchError: string | undefined
+    try {
+      supplierReviews = buildSupplierReviews(await deps.adapter.getProductReviews(supplierPid), new Date())
+    } catch (err) {
+      reviewFetchError = err instanceof Error ? err.message : String(err)
+      supplierReviews = null
+    }
+    if (!supplierReviews) {
+      await deps
+        .alert('info', 'listing_reviews_unavailable', {
+          proposalId,
+          supplierProductId: supplierPid,
+          ...(reviewFetchError ? { error: reviewFetchError } : {}),
+        })
+        .catch(() => {})
+    }
+
+    // Plain-code claims backstop (panel 2026-09-01): Stage 6 scrubs sourcing.weekly winners, but
+    // a support-side/manual new_listing payload never passes through submit-winners — re-scan the
+    // v2 content here and DEGRADE to the pre-v2 page on a hit rather than publish an unscanned
+    // claim. Reject-never-rewrite, but scoped: the listing itself still applies.
+    const contentClaimHits = findClaimViolations(
+      ...(payload.highlights ?? []),
+      ...(payload.specs ?? []).flatMap((s) => [s.label, s.value]),
+      payload.whatsInBox,
+    )
+    if (contentClaimHits.length > 0) {
+      await deps
+        .alert('warning', 'listing_content_claims_blocked', { proposalId, terms: contentClaimHits })
+        .catch(() => {})
+    }
+    const contentSafe = contentClaimHits.length === 0
+
+    const metafields = [
+      { namespace: 'dogebuddy', key: 'ships_from', type: 'single_line_text_field', value: payload.shipsFrom },
+      { namespace: 'dogebuddy', key: 'delivery_min_days', type: 'number_integer', value: String(payload.deliveryMinDays) },
+      { namespace: 'dogebuddy', key: 'delivery_max_days', type: 'number_integer', value: String(payload.deliveryMaxDays) },
+      // v2 structured content (spec 2026-09-01 Decision 7) — JSON the storefront parses with the
+      // shared @doge-buddy/core schemas. Only written when the payload carries it (legacy payloads
+      // apply fine and render the pre-v2 page). whats_in_box is whitespace-normalized: Shopify
+      // rejects a single_line_text_field containing line breaks, and a schema-legal '\n' must
+      // degrade, not dead-letter the whole listing.
+      ...(contentSafe && payload.highlights
+        ? [{ namespace: 'dogebuddy', key: 'highlights', type: 'json', value: JSON.stringify(payload.highlights) }]
+        : []),
+      ...(contentSafe && payload.specs
+        ? [{ namespace: 'dogebuddy', key: 'specs', type: 'json', value: JSON.stringify(payload.specs) }]
+        : []),
+      ...(contentSafe && payload.whatsInBox
+        ? [{ namespace: 'dogebuddy', key: 'whats_in_box', type: 'single_line_text_field', value: payload.whatsInBox.replace(/\s+/g, ' ').trim() }]
+        : []),
+      ...(supplierReviews
+        ? [{ namespace: 'dogebuddy', key: 'supplier_reviews', type: 'json', value: JSON.stringify(supplierReviews) }]
+        : []),
+    ]
+
     // The `ProductSetInput` fields below (`handle`, `tags`, `productType`, `seo`, and the variants'
     // `inventoryItem`/`inventoryQuantities`) were LIVE-VERIFIED against the 2026-07 Admin API —
     // this is no longer a fixture guess. See the catalog-p0 ledger.
@@ -196,12 +265,10 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
         name: 'Title',
         values: payload.variants.map((v, i, all) => ({ name: all.length === 1 ? 'Default Title' : v.sku })),
       }],
-      files: payload.imageUrls.map((url) => ({ originalSource: url, contentType: 'IMAGE' })),
-      metafields: [
-        { namespace: 'dogebuddy', key: 'ships_from', type: 'single_line_text_field', value: payload.shipsFrom },
-        { namespace: 'dogebuddy', key: 'delivery_min_days', type: 'number_integer', value: String(payload.deliveryMinDays) },
-        { namespace: 'dogebuddy', key: 'delivery_max_days', type: 'number_integer', value: String(payload.deliveryMaxDays) },
-      ],
+      files: payload.imageUrls
+        .filter((url) => !payload.variants.some((v) => v.imageUrl === url))
+        .map((url) => ({ originalSource: url, contentType: 'IMAGE' })),
+      metafields,
       variants: payload.variants.map((v, i, all) => ({
         sku: v.sku,
         price: centsToUsd(v.priceCents),
@@ -215,6 +282,12 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
           { locationId, name: 'available', quantity: stockBySku.get(v.sku) ?? 0 },
         ],
         optionValues: [{ optionName: 'Title', name: all.length === 1 ? 'Default Title' : v.sku }],
+        // LIVE-VERIFIED 2026-09-01 by introspection of the 2026-07 Admin schema (Task 8 probe):
+        // ProductVariantSetInput.file is FileSetInput { originalSource, contentType:
+        // FileContentType (IMAGE), alt, ... } — this attaches the variant's image in the same
+        // productSet. Runtime behavior first exercised by the first v2 listing; if it misbehaves
+        // live, the fallback is the backfill media path run post-create (spec Decision 13).
+        ...(v.imageUrl ? { file: { originalSource: v.imageUrl, contentType: 'IMAGE' } } : {}),
       })),
     })
     productGid = created.productId

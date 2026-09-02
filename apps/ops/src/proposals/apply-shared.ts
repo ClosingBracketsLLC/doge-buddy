@@ -100,13 +100,19 @@ export interface ApplyProposalDeps {
    * The supplier-adapter surface the executors need: `subscribeProductWebhook` for `new_listing`'s
    * post-apply CJ webhook subscribe, `getDisputeOptions`/`openDispute` for `refund`'s apply
    * (Task 16), `unsubscribeProductWebhook` for `deprecate_product`'s safe post-apply CJ unsubscribe
-   * (Task 10), `getVariantStock` for `new_listing`'s per-variant US stock read (Task 4). A strict,
-   * hand-picked subset of `SupplierAdapter`'s full surface, same spirit as `ProposalShopifyOps`
-   * above.
+   * (Task 10), `getVariantStock` for `new_listing`'s per-variant US stock read (Task 4),
+   * `getProductReviews` for `new_listing`'s apply-time supplier-review fetch (product-page v2
+   * §A4.3). A strict, hand-picked subset of `SupplierAdapter`'s full surface, same spirit as
+   * `ProposalShopifyOps` above.
    */
   adapter: Pick<
     SupplierAdapter,
-    'subscribeProductWebhook' | 'unsubscribeProductWebhook' | 'getDisputeOptions' | 'openDispute' | 'getVariantStock'
+    | 'subscribeProductWebhook'
+    | 'unsubscribeProductWebhook'
+    | 'getDisputeOptions'
+    | 'openDispute'
+    | 'getVariantStock'
+    | 'getProductReviews'
   >
   /**
    * Gmail client backing `support_reply`'s apply (Task 15). `null` when Gmail isn't configured —
