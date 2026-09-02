@@ -18,7 +18,7 @@
 - NO `review`/`aggregateRating` in Product JSON-LD (Decision 6) — add a regression test, never the markup.
 - Reject-never-rewrite: content that hits `findClaimViolations` is dropped (a winner, a review), never edited.
 - Absent/unparseable metafield ⇒ the storefront section renders `null`; the page must equal today's page. Never a 500 from bad metafield JSON.
-- On an EXISTING Shopify product, never send `variants` or `files` through `productSet`/`productUpdate` (rewrites inventory, re-uploads media — `apply-new-listing.ts:125-133`). Media repair uses `productCreateMedia` + `productVariantAppendMedia` only.
+- On an EXISTING Shopify product, never send `variants` or `files` through `productSet`, and never `productUpdate`'s scalar product fields alongside uncontrolled media (rewrites inventory, re-uploads media — `apply-new-listing.ts:125-133`). Media repair uses `productUpdate(product: {id} ONLY, media: [...])` + `productVariantAppendMedia` only (2026-09-01 probe: `productCreateMedia` no longer exists on 2026-07).
 - Every NEW Shopify Admin operation gets the house comment convention: `// LIVE-VERIFIED <date> by introspection of the 2026-07 Admin schema:` when the probe in Task 8 confirmed it, else `// FIXTURE-ASSUMPTION (2026-07 API), verify on the first credential-gated run:`. Introspection alone is NOT "live-verified" for a mutation's runtime behavior — the backfill live run (owner-side, after this plan) is the first real call.
 - Code style: ops/packages are semicolon-free, single quotes; `apps/storefront` uses Shopify's prettier config (semicolons). Match the file you're in.
 - After any task in `apps/ops`: run BOTH `pnpm --filter @doge-buddy/ops test <file>` AND `pnpm --filter @doge-buddy/ops typecheck` (the test script is vitest-only; CI gates on typecheck separately). Same for other packages. Ops DB-backed tests need `pnpm db:up` (and the migrate-after-db:up gotcha applies in worktrees — run `pnpm db:migrate` if tables are missing).
@@ -1054,11 +1054,11 @@ In `apply-new-listing.ts`, inside `applyNewListing` after `catalogFields` (`:134
 and the variants map gains (after the `compareAtPrice` spread):
 
 ```ts
-        // FIXTURE-ASSUMPTION (2026-07 API), live-verify on the first v2 listing: per-variant
-        // `file` ({ originalSource, contentType }) on ProductVariantSetInput attaches the
-        // variant's image in the same productSet. If the live schema rejects it, the fallback is
-        // the backfill pair (productCreateMedia + productVariantAppendMedia) run post-create —
-        // spec 2026-09-01 Decision 13 / §Error handling.
+        // LIVE-VERIFIED 2026-09-01 by introspection of the 2026-07 Admin schema (Task 8 probe):
+        // ProductVariantSetInput.file is FileSetInput { originalSource, contentType:
+        // FileContentType (IMAGE), alt, ... } — this attaches the variant's image in the same
+        // productSet. Runtime behavior first exercised by the first v2 listing; if it misbehaves
+        // live, the fallback is the backfill media path run post-create (spec Decision 13).
         ...(v.imageUrl ? { file: { originalSource: v.imageUrl, contentType: 'IMAGE' } } : {}),
 ```
 
@@ -1098,12 +1098,12 @@ git commit -m "feat(ops): apply worker writes variant files, content metafields,
 
 **Interfaces:**
 - Consumes: `ShopifyAdminClient.graphql` + `assertNoUserErrors` (both already in the file).
-- Produces (Task 9 consumes these exact signatures):
-  - `productCreateMedia(client, productGid: string, media: { originalSource: string; alt?: string }[]): Promise<{ id: string; status: string }[]>`
+- Produces (AMENDED by the 2026-09-01 probe — ledger Ruling 3: the 2026-07 schema has NO `productCreateMedia`/`productDeleteMedia`; create+attach goes through `productUpdate(product, media)`, delete through `fileDelete(fileIds)`. Task 9 consumes these exact signatures):
+  - `productAppendMedia(client, productGid: string, media: { originalSource: string; alt?: string }[], knownMediaIds: string[]): Promise<{ id: string; status: string }[]>` — `productUpdate(product: {id}, media: [CreateMediaInput!])` selecting `product { media(first: 250) { nodes { id ... on MediaImage { status } } } }`; returns the nodes NOT in `knownMediaIds` (the just-created ones)
   - `productVariantAppendMedia(client, productGid: string, variantMedia: { variantId: string; mediaIds: string[] }[]): Promise<void>`
-  - `productVariantMediaState(client, productGid: string): Promise<{ id: string; sku?: string; mediaId: string | null }[]>`
+  - `productMediaState(client, productGid: string): Promise<{ mediaIds: string[]; variants: { id: string; sku?: string; mediaId: string | null }[] }>` — one query: product media ids + per-variant first media id
   - `mediaImageStatus(client, mediaGid: string): Promise<string>`
-  - `productDeleteMedia(client, productGid: string, mediaIds: string[]): Promise<void>` — cleanup for the backfill's give-up paths (panel: an orphaned created-but-never-appended MediaImage otherwise stacks a duplicate gallery image on every rerun)
+  - `mediaDelete(client, mediaIds: string[]): Promise<void>` — over `fileDelete(fileIds)` (FIXTURE-ASSUMPTION: MediaImage gids accepted as fileIds; best-effort caller); cleanup for the backfill's give-up paths
   - `metafieldsSet(client, metafields: { ownerId: string; namespace: string; key: string; type: string; value: string }[]): Promise<void>`
 
 - [ ] **Step 1: Run the read-only introspection probe** (house rule: introspect the LIVE 2026-07 schema for every new Shopify call). Write it to `apps/ops/scripts/media-introspect.mts` **in the MAIN checkout** (`/home/robert/Desktop/code/ClosingBrackets/doge-buddy`) — NOT the scratchpad and NOT the worktree: workspace specifiers like `@doge-buddy/shopify-admin` only resolve from inside the workspace, and `.env` lives in the main checkout. The file is temporary — never `git add` it; delete it after recording the findings.
@@ -1379,11 +1379,11 @@ git commit -m "feat(shopify-admin): media create/append/status, variant media st
 
 ```ts
 export interface BackfillV2Ops {
-  productVariantMediaState(productGid: string): Promise<{ id: string; sku?: string; mediaId: string | null }[]>
-  productCreateMedia(productGid: string, media: { originalSource: string; alt?: string }[]): Promise<{ id: string; status: string }[]>
+  productMediaState(productGid: string): Promise<{ mediaIds: string[]; variants: { id: string; sku?: string; mediaId: string | null }[] }>
+  productAppendMedia(productGid: string, media: { originalSource: string; alt?: string }[], knownMediaIds: string[]): Promise<{ id: string; status: string }[]>
   mediaImageStatus(mediaGid: string): Promise<string>
   productVariantAppendMedia(productGid: string, variantMedia: { variantId: string; mediaIds: string[] }[]): Promise<void>
-  productDeleteMedia(productGid: string, mediaIds: string[]): Promise<void>
+  mediaDelete(mediaIds: string[]): Promise<void>
   metafieldsSet(metafields: { ownerId: string; namespace: string; key: string; type: string; value: string }[]): Promise<void>
   // Definitions-ensure (panel 2026-09-01): the Storefront API only serves metafields that have a
   // definition with storefront exposure — without these the live page silently renders none of
@@ -1422,8 +1422,8 @@ it('ensures the four v2 metafield definitions exist before touching any product'
 
 it('adds media + appends to a variant that has a CJ image and no Shopify media', async () => {
   // seed: active product w/ gid, one variant w/ shopifyVariantGid + mapping (supplierProductId 'cj-p1')
-  // script: getProduct -> variant imageUrl 'https://cj/x.jpg'; productVariantMediaState -> mediaId: null
-  //         productCreateMedia -> [{ id: 'gid://shopify/MediaImage/1', status: 'UPLOADED' }]
+  // script: getProduct -> variant imageUrl 'https://cj/x.jpg'; productMediaState -> variant mediaId: null, mediaIds: []
+  //         productAppendMedia -> [{ id: 'gid://shopify/MediaImage/1', status: 'UPLOADED' }]
   //         mediaImageStatus -> 'READY'
   // assert: productVariantAppendMedia called with { variantId: <gid>, mediaIds: ['gid://shopify/MediaImage/1'] }
   //         result.variantImagesAdded === 1
@@ -1431,25 +1431,25 @@ it('adds media + appends to a variant that has a CJ image and no Shopify media',
 
 it('variants sharing one CJ image URL get ONE created media, appended to all of them', async () => {
   // 3 variants, all mapping to imageUrl 'https://cj/shared.jpg', none with Shopify media
-  // assert: productCreateMedia called ONCE; productVariantAppendMedia called with all three
+  // assert: productAppendMedia called ONCE; productVariantAppendMedia called with all three
   //         variantIds carrying the same mediaId (CJ commonly shares one variantImage across sizes)
 })
 
 it('SKIPS a variant that already has Shopify media (idempotency)', async () => {
-  // productVariantMediaState -> mediaId: 'gid://shopify/MediaImage/9'
-  // assert: productCreateMedia NEVER called for it; rerunning the pass is a no-op
+  // productMediaState -> variant mediaId: 'gid://shopify/MediaImage/9'
+  // assert: productAppendMedia NEVER called for it; rerunning the pass is a no-op
 })
 
 it('skips a variant CJ shows no image for', async () => { /* getProduct variant has no imageUrl */ })
 
 it('polls until READY and gives up on FAILED: created media DELETED, warning alert, no append', async () => {
   // mediaImageStatus scripted: 'PROCESSING', then 'FAILED'
-  // assert: productDeleteMedia called with the created mediaId; alert('warning', 'backfill_media_not_ready', ...);
+  // assert: mediaDelete called with the created mediaId; alert('warning', 'backfill_media_not_ready', ...);
   //         productVariantAppendMedia not called
 })
 
 it('append throws after a successful create: created media deleted, failure recorded, a rerun creates exactly one', async () => {
-  // first run: append throws -> productDeleteMedia called, product lands in failures
+  // first run: append throws -> mediaDelete called, product lands in failures
   // second run (fresh scripted ops, variant still without media): exactly one new create+append
 })
 
@@ -1496,7 +1496,9 @@ export async function backfillProductPageV2(deps: BackfillV2Deps, opts: { dryRun
   //    carrying storefront exposure the Storefront API serves NO value for a metafield and every
   //    new section silently renders nothing — this is the live store's only definitions path,
   //    since re-running seed-store on live would also create the SAMPLE_PRODUCTS).
-  //    dryRun -> log which of the four are missing, create nothing. Else: existing =
+  //    dryRun -> log('[dry-run] would ensure the four v2 metafield definitions exist') and make
+  //    NO calls (the zero-ops dry-run contract wins — even the list read stays live-only).
+  //    Else: existing =
   //    await deps.ops.listMetafieldDefinitions(); for each of the four v2 defs (same literals as
   //    METAFIELD_DEFINITIONS in seed/sample-data.ts) missing from existing (match namespace+key):
   //    await deps.ops.metafieldDefinitionCreate(def).
@@ -1516,12 +1518,16 @@ export async function backfillProductPageV2(deps: BackfillV2Deps, opts: { dryRun
       //    already covers.
       // 3. One CJ detail read: const detail = await deps.adapter.getProduct(pid)
       //    cjImageByVid = Map(supplierVariantId -> http(s)-only imageUrl)
-      // 4. Shopify media state: await deps.ops.productVariantMediaState(productGid) keyed by variant gid.
+      // 4. Shopify media state: const state = await deps.ops.productMediaState(productGid) —
+      //    per-variant first media id keyed by variant gid, plus the product's media ids (needed
+      //    as `knownMediaIds` for the append below).
       // 5. GROUP the pending work by unique image URL (CJ commonly shares one variantImage across
       //    size variants — per-variant creation would stack identical gallery images): pending =
       //    Map(url -> variantGids[]) over variants with a CJ image, a shopifyVariantGid, and
-      //    mediaId === null. Per (url, variantGids) entry:
-      //      const [media] = await deps.ops.productCreateMedia(productGid, [{ originalSource: url, alt: product.title }])
+      //    mediaId === null. Track a running knownMediaIds (start = state.mediaIds; add each
+      //    created id). Per (url, variantGids) entry:
+      //      const [media] = await deps.ops.productAppendMedia(productGid, [{ originalSource: url, alt: product.title }], knownMediaIds)
+      //      (no media returned -> alert + continue); knownMediaIds.push(media.id)
       //      try:
       //        poll: up to 15 attempts, sleep(2000) between, until mediaImageStatus(media.id) === 'READY'
       //          ('FAILED' or attempts exhausted -> throw new Error('media not ready'))
@@ -1530,7 +1536,7 @@ export async function backfillProductPageV2(deps: BackfillV2Deps, opts: { dryRun
       //      catch (mediaErr):
       //        // CLEANUP (panel): a created-but-never-appended MediaImage is already attached to
       //        // the product; leaving it stacks a duplicate gallery image on every rerun.
-      //        await deps.ops.productDeleteMedia(productGid, [media.id]).catch(async () => {
+      //        await deps.ops.mediaDelete([media.id]).catch(async () => {
       //          await deps.alert('warning', 'backfill_media_orphaned', { productGid, mediaId: media.id }).catch(() => {})
       //        })
       //        await deps.alert('warning', 'backfill_media_not_ready', { productGid, url, error: errMessage(mediaErr) }).catch(() => {})
@@ -1556,10 +1562,11 @@ Wire into `scripts/backfill-listings.ts` after the existing `backfillListings` c
 
 ```ts
   const v2Ops = {
-    productVariantMediaState: (gid: string) => productVariantMediaState(client, gid),
-    productCreateMedia: (gid: string, media: { originalSource: string; alt?: string }[]) => productCreateMedia(client, gid, media),
+    productMediaState: (gid: string) => productMediaState(client, gid),
+    productAppendMedia: (gid: string, media: { originalSource: string; alt?: string }[], known: string[]) => productAppendMedia(client, gid, media, known),
     mediaImageStatus: (gid: string) => mediaImageStatus(client, gid),
     productVariantAppendMedia: (gid: string, vm: { variantId: string; mediaIds: string[] }[]) => productVariantAppendMedia(client, gid, vm),
+    mediaDelete: (ids: string[]) => mediaDelete(client, ids),
     metafieldsSet: (m: Parameters<typeof metafieldsSet>[1]) => metafieldsSet(client, m),
   }
   const v2 = await backfillProductPageV2({ db, ops: v2Ops, adapter, alert, log: console.log }, { dryRun })

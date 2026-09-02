@@ -3,9 +3,17 @@ import {
   inventoryItemUpdate,
   inventoryAvailableAt,
   inventorySetQuantities,
+  listMetafieldDefinitions,
+  mediaDelete,
+  mediaImageStatus,
+  metafieldDefinitionCreate,
+  metafieldsSet,
   primaryLocationId,
+  productAppendMedia,
   productDescriptionHtml,
+  productMediaState,
   productUpdate,
+  productVariantAppendMedia,
   productVariantsByProductId,
   ShopifyAdminClient,
   ShopifyTokenManager,
@@ -14,6 +22,7 @@ import { CJSupplierAdapter, CjHttpClient, MockSupplierAdapter, type SupplierAdap
 import PgBoss from 'pg-boss'
 import { createAlerter } from '../src/alerts.ts'
 import { backfillListings, type BackfillOps } from '../src/catalog/backfill.ts'
+import { backfillProductPageV2, type BackfillV2Ops } from '../src/catalog/backfill-v2.ts'
 import { loadConfig } from '../src/config.ts'
 import type { SendOpts } from '../src/fulfillment/types.ts'
 import { loadDotEnv } from '../src/load-env.ts'
@@ -139,6 +148,34 @@ try {
     failed = true
     console.error(`backfill-listings: ${result.failures.length} failure(s) — rerun to retry (idempotent):`)
     for (const failure of result.failures) {
+      console.error(`  - ${failure}`)
+    }
+  }
+
+  const v2Ops: BackfillV2Ops = {
+    productMediaState: (gid: string) => productMediaState(client, gid),
+    productAppendMedia: (gid: string, media: { originalSource: string; alt?: string }[], known: string[]) =>
+      productAppendMedia(client, gid, media, known),
+    mediaImageStatus: (gid: string) => mediaImageStatus(client, gid),
+    productVariantAppendMedia: (gid: string, vm: { variantId: string; mediaIds: string[] }[]) => productVariantAppendMedia(client, gid, vm),
+    mediaDelete: (ids: string[]) => mediaDelete(client, ids),
+    metafieldsSet: (m: Parameters<typeof metafieldsSet>[1]) => metafieldsSet(client, m),
+    listMetafieldDefinitions: async () => {
+      const defs = await listMetafieldDefinitions(client, 'dogebuddy')
+      return defs.map((d) => ({ namespace: 'dogebuddy', key: d.key }))
+    },
+    metafieldDefinitionCreate: async (def) => {
+      await metafieldDefinitionCreate(client, def)
+    },
+  }
+  const v2 = await backfillProductPageV2({ db, ops: v2Ops, adapter, alert, log: console.log }, { dryRun })
+  console.log(
+    `v2 pass: ${v2.products} product(s), ${v2.variantImagesAdded} variant image(s), ${v2.reviewsWritten} review metafield(s), ${v2.failures.length} failure(s)`,
+  )
+  if (v2.failures.length > 0) {
+    failed = true
+    console.error(`backfill-listings v2: ${v2.failures.length} failure(s) — rerun to retry (idempotent):`)
+    for (const failure of v2.failures) {
       console.error(`  - ${failure}`)
     }
   }
