@@ -993,4 +993,46 @@ describe('proposals queue + detail pages', () => {
     expect(rendered).not.toContain('name="action" value="redraft"')
     expect(rendered).toContain('<button type="submit">Reject</button>')
   })
+
+  // Task 4b: the human gate must see highlights/specs/whatsInBox before approving — otherwise
+  // agent-authored page copy goes live sight-unseen. Render-level (no DB, no HTTP), same idiom as
+  // tests 27/28: a synthetic new_listing row proves renderNewListingPreview's new sections escape
+  // payload data exactly like every other interpolation in this file (never a live tag from
+  // payload-controlled strings).
+  it('29. render-level: a new_listing payload with highlights/specs/whatsInBox renders all three, escaped', () => {
+    // status: 'rejected' (not 'pending') so renderDecisionForms's raw-JSON edit-payload textarea
+    // is absent — it would otherwise also contain the (escaped) payload JSON and mask whether the
+    // preview section itself renders anything.
+    const row = syntheticProposalRow({
+      type: 'new_listing',
+      status: 'rejected',
+      payload: {
+        ...VALID_NEW_LISTING_PAYLOAD,
+        highlights: ['Durable rope core', '<b>bold</b> bullet', 'Non-slip grip'],
+        specs: [{ label: 'Material', value: 'Cotton & steel' }],
+        whatsInBox: '1x rope toy',
+      },
+    })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).not.toContain('name="payload"') // sanity: the JSON edit-textarea isn't present to skew the assertions below
+
+    expect(rendered).toContain('Durable rope core')
+    expect(rendered).toContain('Material')
+    expect(rendered).toContain('Cotton &amp; steel')
+    expect(rendered).toContain('1x rope toy')
+    expect(rendered).toContain('&lt;b&gt;bold&lt;/b&gt;')
+    expect(rendered).not.toContain('<b>bold</b>')
+  })
+
+  it('30. render-level: a legacy new_listing payload without highlights/specs/whatsInBox renders unchanged (no empty headings)', () => {
+    const row = syntheticProposalRow({ type: 'new_listing', status: 'rejected', payload: VALID_NEW_LISTING_PAYLOAD })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).not.toContain('<h3>Highlights</h3>')
+    expect(rendered).not.toContain('<h3>Specs</h3>')
+    expect(rendered).not.toContain("What's in the box")
+  })
 })

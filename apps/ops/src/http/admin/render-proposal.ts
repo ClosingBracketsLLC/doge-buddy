@@ -62,6 +62,15 @@ function renderDescriptionSection(descriptionHtml: string): RawHtml {
  * zod-parsed — a proposal that made it into the DB already passed PAYLOAD_SCHEMAS at submit time,
  * and this renderer's job is display, not re-validation (descriptionHtml is the one exception,
  * per renderDescriptionSection's own doc comment).
+ *
+ * Task 4b: `highlights`/`specs`/`whatsInBox` (all optional on `NewListingPayload`, added for the
+ * v2 product page) render after the description — the approver is the only human gate before
+ * agent-authored page copy goes live, so it must see this text too, not just title/category/
+ * images/prices/description. Every value goes through html``'s default escaping like everything
+ * else in this file (never `raw()` — that's reserved for `renderDescriptionSection`'s
+ * allowlist-revalidated path). Each section is conditional on the field being present and
+ * non-empty so a legacy payload without them renders exactly as before — no empty `<h3>` or
+ * dangling "What's in the box:" line.
  */
 function renderNewListingPreview(payload: NewListingPayload): RawHtml {
   return html`<section>
@@ -88,6 +97,13 @@ function renderNewListingPreview(payload: NewListingPayload): RawHtml {
       </tbody>
     </table></div>
     ${renderDescriptionSection(payload.descriptionHtml)}
+    ${payload.highlights?.length ? html`<h3>Highlights</h3><ul>${payload.highlights.map((h) => html`<li>${h}</li>`)}</ul>` : html``}
+    ${payload.specs?.length
+      ? html`<h3>Specs</h3><div class="table-wrap"><table class="rows"><tbody>${payload.specs.map(
+          (s) => html`<tr><th>${s.label}</th><td>${s.value}</td></tr>`,
+        )}</tbody></table></div>`
+      : html``}
+    ${payload.whatsInBox ? html`<p><strong>What's in the box:</strong> ${payload.whatsInBox}</p>` : html``}
   </section>`
 }
 
