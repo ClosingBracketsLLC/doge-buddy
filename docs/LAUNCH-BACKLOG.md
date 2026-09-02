@@ -85,6 +85,18 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
   `inventory.sync` should recognise that specific error, push quantity 0 (so the storefront says
   Sold out at once), and submit a `deprecate_product` proposal (the manual `deprecate-product`
   script does this by hand meanwhile).
+
+- [ ] **Apply-time `descriptionHtml` allowlist re-check for a non-sourcing `new_listing` path.**
+  Whole-branch review (Finding 4, 2026-09-01): `validateDescriptionHtml` runs at Stage 6
+  (`submit-winners.ts`) and again at the admin preview render (`render-proposal.ts`'s
+  `renderDescriptionSection`) — the same v2 content backstop reasoning `apply-new-listing.ts`
+  already applies to `findClaimViolations` (claims re-scanned at apply time because a
+  support-side/admin-edited `new_listing` payload never passes through Stage 6). But nothing
+  re-checks the HTML allowlist at apply time itself: today every `new_listing` proposal is still
+  Stage-6-sourced, so this is latent, not live. Wire `validateDescriptionHtml` into
+  `applyNewListing` (degrade — drop `descriptionHtml` back to plain-text-wrapped or reject the
+  listing's HTML, never publish unvalidated markup) the day a non-sourcing `new_listing` path
+  (support tooling, a manual admin submit) first ships.
  — before the official launch
 
 6. **Product page: image gallery** — *Claude*, small. **ABSORBED 2026-09-01 into the Product Page

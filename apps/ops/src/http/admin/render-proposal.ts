@@ -71,6 +71,17 @@ function renderDescriptionSection(descriptionHtml: string): RawHtml {
  * allowlist-revalidated path). Each section is conditional on the field being present and
  * non-empty so a legacy payload without them renders exactly as before — no empty `<h3>` or
  * dangling "What's in the box:" line.
+ *
+ * Whole-branch review (Finding 3): the variants table also gets an "Image" column — before this,
+ * `variants[].imageUrl` (v2's per-variant image, applied straight through to Shopify by
+ * `apply-new-listing.ts`'s `productSet` variant `file`) had no surface here at all. On the normal
+ * Stage-6 sourcing path that image already survived a scrape + prompt pipeline, but a non-Stage-6
+ * path (a support-side or admin-edited `new_listing` payload) can carry an operator-typed
+ * `imageUrl` the approver never actually saw before clicking Approve — same blind-spot shape as
+ * `highlights`/`specs`/`whatsInBox` above, just one payload field later. Same idiom as the
+ * top-of-section `imageUrls` gallery (a plain `<img src="…">`, escaped like any other
+ * interpolation); a variant with no `imageUrl` renders nothing extra in that cell — no broken
+ * `<img>`, no empty alt text.
  */
 function renderNewListingPreview(payload: NewListingPayload): RawHtml {
   return html`<section>
@@ -84,6 +95,7 @@ function renderNewListingPreview(payload: NewListingPayload): RawHtml {
           <th>SKU</th>
           <th>Price</th>
           <th>Supplier cost</th>
+          <th>Image</th>
         </tr>
       </thead>
       <tbody>
@@ -92,6 +104,7 @@ function renderNewListingPreview(payload: NewListingPayload): RawHtml {
             <td data-label="SKU">${v.sku}</td>
             <td data-label="Price">${formatCents(v.priceCents)}</td>
             <td data-label="Supplier cost">${formatCents(v.supplierCostCents)}</td>
+            <td data-label="Image">${v.imageUrl ? html`<img src="${v.imageUrl}">` : html``}</td>
           </tr>`,
         )}
       </tbody>

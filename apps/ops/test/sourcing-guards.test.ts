@@ -13,6 +13,13 @@ describe('guards', () => {
     )
     expect(findClaimViolations('Durable rope toy for strong chewers... just kidding, tug rope')).toEqual([])
   })
+  it('findClaimViolations catches a trailing-space CLAIM_TERM ("cure ") when the bare word ends the FINAL argument — the trailing-space evasion (whole-branch review)', () => {
+    // 'cure ' only matches with something after it; the last argument's own trailing edge is the
+    // end of the combined string, so without a sentinel appended after the join, text ending in a
+    // bare 'cure' evaded the scan entirely.
+    expect(findClaimViolations('the ultimate boredom cure')).toContain('cure ')
+    expect(findClaimViolations('a', 'b', 'the ultimate boredom cure')).toContain('cure ')
+  })
   it('htmlToText strips tags for scanning', () => {
     expect(htmlToText('<p>anxiety <strong>relief</strong></p>')).toBe('anxiety relief')
   })

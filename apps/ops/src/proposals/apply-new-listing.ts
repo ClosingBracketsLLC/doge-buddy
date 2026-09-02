@@ -229,6 +229,13 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     }
     const contentSafe = contentClaimHits.length === 0
 
+    // Normalized once so the gate below and the metafield value can never disagree: a
+    // whitespace-only whatsInBox (' ') is schema-legal and payload-truthy, but normalizes to ''
+    // — a blank single_line_text_field plausibly draws a Shopify userError that would fail the
+    // WHOLE create. Gate on the normalized value being non-empty (degrade, never dead-letter),
+    // same reasoning as the highlights/specs claims backstop just above.
+    const normalizedWhatsInBox = payload.whatsInBox?.replace(/\s+/g, ' ').trim() ?? ''
+
     const metafields = [
       { namespace: 'dogebuddy', key: 'ships_from', type: 'single_line_text_field', value: payload.shipsFrom },
       { namespace: 'dogebuddy', key: 'delivery_min_days', type: 'number_integer', value: String(payload.deliveryMinDays) },
@@ -244,8 +251,8 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
       ...(contentSafe && payload.specs
         ? [{ namespace: 'dogebuddy', key: 'specs', type: 'json', value: JSON.stringify(payload.specs) }]
         : []),
-      ...(contentSafe && payload.whatsInBox
-        ? [{ namespace: 'dogebuddy', key: 'whats_in_box', type: 'single_line_text_field', value: payload.whatsInBox.replace(/\s+/g, ' ').trim() }]
+      ...(contentSafe && normalizedWhatsInBox
+        ? [{ namespace: 'dogebuddy', key: 'whats_in_box', type: 'single_line_text_field', value: normalizedWhatsInBox }]
         : []),
       ...(supplierReviews
         ? [{ namespace: 'dogebuddy', key: 'supplier_reviews', type: 'json', value: JSON.stringify(supplierReviews) }]

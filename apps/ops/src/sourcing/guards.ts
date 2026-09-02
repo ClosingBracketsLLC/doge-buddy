@@ -29,12 +29,22 @@ export function matchExcludedCategory(...texts: (string | null | undefined)[]): 
   return null
 }
 
-/** Case-insensitive scan for disallowed claim phrases. Returns every matched term (empty = clean). */
+/**
+ * Case-insensitive scan for disallowed claim phrases. Returns every matched term (empty = clean).
+ *
+ * Trailing space appended AFTER the join (not per-arg): several `CLAIM_TERMS` entries are
+ * trailing-space forms (`'cure '`, `'treats '`) so they don't also fire on innocent words that
+ * merely start with them (e.g. 'curettage', 'treatsome'). Without a sentinel, only an argument
+ * that happens to land in the MIDDLE of the joined text can ever satisfy that trailing space —
+ * the final argument's own trailing edge is the end of the whole string, so text ending in a bare
+ * 'cure'/'treats' (e.g. a `whatsInBox` of "the ultimate boredom cure") matched nothing and evaded
+ * every call site (Stage 6's scrub in submit-winners.ts, the apply-worker backstop in
+ * apply-new-listing.ts). Every call site is hardened by fixing it here once, rather than requiring
+ * each caller to remember the sentinel — the one caller that already added its own belt-and-braces
+ * sentinel (`supplier-reviews.ts`'s `` `${full} ` ``) stays harmless now that this is redundant.
+ */
 export function findClaimViolations(...texts: (string | null | undefined)[]): string[] {
-  const combinedText = texts
-    .filter((t) => t != null)
-    .join(' ')
-    .toLowerCase()
+  const combinedText = `${texts.filter((t) => t != null).join(' ')} `.toLowerCase()
 
   const violations: string[] = []
   for (const term of CLAIM_TERMS) {

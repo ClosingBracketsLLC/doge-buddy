@@ -429,6 +429,18 @@ describe('validateAndSubmitWinners', () => {
     }
   })
 
+  it('step 5 — claims_scrubbed: whatsInBox ENDING in a bare CLAIM_TERM word (no trailing space) is still caught — the trailing-space evasion (whole-branch review)', async () => {
+    // whatsInBox rides last among contentStrings, so a payload ending the whole scanned text in
+    // the bare word 'cure' (no space after it) is exactly the evasion the guards.ts fix closes.
+    // 'chew' is itself an EXCLUDED_CATEGORY_TERM, so the phrase below deliberately avoids it.
+    const deps = makeDeps()
+    const outcomes = await validateAndSubmitWinners(
+      deps,
+      runFor([winnerFor('pid-1', { payload: { whatsInBox: 'the ultimate boredom cure' } })]),
+    )
+    expect(outcomes[0]!.reason).toBe('claims_scrubbed')
+  })
+
   it('step 7 — sourcing_winner_unverifiable: live cost drifts beyond COST_TOLERANCE_BPS', async () => {
     const alert = vi.fn(async () => {})
     const adapter = makeAdapter({

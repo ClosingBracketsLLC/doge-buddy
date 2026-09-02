@@ -1035,4 +1035,33 @@ describe('proposals queue + detail pages', () => {
     expect(rendered).not.toContain('<h3>Specs</h3>')
     expect(rendered).not.toContain("What's in the box")
   })
+
+  // Whole-branch review (Finding 3): a variant image reaching the live page unseen on a
+  // non-Stage-6 (admin-edited) path is the same blind-spot shape as 29/30 above, one field later
+  // — the variants table showed sku/price/cost but never `variants[].imageUrl`.
+  it('31. render-level: a new_listing payload variant WITH imageUrl shows it in the variants table', () => {
+    const row = syntheticProposalRow({
+      type: 'new_listing',
+      status: 'rejected',
+      payload: {
+        ...VALID_NEW_LISTING_PAYLOAD,
+        variants: [{ ...VALID_NEW_LISTING_PAYLOAD.variants[0], imageUrl: 'https://cdn.example.com/variant-1.jpg' }],
+      },
+    })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).toContain('<img src="https://cdn.example.com/variant-1.jpg">')
+  })
+
+  it('32. render-level: a new_listing payload variant WITHOUT imageUrl stays clean (no broken <img>, no empty src)', () => {
+    const row = syntheticProposalRow({ type: 'new_listing', status: 'rejected', payload: VALID_NEW_LISTING_PAYLOAD })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).not.toContain('<img src="">')
+    // sanity: the top-of-section imageUrls gallery still renders its one <img> — this assertion
+    // is specifically about the variants-table cell, not the gallery above it
+    expect((rendered.match(/<img /g) ?? []).length).toBe(1)
+  })
 })

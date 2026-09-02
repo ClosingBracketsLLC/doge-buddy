@@ -1389,6 +1389,41 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     )
   })
 
+  it('26b. claims backstop: a stored whatsInBox ENDING in a bare CLAIM_TERM word (no trailing space) is still caught — the trailing-space evasion (whole-branch review)', async () => {
+    // whatsInBox rides last in findClaimViolations' arg list here too (see apply-new-listing.ts's
+    // contentClaimHits call) — this is the same evasion closed in guards.ts, exercised through the
+    // apply-worker backstop rather than Stage 6.
+    const payload = newListingPayload()
+    payload.whatsInBox = 'the ultimate boredom cure'
+    const row = await seedProposal({ status: 'approved', payload })
+    const inputs: Record<string, unknown>[] = []
+    const shopify = fakeShopify({
+      productSet: async (input) => {
+        inputs.push(input as Record<string, unknown>)
+        const variants = ((input as { variants?: { sku?: string }[] }).variants ?? [{}]).map((v, i) => ({
+          id: `gid://shopify/ProductVariant/cure-${i}`, sku: v.sku, inventoryItemId: `gid://shopify/InventoryItem/cure-${i}`,
+        }))
+        return { productId: 'gid://shopify/Product/906', variants }
+      },
+    })
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+
+    const keys = (inputs[0] as any).metafields.map((m: { key: string }) => m.key)
+    expect(keys).not.toContain('highlights')
+    expect(keys).not.toContain('specs')
+    expect(keys).not.toContain('whats_in_box')
+    expect(alert).toHaveBeenCalledWith(
+      'warning', 'listing_content_claims_blocked', expect.objectContaining({ terms: ['cure '] }),
+    )
+  })
+
   it('27. whatsInBox with an embedded newline is normalized to one line (single_line_text_field must not fail the create)', async () => {
     const payload = newListingPayload()
     payload.whatsInBox = '1x rope toy\n1x care card'
@@ -1414,6 +1449,35 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
 
     const whatsInBox = (inputs[0] as any).metafields.find((m: { key: string }) => m.key === 'whats_in_box')
     expect(whatsInBox.value).toBe('1x rope toy 1x care card')
+  })
+
+  it('27b. whitespace-only whatsInBox degrades (no whats_in_box metafield) instead of dead-lettering the create with a blank single_line_text_field', async () => {
+    const payload = newListingPayload()
+    payload.whatsInBox = '   '
+    const row = await seedProposal({ status: 'approved', payload })
+    const inputs: Record<string, unknown>[] = []
+    const shopify = fakeShopify({
+      productSet: async (input) => {
+        inputs.push(input as Record<string, unknown>)
+        const variants = ((input as { variants?: { sku?: string }[] }).variants ?? [{}]).map((v, i) => ({
+          id: `gid://shopify/ProductVariant/blank-${i}`, sku: v.sku, inventoryItemId: `gid://shopify/InventoryItem/blank-${i}`,
+        }))
+        return { productId: 'gid://shopify/Product/907', variants }
+      },
+    })
+    const alert = vi.fn(async () => {})
+    const adapter = fakeAdapter()
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    expect((await loadProposal(row.id))!.status).toBe('applied')
+
+    const keys = (inputs[0] as any).metafields.map((m: { key: string }) => m.key)
+    expect(keys).not.toContain('whats_in_box')
+    // sibling v2 metafields are unaffected — only whats_in_box degrades
+    expect(keys).toEqual(expect.arrayContaining(['highlights', 'specs']))
   })
 
   it('28. legacy payload (no v2 fields): applies clean with only the original three metafields', async () => {
