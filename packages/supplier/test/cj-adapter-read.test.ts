@@ -195,15 +195,15 @@ describe('getProductReviews rating edge cases', () => {
     expect(reviews[0]!.rating).toBe(1)
     expect(reviews[1]!.rating).toBe(5)
   })
-  it('defaults rating to 5 when score is non-numeric', async () => {
-    const { adapter } = await makeAdapter([{ score: 'not-a-number' }])
+  it('leaves rating undefined (never defaults to 5) when score is non-numeric', async () => {
+    const { adapter } = await makeAdapter([{ score: 'not-a-number', comment: 'meh' }])
     const reviews = await adapter.getProductReviews('test')
-    expect(reviews[0]!.rating).toBe(5)
+    expect(reviews[0]!.rating).toBeUndefined()
   })
-  it('defaults rating to 5 when score is missing', async () => {
+  it('leaves rating undefined (never defaults to 5) when score is missing', async () => {
     const { adapter } = await makeAdapter([{ comment: 'good' }])
     const reviews = await adapter.getProductReviews('test')
-    expect(reviews[0]!.rating).toBe(5)
+    expect(reviews[0]!.rating).toBeUndefined()
   })
 })
 

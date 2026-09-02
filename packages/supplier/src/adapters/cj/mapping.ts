@@ -106,8 +106,10 @@ export function mapProductDetail(detail: CjProductDetail): SupplierProductDetail
 /**
  * CJ's product/productComments response wire shape is UNVERIFIED (used under CJ_CONTRACT gating).
  * Defensive mapping accepts multiple field name variations for score, content, and date;
- * clamps rating to 1-5 with default 5 when absent; defaults content to '' and reviewDate/countryCode
- * to undefined.
+ * clamps rating to 1-5 when a score field parses to a finite number, and otherwise leaves
+ * `rating` UNDEFINED — never defaulted. Fail-safe stance (panel 2026-09-01): if CJ's real score
+ * field has a third name, a review must degrade to unrated (dropped downstream), never to a
+ * fabricated 5-star rating. Defaults content to '' and reviewDate/countryCode to undefined.
  */
 interface CjProductComment {
   score?: number | string
@@ -123,16 +125,16 @@ interface CjProductComment {
 export function mapProductReview(comment: CjProductComment): SupplierProductReview {
   const rating = (() => {
     const score = comment.score ?? comment.commentScore
-    if (score === undefined || score === null) return 5
+    if (score === undefined || score === null) return undefined
     const n = Number(score)
-    if (!Number.isFinite(n)) return 5
+    if (!Number.isFinite(n)) return undefined
     return Math.max(1, Math.min(5, n))
   })()
 
   const content = comment.comment ?? comment.commentText ?? comment.content ?? ''
 
   return {
-    rating,
+    ...(rating !== undefined ? { rating } : {}),
     content,
     reviewDate: comment.commentDate ?? comment.createDate,
     countryCode: comment.countryCode,

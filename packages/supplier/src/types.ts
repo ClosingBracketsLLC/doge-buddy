@@ -31,7 +31,7 @@ export interface SupplierVariantDetail {
 }
 
 export interface SupplierProductReview {
-  rating: number // 1-5
+  rating?: number // 1-5; absent when the wire carried no parsable score — NEVER default it (fabricated stars)
   content: string
   reviewDate?: string
   countryCode?: string
