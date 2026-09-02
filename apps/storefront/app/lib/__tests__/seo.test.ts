@@ -16,3 +16,17 @@ it('builds Organization and WebSite JSON-LD', () => {
   expect((organizationJsonLd({name: 'Doge Buddy', url: 'https://x', logoUrl: 'https://x/l.svg'}) as any)['@type']).toBe('Organization');
   expect((webSiteJsonLd({name: 'Doge Buddy', url: 'https://x'}) as any)['@type']).toBe('WebSite');
 });
+
+it('productJsonLd emits EXACTLY the known key set — the set is closed by Decision 6 (no review/aggregateRating, ever)', () => {
+  const jsonLd = productJsonLd({
+    name: 'Rope Toy',
+    description: 'A rope toy',
+    url: 'https://dogebuddy.com/products/rope-toy',
+    price: '19.99',
+    currencyCode: 'USD',
+    available: true,
+  }) as Record<string, unknown>;
+  // A not.toHaveProperty('review') assert would pass trivially even after someone adds a
+  // conditional reviews parameter — pinning the full key set is what actually guards Decision 6.
+  expect(Object.keys(jsonLd).sort()).toEqual(['@context', '@type', 'description', 'name', 'offers', 'url']);
+});
