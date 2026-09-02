@@ -1,3 +1,4 @@
+import {useState} from 'react';
 import {Link, useNavigate} from 'react-router';
 import {type MappedProductOptions} from '@shopify/hydrogen';
 import type {
@@ -17,6 +18,7 @@ export function ProductForm({
 }) {
   const navigate = useNavigate();
   const {open} = useAside();
+  const [quantity, setQuantity] = useState(1);
   return (
     <div className="product-form">
       {productOptions.map((option) => {
@@ -101,6 +103,34 @@ export function ProductForm({
           </div>
         );
       })}
+      <div className="mb-4 flex items-center gap-3">
+        <span id="quantity-label" className="text-sm font-medium text-ink">
+          Quantity
+        </span>
+        <div className="flex items-center rounded-2xl border-2 border-ink bg-surface-raised">
+          <button
+            type="button"
+            aria-label="Decrease quantity"
+            className="px-3 py-1 text-lg text-ink disabled:opacity-40"
+            disabled={quantity <= 1}
+            onClick={() => setQuantity((current) => Math.max(1, current - 1))}
+          >
+            −
+          </button>
+          <span aria-labelledby="quantity-label" className="min-w-8 text-center font-medium text-ink">
+            {quantity}
+          </span>
+          <button
+            type="button"
+            aria-label="Increase quantity"
+            className="px-3 py-1 text-lg text-ink disabled:opacity-40"
+            disabled={quantity >= 99}
+            onClick={() => setQuantity((current) => Math.min(99, current + 1))}
+          >
+            +
+          </button>
+        </div>
+      </div>
       <AddToCartButton
         className="rounded-2xl border-2 border-ink bg-cta px-8 py-3 font-display text-lg text-white shadow-[4px_4px_0_var(--color-ink)] transition-transform hover:-translate-y-0.5 disabled:opacity-50 disabled:shadow-none motion-reduce:transition-none"
         disabled={!selectedVariant || !selectedVariant.availableForSale}
@@ -112,7 +142,7 @@ export function ProductForm({
             ? [
                 {
                   merchandiseId: selectedVariant.id,
-                  quantity: 1,
+                  quantity,
                   selectedVariant,
                 },
               ]
