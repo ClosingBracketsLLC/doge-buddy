@@ -29,8 +29,8 @@ export function SupplierReviews({data}: {data: SupplierReviewsData | null}) {
       <h2 className="font-display text-2xl text-ink">Marketplace reviews</h2>
       <p className="mt-1 text-sm text-ink/70">{DISCLOSURE}</p>
       <p className="mt-2 font-medium text-ink">
-        ★ {data.average.toFixed(1)} · {data.count.toLocaleString('en-US')} marketplace ratings ·
-        as of {asOf}
+        ★ {data.average.toFixed(1)} · {data.count.toLocaleString('en-US')} marketplace{' '}
+        {data.count === 1 ? 'rating' : 'ratings'} · as of {asOf}
       </p>
       <ul className="mt-4 grid gap-3 md:grid-cols-2">
         {data.reviews.map((review, index) => (

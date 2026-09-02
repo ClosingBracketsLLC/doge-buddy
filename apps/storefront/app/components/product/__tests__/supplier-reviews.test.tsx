@@ -31,6 +31,15 @@ it('renders the aggregate line with formatted count and as-of date', () => {
   expect(screen.getByText('★ 4.6 · 1,238 marketplace ratings · as of 2026-09-01')).toBeInTheDocument();
 });
 
+it('uses the singular "rating" for a count of one (live: several products carry exactly one)', () => {
+  render(
+    <SupplierReviews
+      data={{...data, average: 5, count: 1, reviews: [data.reviews[0]!]}}
+    />,
+  );
+  expect(screen.getByText('★ 5.0 · 1 marketplace rating · as of 2026-09-01')).toBeInTheDocument();
+});
+
 it('renders a card per review with stars, text, and date/country when present', () => {
   render(<SupplierReviews data={data} />);
   expect(screen.getAllByRole('listitem')).toHaveLength(2);
