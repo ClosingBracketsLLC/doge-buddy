@@ -111,3 +111,53 @@ describe('ProposalPayloadSchema union', () => {
     expect(ProposalPayloadSchema.safeParse({ type: 'bogus' }).success).toBe(false)
   })
 })
+
+describe('NewListingPayloadSchema v2 fields', () => {
+  const base = {
+    type: 'new_listing' as const,
+    title: 'Rope Toy',
+    descriptionHtml: '<p>A rope toy.</p>',
+    categoryTag: 'toys' as const,
+    imageUrls: ['https://cdn.example.com/a.jpg'],
+    shipsFrom: 'US' as const,
+    deliveryMinDays: 3,
+    deliveryMaxDays: 7,
+    variants: [
+      {
+        sku: 'ROPE-1',
+        priceCents: 1999,
+        supplierCostCents: 500,
+        supplier: 'cj' as const,
+        supplierProductId: 'pid-1',
+        supplierVariantId: 'vid-1',
+      },
+    ],
+  }
+
+  it('still parses a legacy payload without any v2 field (stored pre-v2 proposals must keep applying)', () => {
+    expect(NewListingPayloadSchema.safeParse(base).success).toBe(true)
+  })
+
+  it('parses a full v2 payload', () => {
+    const parsed = NewListingPayloadSchema.safeParse({
+      ...base,
+      highlights: ['Durable rope core', 'Machine washable', 'Non-slip grip'],
+      specs: [{ label: 'Material', value: 'Cotton' }],
+      whatsInBox: '1x rope toy',
+      variants: [{ ...base.variants[0], imageUrl: 'https://cdn.example.com/v1.jpg' }],
+    })
+    expect(parsed.success).toBe(true)
+  })
+
+  it('rejects a non-http(s) variant imageUrl', () => {
+    const parsed = NewListingPayloadSchema.safeParse({
+      ...base,
+      variants: [{ ...base.variants[0], imageUrl: 'ftp://cdn.example.com/v1.jpg' }],
+    })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('rejects whatsInBox over 200 chars', () => {
+    expect(NewListingPayloadSchema.safeParse({ ...base, whatsInBox: 'x'.repeat(201) }).success).toBe(false)
+  })
+})

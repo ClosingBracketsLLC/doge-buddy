@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ProductHighlightsSchema, ProductSpecsSchema } from './content.ts'
 
 export const PROPOSAL_TYPES = ['new_listing', 'support_reply', 'refund', 'deprecate_product'] as const
 export type ProposalType = (typeof PROPOSAL_TYPES)[number]
@@ -19,6 +20,13 @@ const listingVariant = z.object({
   supplier: z.enum(SUPPLIER_KEYS),
   supplierProductId: z.string().min(1),
   supplierVariantId: z.string().min(1),
+  // v2 (spec 2026-09-01 Decision 1): the variant's own image. The agent proposes it from CJ's
+  // `variantImage`; Stage 6 OVERWRITES it with the live CJ value during re-verification — same
+  // trust pattern as supplierCostCents. Absent = the variant has no dedicated image.
+  imageUrl: z
+    .url()
+    .refine((u) => u.startsWith('http://') || u.startsWith('https://'), 'imageUrl must be http(s)')
+    .optional(),
 })
 
 export const NewListingPayloadSchema = z
@@ -38,6 +46,13 @@ export const NewListingPayloadSchema = z
     deliveryMinDays: z.number().int().min(1),
     deliveryMaxDays: z.number().int().min(1),
     variants: z.array(listingVariant).min(1),
+    // v2 structured content (spec 2026-09-01 §A1). Optional at the SCHEMA level so stored pre-v2
+    // proposals and support-side payloads still parse and apply (rendering the pre-v2 page); the
+    // sourcing prompt REQUIRES highlights+specs, and Stage 6 drops `sourcing.weekly` winners
+    // without them (`sourcing_winner_missing_content`).
+    highlights: ProductHighlightsSchema.optional(),
+    specs: ProductSpecsSchema.optional(),
+    whatsInBox: z.string().max(200).optional(),
   })
   .refine((p) => p.deliveryMinDays <= p.deliveryMaxDays, {
     message: 'deliveryMinDays must be <= deliveryMaxDays',
