@@ -49,6 +49,7 @@ export function TrustBadges() {
         Secure checkout by Shopify
       </li>
       <li className={badgeClass}>
+        <BadgeIcon path={ICONS.check} />
         <span>
           All sales final —{' '}
           <Link to="/policies/returns" className="text-info underline">

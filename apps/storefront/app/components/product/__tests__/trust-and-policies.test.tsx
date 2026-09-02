@@ -5,11 +5,12 @@ import {ShippingReturnsAccordion} from '../ShippingReturnsAccordion';
 
 describe('TrustBadges', () => {
   it('renders the four badges (Decision 11)', () => {
-    render(<TrustBadges />);
+    const {container} = render(<TrustBadges />);
     expect(screen.getByText('US warehouses')).toBeInTheDocument();
     expect(screen.getByText('3–7 day delivery')).toBeInTheDocument();
     expect(screen.getByText('Secure checkout by Shopify')).toBeInTheDocument();
     expect(screen.getByText(/All sales final/)).toBeInTheDocument();
+    expect(container.querySelectorAll('svg')).toHaveLength(4);
   });
   it('links the honesty badge to the real returns policy route', () => {
     render(<TrustBadges />);
