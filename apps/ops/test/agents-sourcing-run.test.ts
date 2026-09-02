@@ -112,6 +112,24 @@ describe('runSourcingAgent (fake SDK stream)', () => {
     expect(capturedPrompt).toContain('NOT evidence of US stock')
   })
 
+  it('prompt demands v2 content: >=3 images, per-variant imageUrl, highlights, specs, and names them in the HARD RULE', async () => {
+    const runId = await claimRow('v2-content')
+    let capturedPrompt: string | undefined
+    async function* stream(): AsyncGenerator<Record<string, unknown>> {
+      yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
+    }
+    const d = deps((args) => { capturedPrompt = args.prompt; return stream() })
+
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: trendSignals() })
+
+    expect(capturedPrompt).toContain('LEAST 3 http(s) imageUrls')
+    expect(capturedPrompt).toContain('variantImage')
+    expect(capturedPrompt).toContain('3-5 factual `highlights` bullets')
+    expect(capturedPrompt).toContain('`specs` table')
+    expect(capturedPrompt).toContain('whatsInBox')
+    expect(capturedPrompt).toContain('not in highlights, specs, or whatsInBox')
+  })
+
   it('knobs drive the prompt, the budget and the output schema cap (defaults when no knobs passed)', async () => {
     const runId = await claimRow('knobs')
     let capturedPrompt: string | undefined
