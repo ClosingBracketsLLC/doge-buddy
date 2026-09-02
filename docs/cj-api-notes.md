@@ -117,5 +117,11 @@ Both dispute endpoints require an order that has actually been **paid** — an u
 - `lastMileTrackNumber` never appeared on the observed sandbox order; presumed carrier-dependent.
 - `openDispute` / `getDispute` request bodies — not exercised by the contract suite.
 - STOCK / PRODUCT webhook event shapes (never subscribed or observed).
-- `product/productComments` request/response shape + points cost — contract case exists, run live in Phase 5 Tier 2.
+- `product/productComments` **response shape VERIFIED LIVE 2026-09-02** (product-page-v2 backfill run,
+  23 products): the defensive mapper (`mapProductReview` — `score|commentScore`,
+  `comment|commentText|content`, `commentDate|createDate`) parsed real rated reviews on 9 of 23
+  products; the other 14 genuinely carried no usable/rated reviews (info-alert degrade, by design).
+  Observed: reviews come back in the buyer's own language (Spanish seen live). **Points cost still
+  unverified** — the adapter charges 10/call locally; confirm against the CJ dashboard's spend for a
+  known call count when convenient.
 - `webhook/product/subscribe` endpoint/body/points — could be account-level via `/webhook/set`; verify in Phase 5 Tier 2.
