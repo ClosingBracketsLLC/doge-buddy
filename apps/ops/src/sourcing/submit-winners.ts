@@ -100,6 +100,18 @@ async function processWinner(
   }
   let payload: NewListingPayload = parsed.data
 
+  // Step 2b: v2 content gate (spec 2026-09-01 §A3). Every winner in THIS pipeline is a
+  // `sourcing.weekly` submission (see the hardcoded sourceWorkflow at the submit call below), and
+  // the prompt demands highlights + specs — a winner without them is an agent that ignored the
+  // task, not a legacy payload (legacy/support payloads enter via submitProposal directly and
+  // never pass through here; they parse and apply fine without content, rendering the pre-v2 page).
+  if (!payload.highlights || !payload.specs) {
+    return drop('sourcing_winner_missing_content', {
+      hasHighlights: Boolean(payload.highlights),
+      hasSpecs: Boolean(payload.specs),
+    })
+  }
+
   // Step 3: descriptionHtml allowlist. Agent-authored HTML later renders in the storefront, so
   // it must pass the hardcoded tag/attribute allowlist — reject on violation, never rewrite.
   const htmlIssue = validateDescriptionHtml(payload.descriptionHtml)
@@ -107,18 +119,33 @@ async function processWinner(
     return drop('sourcing_winner_bad_html', { reason: htmlIssue })
   }
 
+  // v2: the structured-content strings ride through BOTH text gates below exactly like
+  // title/description (spec 2026-09-01 §A3). Labels are scanned as well as values — a claim
+  // smuggled into a label is still our publication (small deliberate widening of the spec's
+  // "values" wording, same reject stance).
+  const contentStrings = [
+    ...(payload.highlights ?? []),
+    ...(payload.specs ?? []).flatMap((s) => [s.label, s.value]),
+    payload.whatsInBox,
+  ]
+
   // Step 4: category exclusion re-check over the agent's title + description text + the
   // harvested categoryName recorded for this pid at harvest time (the payload has no tags
   // field of its own).
   const harvestCategoryName = input.candidatesByPid.get(pid)?.categoryName ?? null
-  const excludedTerm = matchExcludedCategory(payload.title, htmlToText(payload.descriptionHtml), harvestCategoryName)
+  const excludedTerm = matchExcludedCategory(
+    payload.title,
+    htmlToText(payload.descriptionHtml),
+    harvestCategoryName,
+    ...contentStrings,
+  )
   if (excludedTerm) {
     return drop('sourcing_winner_excluded_category', { term: excludedTerm })
   }
 
   // Step 5: claims scrubber over every owner-facing string the pipeline emits — title,
   // description text, and rationale. Rejects, never rewrites.
-  const claimHits = findClaimViolations(payload.title, htmlToText(payload.descriptionHtml), winner.rationale)
+  const claimHits = findClaimViolations(payload.title, htmlToText(payload.descriptionHtml), winner.rationale, ...contentStrings)
   if (claimHits.length > 0) {
     return drop('claims_scrubbed', { terms: claimHits })
   }
@@ -234,7 +261,7 @@ async function processWinner(
 
   // Step 9: submit. The summary is composed by plain code from the already-scrubbed title and
   // the code-computed margin, never from free agent text.
-  const summary = `New listing: ${payload.title} — ${payload.variants.length} variant(s), margin ${minMarginBps}bps${marketClause}`
+  const summary = `New listing: ${payload.title} — ${payload.variants.length} variant(s), ${payload.imageUrls.length} image(s), margin ${minMarginBps}bps${marketClause}`
   try {
     await deps.submit(deps.submitDeps, {
       type: 'new_listing',

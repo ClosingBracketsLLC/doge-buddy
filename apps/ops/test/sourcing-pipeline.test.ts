@@ -131,6 +131,8 @@ function winnerFor(spec: ProductSpec, priceCents = 5000) {
           supplierVariantId: `${spec.pid}-v1`,
         },
       ],
+      highlights: ['Durable rope core', 'Machine washable', 'Non-slip grip'],
+      specs: [{ label: 'Material', value: 'Cotton' }],
     },
     rationale: 'Strong search interest and a healthy freight-inclusive margin.',
     marginPct: 55,

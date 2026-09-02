@@ -54,6 +54,8 @@ function winnerFor(pid: string, overrides: { payload?: Record<string, unknown>; 
         supplierVariantId: vid,
       },
     ],
+    highlights: ['Durable rope core', 'Machine washable', 'Non-slip grip'],
+    specs: [{ label: 'Material', value: 'Cotton' }],
     ...overrides.payload,
   }
   return {
@@ -121,6 +123,19 @@ function candidateSet(pids: string[]): { candidateIds: Set<string>; candidatesBy
   }
 }
 
+/** Shared input construction for the single-candidate ('pid-1') content-gate/scrub tests below —
+ * same shape as every neighboring step-test's inline object. */
+function runFor(winners: SourcingWinner[]): {
+  runId: string
+  candidateIds: Set<string>
+  candidatesByPid: Map<string, HarvestCandidate>
+  winners: SourcingWinner[]
+  maxPriceToMarketBps: number
+} {
+  const { candidateIds, candidatesByPid } = candidateSet(['pid-1'])
+  return { runId: RUN_ID, candidateIds, candidatesByPid, maxPriceToMarketBps: 13000, winners }
+}
+
 describe('validateAndSubmitWinners', () => {
   it('happy path: submits with the LIVE cost in the payload and a margin-bearing summary', async () => {
     const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({
@@ -153,7 +168,7 @@ describe('validateAndSubmitWinners', () => {
     // Live cost (1000c) overwrote the agent's claimed cost (1050c).
     expect((submitInput.payload as { variants: { supplierCostCents: number }[] }).variants[0]!.supplierCostCents).toBe(1000)
     // margin = floor((5000 - 1000 - 500) * 10000 / 5000) = 7000bps
-    expect(submitInput.summary).toBe('New listing: Cozy Dog Bed — 1 variant(s), margin 7000bps')
+    expect(submitInput.summary).toBe('New listing: Cozy Dog Bed — 1 variant(s), 1 image(s), margin 7000bps')
 
     // FIX C5: Stage 4.6 verified US stock, so freight MUST be quoted from US (mirroring the
     // order-time gate in run-place-order.ts). A CN quote returns China-origin ~15-30d options that
@@ -279,6 +294,20 @@ describe('validateAndSubmitWinners', () => {
     )
   })
 
+  it('step 2b — sourcing_winner_missing_content: highlights absent', async () => {
+    const deps = makeDeps()
+    const winner = winnerFor('pid-1', { payload: { highlights: undefined } })
+    const outcomes = await validateAndSubmitWinners(deps, runFor([winner]))
+    expect(outcomes[0]).toMatchObject({ outcome: 'dropped', reason: 'sourcing_winner_missing_content' })
+    expect(deps.submit).not.toHaveBeenCalled()
+  })
+
+  it('step 2b — sourcing_winner_missing_content: specs absent', async () => {
+    const deps = makeDeps()
+    const outcomes = await validateAndSubmitWinners(deps, runFor([winnerFor('pid-1', { payload: { specs: undefined } })]))
+    expect(outcomes[0]!.reason).toBe('sourcing_winner_missing_content')
+  })
+
   it('step 3 — sourcing_winner_bad_html: descriptionHtml violates the allowlist', async () => {
     const alert = vi.fn(async () => {})
     const deps = makeDeps({ alert })
@@ -337,6 +366,13 @@ describe('validateAndSubmitWinners', () => {
     expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_excluded_category' }])
   })
 
+  it('step 4 — sourcing_winner_excluded_category: excluded term inside a spec label', async () => {
+    const deps = makeDeps()
+    const winner = winnerFor('pid-1', { payload: { specs: [{ label: 'Supplement type', value: 'n/a' }] } })
+    const outcomes = await validateAndSubmitWinners(deps, runFor([winner]))
+    expect(outcomes[0]!.reason).toBe('sourcing_winner_excluded_category')
+  })
+
   it('step 5 — claims_scrubbed: title carries a disallowed claim phrase', async () => {
     const alert = vi.fn(async () => {})
     const deps = makeDeps({ alert })
@@ -371,6 +407,26 @@ describe('validateAndSubmitWinners', () => {
     })
 
     expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'claims_scrubbed' }])
+  })
+
+  it('step 5 — claims_scrubbed: claim term inside a highlight', async () => {
+    const deps = makeDeps()
+    const winner = winnerFor('pid-1', {
+      payload: { highlights: ['Durable rope core', 'clinically proven comfort', 'Non-slip grip'] },
+    })
+    const outcomes = await validateAndSubmitWinners(deps, runFor([winner]))
+    expect(outcomes[0]!.reason).toBe('claims_scrubbed')
+  })
+
+  it('step 5 — claims_scrubbed: claim term inside a spec VALUE and inside whatsInBox', async () => {
+    const deps = makeDeps()
+    for (const payload of [
+      { specs: [{ label: 'Material', value: 'medical grade plastic' }] },
+      { whatsInBox: '1x vet approved rope' },
+    ]) {
+      const outcomes = await validateAndSubmitWinners(deps, runFor([winnerFor('pid-1', { payload })]))
+      expect(outcomes[0]!.reason).toBe('claims_scrubbed')
+    }
   })
 
   it('step 7 — sourcing_winner_unverifiable: live cost drifts beyond COST_TOLERANCE_BPS', async () => {
