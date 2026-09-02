@@ -750,7 +750,7 @@ export type PageQuery = {
 
 export type ProductVariantFragment = Pick<
   StorefrontAPI.ProductVariant,
-  'availableForSale' | 'id' | 'sku' | 'title'
+  'availableForSale' | 'id' | 'sku' | 'title' | 'weight' | 'weightUnit'
 > & {
   compareAtPrice?: StorefrontAPI.Maybe<
     Pick<StorefrontAPI.MoneyV2, 'amount' | 'currencyCode'>
@@ -787,7 +787,12 @@ export type ProductFragment = Pick<
           firstSelectableVariant?: StorefrontAPI.Maybe<
             Pick<
               StorefrontAPI.ProductVariant,
-              'availableForSale' | 'id' | 'sku' | 'title'
+              | 'availableForSale'
+              | 'id'
+              | 'sku'
+              | 'title'
+              | 'weight'
+              | 'weightUnit'
             > & {
               compareAtPrice?: StorefrontAPI.Maybe<
                 Pick<StorefrontAPI.MoneyV2, 'amount' | 'currencyCode'>
@@ -824,7 +829,7 @@ export type ProductFragment = Pick<
   selectedOrFirstAvailableVariant?: StorefrontAPI.Maybe<
     Pick<
       StorefrontAPI.ProductVariant,
-      'availableForSale' | 'id' | 'sku' | 'title'
+      'availableForSale' | 'id' | 'sku' | 'title' | 'weight' | 'weightUnit'
     > & {
       compareAtPrice?: StorefrontAPI.Maybe<
         Pick<StorefrontAPI.MoneyV2, 'amount' | 'currencyCode'>
@@ -848,7 +853,7 @@ export type ProductFragment = Pick<
   adjacentVariants: Array<
     Pick<
       StorefrontAPI.ProductVariant,
-      'availableForSale' | 'id' | 'sku' | 'title'
+      'availableForSale' | 'id' | 'sku' | 'title' | 'weight' | 'weightUnit'
     > & {
       compareAtPrice?: StorefrontAPI.Maybe<
         Pick<StorefrontAPI.MoneyV2, 'amount' | 'currencyCode'>
@@ -873,6 +878,25 @@ export type ProductFragment = Pick<
   shipsFrom?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
   deliveryMinDays?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
   deliveryMaxDays?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
+  media: {
+    nodes: Array<
+      | Pick<StorefrontAPI.ExternalVideo, 'id'>
+      | (Pick<StorefrontAPI.MediaImage, 'id'> & {
+          image?: StorefrontAPI.Maybe<
+            {__typename: 'Image'} & Pick<
+              StorefrontAPI.Image,
+              'id' | 'url' | 'altText' | 'width' | 'height'
+            >
+          >;
+        })
+      | Pick<StorefrontAPI.Model3d, 'id'>
+      | Pick<StorefrontAPI.Video, 'id'>
+    >;
+  };
+  highlights?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
+  specs?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
+  whatsInBox?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
+  supplierReviews?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
 };
 
 export type ProductQueryVariables = StorefrontAPI.Exact<{
@@ -904,7 +928,12 @@ export type ProductQuery = {
               firstSelectableVariant?: StorefrontAPI.Maybe<
                 Pick<
                   StorefrontAPI.ProductVariant,
-                  'availableForSale' | 'id' | 'sku' | 'title'
+                  | 'availableForSale'
+                  | 'id'
+                  | 'sku'
+                  | 'title'
+                  | 'weight'
+                  | 'weightUnit'
                 > & {
                   compareAtPrice?: StorefrontAPI.Maybe<
                     Pick<StorefrontAPI.MoneyV2, 'amount' | 'currencyCode'>
@@ -941,7 +970,7 @@ export type ProductQuery = {
       selectedOrFirstAvailableVariant?: StorefrontAPI.Maybe<
         Pick<
           StorefrontAPI.ProductVariant,
-          'availableForSale' | 'id' | 'sku' | 'title'
+          'availableForSale' | 'id' | 'sku' | 'title' | 'weight' | 'weightUnit'
         > & {
           compareAtPrice?: StorefrontAPI.Maybe<
             Pick<StorefrontAPI.MoneyV2, 'amount' | 'currencyCode'>
@@ -965,7 +994,7 @@ export type ProductQuery = {
       adjacentVariants: Array<
         Pick<
           StorefrontAPI.ProductVariant,
-          'availableForSale' | 'id' | 'sku' | 'title'
+          'availableForSale' | 'id' | 'sku' | 'title' | 'weight' | 'weightUnit'
         > & {
           compareAtPrice?: StorefrontAPI.Maybe<
             Pick<StorefrontAPI.MoneyV2, 'amount' | 'currencyCode'>
@@ -992,6 +1021,27 @@ export type ProductQuery = {
         Pick<StorefrontAPI.Metafield, 'value'>
       >;
       deliveryMaxDays?: StorefrontAPI.Maybe<
+        Pick<StorefrontAPI.Metafield, 'value'>
+      >;
+      media: {
+        nodes: Array<
+          | Pick<StorefrontAPI.ExternalVideo, 'id'>
+          | (Pick<StorefrontAPI.MediaImage, 'id'> & {
+              image?: StorefrontAPI.Maybe<
+                {__typename: 'Image'} & Pick<
+                  StorefrontAPI.Image,
+                  'id' | 'url' | 'altText' | 'width' | 'height'
+                >
+              >;
+            })
+          | Pick<StorefrontAPI.Model3d, 'id'>
+          | Pick<StorefrontAPI.Video, 'id'>
+        >;
+      };
+      highlights?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
+      specs?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
+      whatsInBox?: StorefrontAPI.Maybe<Pick<StorefrontAPI.Metafield, 'value'>>;
+      supplierReviews?: StorefrontAPI.Maybe<
         Pick<StorefrontAPI.Metafield, 'value'>
       >;
     }
@@ -1261,7 +1311,7 @@ interface GeneratedQueryTypes {
     return: PageQuery;
     variables: PageQueryVariables;
   };
-  '#graphql\n  query Product(\n    $country: CountryCode\n    $handle: String!\n    $language: LanguageCode\n    $selectedOptions: [SelectedOptionInput!]!\n  ) @inContext(country: $country, language: $language) {\n    product(handle: $handle) {\n      ...Product\n    }\n  }\n  #graphql\n  fragment Product on Product {\n    id\n    title\n    vendor\n    handle\n    descriptionHtml\n    description\n    encodedVariantExistence\n    encodedVariantAvailability\n    options {\n      name\n      optionValues {\n        name\n        firstSelectableVariant {\n          ...ProductVariant\n        }\n        swatch {\n          color\n          image {\n            previewImage {\n              url\n            }\n          }\n        }\n      }\n    }\n    selectedOrFirstAvailableVariant(selectedOptions: $selectedOptions, ignoreUnknownOptions: true, caseInsensitiveMatch: true) {\n      ...ProductVariant\n    }\n    adjacentVariants (selectedOptions: $selectedOptions) {\n      ...ProductVariant\n    }\n    seo {\n      description\n      title\n    }\n    shipsFrom: metafield(namespace: "dogebuddy", key: "ships_from") {\n      value\n    }\n    deliveryMinDays: metafield(namespace: "dogebuddy", key: "delivery_min_days") {\n      value\n    }\n    deliveryMaxDays: metafield(namespace: "dogebuddy", key: "delivery_max_days") {\n      value\n    }\n  }\n  #graphql\n  fragment ProductVariant on ProductVariant {\n    availableForSale\n    compareAtPrice {\n      amount\n      currencyCode\n    }\n    id\n    image {\n      __typename\n      id\n      url\n      altText\n      width\n      height\n    }\n    price {\n      amount\n      currencyCode\n    }\n    product {\n      title\n      handle\n    }\n    selectedOptions {\n      name\n      value\n    }\n    sku\n    title\n    unitPrice {\n      amount\n      currencyCode\n    }\n  }\n\n\n': {
+  '#graphql\n  query Product(\n    $country: CountryCode\n    $handle: String!\n    $language: LanguageCode\n    $selectedOptions: [SelectedOptionInput!]!\n  ) @inContext(country: $country, language: $language) {\n    product(handle: $handle) {\n      ...Product\n    }\n  }\n  #graphql\n  fragment Product on Product {\n    id\n    title\n    vendor\n    handle\n    descriptionHtml\n    description\n    encodedVariantExistence\n    encodedVariantAvailability\n    options {\n      name\n      optionValues {\n        name\n        firstSelectableVariant {\n          ...ProductVariant\n        }\n        swatch {\n          color\n          image {\n            previewImage {\n              url\n            }\n          }\n        }\n      }\n    }\n    selectedOrFirstAvailableVariant(selectedOptions: $selectedOptions, ignoreUnknownOptions: true, caseInsensitiveMatch: true) {\n      ...ProductVariant\n    }\n    adjacentVariants (selectedOptions: $selectedOptions) {\n      ...ProductVariant\n    }\n    seo {\n      description\n      title\n    }\n    shipsFrom: metafield(namespace: "dogebuddy", key: "ships_from") {\n      value\n    }\n    deliveryMinDays: metafield(namespace: "dogebuddy", key: "delivery_min_days") {\n      value\n    }\n    deliveryMaxDays: metafield(namespace: "dogebuddy", key: "delivery_max_days") {\n      value\n    }\n    media(first: 10) {\n      nodes {\n        id\n        ... on MediaImage {\n          image {\n            __typename\n            id\n            url\n            altText\n            width\n            height\n          }\n        }\n      }\n    }\n    highlights: metafield(namespace: "dogebuddy", key: "highlights") {\n      value\n    }\n    specs: metafield(namespace: "dogebuddy", key: "specs") {\n      value\n    }\n    whatsInBox: metafield(namespace: "dogebuddy", key: "whats_in_box") {\n      value\n    }\n    supplierReviews: metafield(namespace: "dogebuddy", key: "supplier_reviews") {\n      value\n    }\n  }\n  #graphql\n  fragment ProductVariant on ProductVariant {\n    availableForSale\n    compareAtPrice {\n      amount\n      currencyCode\n    }\n    id\n    image {\n      __typename\n      id\n      url\n      altText\n      width\n      height\n    }\n    price {\n      amount\n      currencyCode\n    }\n    product {\n      title\n      handle\n    }\n    selectedOptions {\n      name\n      value\n    }\n    sku\n    title\n    unitPrice {\n      amount\n      currencyCode\n    }\n    weight\n    weightUnit\n  }\n\n\n': {
     return: ProductQuery;
     variables: ProductQueryVariables;
   };

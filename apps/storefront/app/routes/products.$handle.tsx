@@ -14,6 +14,7 @@ import {ProductForm} from '~/components/ProductForm';
 import {redirectIfHandleIsLocalized} from '~/lib/redirect';
 import {DeliveryBadge} from '~/components/brand/DeliveryBadge';
 import {productJsonLd} from '~/lib/seo';
+import {parseProductContent} from '~/lib/product-content';
 
 export const meta: Route.MetaFunction = ({data}) => {
   if (!data?.product) return [];
@@ -91,6 +92,7 @@ async function loadCriticalData({context, params, request}: Route.LoaderArgs) {
 
   return {
     product,
+    content: parseProductContent(product),
   };
 }
 
@@ -210,6 +212,8 @@ const PRODUCT_VARIANT_FRAGMENT = `#graphql
       amount
       currencyCode
     }
+    weight
+    weightUnit
   }
 ` as const;
 
@@ -257,6 +261,33 @@ const PRODUCT_FRAGMENT = `#graphql
       value
     }
     deliveryMaxDays: metafield(namespace: "dogebuddy", key: "delivery_max_days") {
+      value
+    }
+    media(first: 10) {
+      nodes {
+        id
+        ... on MediaImage {
+          image {
+            __typename
+            id
+            url
+            altText
+            width
+            height
+          }
+        }
+      }
+    }
+    highlights: metafield(namespace: "dogebuddy", key: "highlights") {
+      value
+    }
+    specs: metafield(namespace: "dogebuddy", key: "specs") {
+      value
+    }
+    whatsInBox: metafield(namespace: "dogebuddy", key: "whats_in_box") {
+      value
+    }
+    supplierReviews: metafield(namespace: "dogebuddy", key: "supplier_reviews") {
       value
     }
   }
