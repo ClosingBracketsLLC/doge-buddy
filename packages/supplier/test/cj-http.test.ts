@@ -96,6 +96,28 @@ describe('CjHttpClient envelope + errors', () => {
     expect(sleeps.length).toBe(2)
     expect(sleeps[1]!).toBeGreaterThan(sleeps[0]!)
   })
+
+  it('survives a sustained 429 run: four limited responses, then success (15s of backoff patience)', async () => {
+    const store = new InMemoryCjTokenStore(); await store.save(TOKENS)
+    let n = 0
+    const sleeps: number[] = []
+    const { client } = makeClient(() => (++n < 5 ? new Response('{}', { status: 429 }) : ok({ done: true })), {
+      tokenStore: store, sleep: async (ms: number) => { sleeps.push(ms) },
+    })
+    const data = await client.request<{ done: boolean }>('GET', '/x', { points: 0 })
+    expect(data).toEqual({ done: true })
+    expect(sleeps).toEqual([1000, 2000, 4000, 8000])
+  })
+
+  it('throws retries-exhausted only after five straight 429s', async () => {
+    const store = new InMemoryCjTokenStore(); await store.save(TOKENS)
+    const { client } = makeClient(() => new Response('{}', { status: 429 }), {
+      tokenStore: store, sleep: async () => {},
+    })
+    const err = await client.request('GET', '/x', { points: 0 }).catch((e) => e)
+    expect(err).toBeInstanceOf(CjApiError)
+    expect(err.message).toMatch(/retries exhausted/)
+  })
 })
 
 describe('CjHttpClient auth-failure retry', () => {

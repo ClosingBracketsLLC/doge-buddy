@@ -74,7 +74,12 @@ const DEFAULT_BASE_URL = 'https://developers.cjdropshipping.com/api2.0/v1'
 const DEFAULT_RPS = 1
 const DEFAULT_DAILY_POINTS_BUDGET = 50_000
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000
-const MAX_429_ATTEMPTS = 3
+// 5 attempts with a 1s base (waits 1s, 2s, 4s, 8s — 15s of patience total). The old 3×500ms
+// schedule (~1.5s) was outlasted by CJ's sustained limiting during the 2026-09-02 backfill run:
+// a ~90-call burst left a few reads hitting "retries exhausted" on every rerun, roving across
+// variants. Callers that aren't rate-limited pay nothing — the backoff only runs on a 429.
+const MAX_429_ATTEMPTS = 5
+const BACKOFF_429_BASE_MS = 1000
 
 /**
  * CJ Dropshipping HTTP client: owns token lifecycle (getAccessToken / refreshAccessToken),
@@ -288,7 +293,7 @@ export class CjHttpClient {
         if (attempt >= MAX_429_ATTEMPTS) {
           throw new CjApiError(429, 'CJ API rate limited (429): retries exhausted')
         }
-        await this.sleep(500 * 2 ** (attempt - 1))
+        await this.sleep(BACKOFF_429_BASE_MS * 2 ** (attempt - 1))
         continue
       }
 
