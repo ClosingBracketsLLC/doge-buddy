@@ -886,63 +886,86 @@ export async function inventoryItemUpdate(
 }
 
 // ---------------------------------------------------------------------------
-// productCreateMedia
+// productAppendMedia
 // ---------------------------------------------------------------------------
 
-// FIXTURE-ASSUMPTION (2026-07 API), verify on the first backfill run:
-//  Task 8's live-schema introspection probe (2026-09-01) could NOT be run — this sandbox refused
-//  to source shell env from outside the worktree (tried `. .env` directly, a same-worktree temp
-//  copy sourced with `.`, a read/export loop, and a single-line `export VAR=$(grep …)` form; all
-//  three were rejected by the worktree-isolation guard as "too complex to verify stays inside the
-//  worktree"). The code below is therefore UNVERIFIED against the live schema — everything here
-//  is taken as-is from the task-8 brief's contingency sketch, not confirmed by introspection:
-//  - `Mutation.productCreateMedia(productId: ID!, media: [CreateMediaInput!]!)`;
-//    `CreateMediaInput { originalSource, alt, mediaContentType }`; payload assumed to carry
-//    `mediaUserErrors` (NOT `userErrors`) and `media { ... on MediaImage { id status } }`.
-//  - Media processing is assumed ASYNC: created media starts UPLOADED and must reach READY before
-//    `productVariantAppendMedia` will accept it — callers poll `mediaImageStatus` below.
-//  CONFIRM ALL OF THE ABOVE (mutation presence, argument names, error-field name) against the live
-//  2026-07 Admin schema before the backfill's first real call — see task-8-report.md.
-const PRODUCT_CREATE_MEDIA_MUTATION = `#graphql
-  mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
-    productCreateMedia(productId: $productId, media: $media) {
-      media { ... on MediaImage { id status } }
-      mediaUserErrors { field message }
+// LIVE-VERIFIED 2026-09-01 by introspection of the live 2026-07 Admin schema (probe run outside
+// this sandbox — a worktree-isolation guard blocked the agent from sourcing shell env for a
+// credentialed call; the controller ran the probe and handed back these facts, see
+// task-8-report.md fix-round section):
+//  - `Mutation.productCreateMedia` is ABSENT from the schema — its `ProductCreateMediaPayload`
+//    type still exists, but nothing in `Mutation` exposes it. Media creation is folded into
+//    `Mutation.productUpdate(product: ProductUpdateInput!, media: [CreateMediaInput!],
+//    identifier: ProductUpdateIdentifiers)` instead.
+//  - `CreateMediaInput { originalSource: String!, alt: String, mediaContentType: MediaContentType! }`,
+//    `MediaContentType` includes `IMAGE`.
+//  - `ProductUpdatePayload { product, userErrors }` — plain `userErrors` (no `mediaUserErrors` on
+//    this payload), so `assertNoUserErrors` applies directly.
+//  - `product: { id: productGid }` is sent and NOTHING else — the house flip/no-resend rule
+//    (apply-new-listing.ts:125-133): resending any other product field here would silently
+//    overwrite it on every backfill rerun, since `productUpdate` treats every field it receives as
+//    an authoritative write, not a partial patch.
+//  - The mutation's response has no "here are the media you just created" shape — it only offers
+//    the product's FULL `media(first: 250)` list (old + new). The newly created media is picked
+//    out client-side as "not in `knownMediaIds`" (the caller's prior `productMediaState(...)
+//    .mediaIds` snapshot); there is no other signal in the schema to distinguish them.
+//  Runtime behavior (actual async processing timing, `media(first: 250)`'s node ordering) is first
+//  exercised by the backfill run.
+const PRODUCT_UPDATE_APPEND_MEDIA_MUTATION = `#graphql
+  mutation ProductUpdateAppendMedia($product: ProductUpdateInput!, $media: [CreateMediaInput!]!) {
+    productUpdate(product: $product, media: $media) {
+      product {
+        media(first: 250) {
+          nodes { id ... on MediaImage { status } }
+        }
+      }
+      userErrors { field message }
     }
   }
 `
 
-interface ProductCreateMediaData {
-  productCreateMedia: {
-    media: { id: string; status: string }[] | null
-    mediaUserErrors: ShopifyUserErrorEntry[]
+interface ProductUpdateAppendMediaData {
+  productUpdate: {
+    product: { media: { nodes: { id: string; status?: string }[] } } | null
+    userErrors: ShopifyUserErrorEntry[]
   }
 }
 
-export async function productCreateMedia(
+/** Creates media on a product via `productUpdate`'s `media` argument — `productCreateMedia` does
+ * NOT exist on the live 2026-07 schema (probe-confirmed, see the comment above). Returns only the
+ * newly created media: nodes whose id is not already in `knownMediaIds` (typically a prior
+ * `productMediaState(...).mediaIds` read), since the mutation echoes the product's FULL media
+ * list rather than just what it created. */
+export async function productAppendMedia(
   client: ShopifyAdminClient,
   productGid: string,
   media: { originalSource: string; alt?: string }[],
+  knownMediaIds: string[],
 ): Promise<{ id: string; status: string }[]> {
-  const data = await client.graphql<ProductCreateMediaData>(PRODUCT_CREATE_MEDIA_MUTATION, {
-    productId: productGid,
+  const data = await client.graphql<ProductUpdateAppendMediaData>(PRODUCT_UPDATE_APPEND_MEDIA_MUTATION, {
+    product: { id: productGid },
     media: media.map((m) => ({ originalSource: m.originalSource, mediaContentType: 'IMAGE', ...(m.alt ? { alt: m.alt } : {}) })),
   })
-  const errors = data.productCreateMedia.mediaUserErrors
-  if (errors.length > 0) {
-    throw new Error(`productCreateMedia: ${errors.map((e) => e.message).join('; ')}`)
-  }
-  return data.productCreateMedia.media ?? []
+  assertNoUserErrors(data, 'productUpdate')
+  const known = new Set(knownMediaIds)
+  const nodes = data.productUpdate.product?.media.nodes ?? []
+  return nodes.filter((n) => !known.has(n.id)).map((n) => ({ id: n.id, status: n.status ?? 'UNKNOWN' }))
 }
 
 // ---------------------------------------------------------------------------
 // productVariantAppendMedia
 // ---------------------------------------------------------------------------
 
-// FIXTURE-ASSUMPTION (2026-07 API), verify on the first backfill run — see the note above
-// PRODUCT_CREATE_MEDIA_MUTATION: the introspection probe that would have confirmed this mutation's
-// presence, its `variantMedia` argument shape, and its `userErrors` (vs `mediaUserErrors`) field
-// name did not run in this environment.
+// LIVE-VERIFIED 2026-09-01 by introspection of the live 2026-07 Admin schema (see the fix-round
+// note above PRODUCT_UPDATE_APPEND_MEDIA_MUTATION for how the probe was run):
+//  - `Mutation.productVariantAppendMedia(productId: ID!, variantMedia:
+//    [ProductVariantAppendMediaInput!]!)` confirmed present, with `ProductVariantAppendMediaPayload
+//    { product, productVariants, userErrors }` — plain `userErrors` (not `mediaUserErrors`), so
+//    `assertNoUserErrors` applies directly.
+//  - Media processing is ASYNC: `MediaImage.status` is a `MediaStatus` enum (UPLOADED |
+//    PROCESSING | READY | FAILED); media must reach READY before this mutation accepts it —
+//    callers poll `mediaImageStatus` below. The actual READY-before-accept enforcement is first
+//    exercised by the backfill run.
 const PRODUCT_VARIANT_APPEND_MEDIA_MUTATION = `#graphql
   mutation ProductVariantAppendMedia($productId: ID!, $variantMedia: [ProductVariantAppendMediaInput!]!) {
     productVariantAppendMedia(productId: $productId, variantMedia: $variantMedia) {
@@ -969,17 +992,23 @@ export async function productVariantAppendMedia(
 }
 
 // ---------------------------------------------------------------------------
-// productVariantMediaState
+// productMediaState
 // ---------------------------------------------------------------------------
 
-// Read side for the backfill's idempotency check — a variant that already shows media is SKIPPED
-// (spec 2026-09-01 §A5). `media(first: 1)` rather than the deprecated `image` field.
-// FIXTURE-ASSUMPTION (2026-07 API): the `ProductVariant.media` field name and shape are taken from
-// the task-8 brief's sketch, unconfirmed by introspection in this environment (see the note above
-// PRODUCT_CREATE_MEDIA_MUTATION) — verify before the first backfill run.
-const PRODUCT_VARIANT_MEDIA_STATE_QUERY = `#graphql
-  query ProductVariantMediaState($id: ID!) {
+// LIVE-VERIFIED 2026-09-01 by introspection of the live 2026-07 Admin schema (see the fix-round
+// note above PRODUCT_UPDATE_APPEND_MEDIA_MUTATION for how the probe was run): `Product.media`
+// and `ProductVariant.media` both confirmed present. `media(first: 1)` on the variant, not the
+// deprecated `image` field. One query combines two reads:
+//  - The product-level media inventory, which feeds `productAppendMedia`'s `knownMediaIds` — the
+//    only way that op can tell an old media node from one it just created (see its comment above).
+//  - The per-variant idempotency read for the backfill: a variant that already shows media is
+//    SKIPPED (spec 2026-09-01 §A5).
+const PRODUCT_MEDIA_STATE_QUERY = `#graphql
+  query ProductMediaState($id: ID!) {
     product(id: $id) {
+      media(first: 250) {
+        nodes { id }
+      }
       variants(first: 250) {
         nodes { id sku media(first: 1) { nodes { id } } }
       }
@@ -987,28 +1016,34 @@ const PRODUCT_VARIANT_MEDIA_STATE_QUERY = `#graphql
   }
 `
 
-interface ProductVariantMediaStateData {
+interface ProductMediaStateData {
   product: {
+    media: { nodes: { id: string }[] }
     variants: { nodes: { id: string; sku: string | null; media: { nodes: { id: string }[] } }[] }
   } | null
 }
 
-export async function productVariantMediaState(
+export async function productMediaState(
   client: ShopifyAdminClient,
   productGid: string,
-): Promise<{ id: string; sku?: string; mediaId: string | null }[]> {
-  const data = await client.graphql<ProductVariantMediaStateData>(PRODUCT_VARIANT_MEDIA_STATE_QUERY, { id: productGid })
-  return (data.product?.variants.nodes ?? []).map((v) => ({
-    id: v.id,
-    sku: v.sku ?? undefined,
-    mediaId: v.media.nodes[0]?.id ?? null,
-  }))
+): Promise<{ mediaIds: string[]; variants: { id: string; sku?: string; mediaId: string | null }[] }> {
+  const data = await client.graphql<ProductMediaStateData>(PRODUCT_MEDIA_STATE_QUERY, { id: productGid })
+  return {
+    mediaIds: data.product?.media.nodes.map((n) => n.id) ?? [],
+    variants: (data.product?.variants.nodes ?? []).map((v) => ({
+      id: v.id,
+      sku: v.sku ?? undefined,
+      mediaId: v.media.nodes[0]?.id ?? null,
+    })),
+  }
 }
 
 // ---------------------------------------------------------------------------
 // mediaImageStatus
 // ---------------------------------------------------------------------------
 
+// LIVE-VERIFIED 2026-09-01 by introspection: `MediaImage.status` confirmed present, typed as the
+// `MediaStatus` enum (UPLOADED | PROCESSING | READY | FAILED).
 const MEDIA_IMAGE_STATUS_QUERY = `#graphql
   query MediaImageStatus($id: ID!) {
     node(id: $id) { ... on MediaImage { status } }
@@ -1026,47 +1061,49 @@ export async function mediaImageStatus(client: ShopifyAdminClient, mediaGid: str
 }
 
 // ---------------------------------------------------------------------------
-// productDeleteMedia
+// mediaDelete
 // ---------------------------------------------------------------------------
 
-// FIXTURE-ASSUMPTION (2026-07 API), verify on the first backfill run — see the note above
-// PRODUCT_CREATE_MEDIA_MUTATION: this mutation's presence and its `mediaUserErrors` field name
-// were not confirmed by introspection in this environment.
-const PRODUCT_DELETE_MEDIA_MUTATION = `#graphql
-  mutation ProductDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
-    productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
-      deletedMediaIds
-      mediaUserErrors { field message }
+// Probe-confirmed 2026-09-01 (see the fix-round note above PRODUCT_UPDATE_APPEND_MEDIA_MUTATION):
+// `Mutation.productDeleteMedia` is ABSENT from the live 2026-07 schema — its
+// `ProductDeleteMediaPayload` type still exists, but nothing in `Mutation` exposes it. Media
+// deletion goes through the generic Files API instead: `Mutation.fileDelete(fileIds: [ID!]!)`,
+// `FileDeletePayload { deletedFileIds, userErrors }` (both confirmed present by introspection).
+// FIXTURE-ASSUMPTION (verify on the first backfill run): MediaImage gids are accepted as
+// `fileIds` — media are files on this API version, but that has not been exercised against a real
+// MediaImage yet. Callers treat this as best-effort cleanup, matching the original
+// `productDeleteMedia`'s purpose: removing an orphaned created-but-never-appended MediaImage on
+// the backfill's give-up path (leaving it would stack a duplicate gallery image on every rerun).
+const FILE_DELETE_MUTATION = `#graphql
+  mutation FileDelete($fileIds: [ID!]!) {
+    fileDelete(fileIds: $fileIds) {
+      deletedFileIds
+      userErrors { field message }
     }
   }
 `
 
-interface ProductDeleteMediaData {
-  productDeleteMedia: { deletedMediaIds: string[] | null; mediaUserErrors: ShopifyUserErrorEntry[] }
+interface FileDeleteData {
+  fileDelete: { deletedFileIds: string[] | null; userErrors: ShopifyUserErrorEntry[] }
 }
 
-/** Removes product media — the backfill's cleanup when a created MediaImage never reached its
- * variant (poll FAILED/exhausted, append threw): leaving it would stack a duplicate gallery
- * image on every rerun, and reruns are the script's documented retry story. */
-export async function productDeleteMedia(
-  client: ShopifyAdminClient,
-  productGid: string,
-  mediaIds: string[],
-): Promise<void> {
-  const data = await client.graphql<ProductDeleteMediaData>(PRODUCT_DELETE_MEDIA_MUTATION, {
-    productId: productGid,
-    mediaIds,
-  })
-  const errors = data.productDeleteMedia.mediaUserErrors
-  if (errors.length > 0) {
-    throw new Error(`productDeleteMedia: ${errors.map((e) => e.message).join('; ')}`)
-  }
+/** Best-effort cleanup for the backfill's give-up paths — see the FIXTURE-ASSUMPTION note above:
+ * `fileDelete` is probe-confirmed to exist, but accepting MediaImage gids as `fileIds` is not yet
+ * exercised live. */
+export async function mediaDelete(client: ShopifyAdminClient, mediaIds: string[]): Promise<void> {
+  const data = await client.graphql<FileDeleteData>(FILE_DELETE_MUTATION, { fileIds: mediaIds })
+  assertNoUserErrors(data, 'fileDelete')
 }
 
 // ---------------------------------------------------------------------------
 // metafieldsSet
 // ---------------------------------------------------------------------------
 
+// LIVE-VERIFIED 2026-09-01 by introspection: `MetafieldsSetInput { ownerId, namespace, key, value,
+// compareDigest, type }` confirmed present — this op sends `ownerId`/`namespace`/`key`/`type`/
+// `value` (not `compareDigest`, which is for optimistic-concurrency checks this caller doesn't
+// need). `Mutation.metafieldsSet(metafields:)` returns plain `userErrors`, so `assertNoUserErrors`
+// applies directly.
 const METAFIELDS_SET_MUTATION = `#graphql
   mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) {

@@ -3,9 +3,9 @@ import {
   ShopifyAdminClient, ShopifyTokenManager, ShopifyUserError,
   collectionCreate, findProductByHandle, fulfillmentCreate, fulfillmentTrackingInfoUpdate,
   inventoryAvailableAt, inventoryItemUpdate, inventorySetQuantities, listCollections, listMetafieldDefinitions, listPublications,
-  listWebhookSubscriptions, mediaImageStatus, metafieldDefinitionCreate, metafieldsSet, orderFulfillmentOrders, orderRefundState,
-  ordersUpdatedSince, primaryLocationId, productCreateMedia, productDelete, productDeleteMedia, productDescriptionHtml, productUpdate,
-  productSet, productVariantAppendMedia, productVariantMediaState, productVariantsByProductId, publishablePublish, publishableUnpublish,
+  listWebhookSubscriptions, mediaDelete, mediaImageStatus, metafieldDefinitionCreate, metafieldsSet, orderFulfillmentOrders, orderRefundState,
+  ordersUpdatedSince, primaryLocationId, productAppendMedia, productDelete, productDescriptionHtml, productMediaState, productUpdate,
+  productSet, productVariantAppendMedia, productVariantsByProductId, publishablePublish, publishableUnpublish,
   refundCreate, webhookSubscriptionCreate, webhookSubscriptionDelete,
 } from '@doge-buddy/shopify-admin'
 
@@ -633,28 +633,43 @@ describe('webhookSubscriptionDelete', () => {
   })
 })
 
-describe('productCreateMedia', () => {
-  it('sends productId + media and returns created media ids/statuses', async () => {
+describe('productAppendMedia', () => {
+  it('sends product:{id} + media (id only, no other product field), returns only media not in knownMediaIds', async () => {
     const { client, calls } = makeClient(() =>
       gql({
-        productCreateMedia: {
-          media: [{ id: 'gid://shopify/MediaImage/1', status: 'UPLOADED' }],
-          mediaUserErrors: [],
+        productUpdate: {
+          product: {
+            media: {
+              nodes: [
+                { id: 'gid://shopify/MediaImage/1', status: 'READY' },
+                { id: 'gid://shopify/MediaImage/2', status: 'UPLOADED' },
+              ],
+            },
+          },
+          userErrors: [],
         },
       }),
     )
-    const out = await productCreateMedia(client, 'gid://shopify/Product/1', [{ originalSource: 'https://x/a.jpg' }])
-    expect(out).toEqual([{ id: 'gid://shopify/MediaImage/1', status: 'UPLOADED' }])
+    const out = await productAppendMedia(
+      client,
+      'gid://shopify/Product/1',
+      [{ originalSource: 'https://x/b.jpg' }],
+      ['gid://shopify/MediaImage/1'],
+    )
+    expect(out).toEqual([{ id: 'gid://shopify/MediaImage/2', status: 'UPLOADED' }])
     const { query, variables } = lastGraphqlCall(calls)
-    expect(query).toMatch(/productCreateMedia/)
-    expect(variables).toMatchObject({ productId: 'gid://shopify/Product/1' })
+    expect(query).toMatch(/mutation[\s\S]*productUpdate\(product: \$product, media: \$media\)/)
+    expect(variables).toEqual({
+      product: { id: 'gid://shopify/Product/1' },
+      media: [{ originalSource: 'https://x/b.jpg', mediaContentType: 'IMAGE' }],
+    })
   })
-  it('throws on mediaUserErrors', async () => {
+  it('throws ShopifyUserError on userErrors', async () => {
     const { client } = makeClient(() =>
-      gql({ productCreateMedia: { media: null, mediaUserErrors: [{ message: 'Invalid image source' }] } }))
+      gql({ productUpdate: { product: null, userErrors: [{ message: 'Invalid image source' }] } }))
     await expect(
-      productCreateMedia(client, 'gid://shopify/Product/1', [{ originalSource: 'https://x/a.jpg' }]),
-    ).rejects.toThrow('Invalid image source')
+      productAppendMedia(client, 'gid://shopify/Product/1', [{ originalSource: 'https://x/a.jpg' }], []),
+    ).rejects.toThrow(ShopifyUserError)
   })
 })
 
@@ -679,11 +694,12 @@ describe('productVariantAppendMedia', () => {
   })
 })
 
-describe('productVariantMediaState', () => {
-  it('maps variant id/sku/mediaId (null when no media)', async () => {
+describe('productMediaState', () => {
+  it('returns product-level mediaIds and per-variant id/sku/mediaId (null when no media)', async () => {
     const { client, calls } = makeClient(() =>
       gql({
         product: {
+          media: { nodes: [{ id: 'gid://shopify/MediaImage/1' }, { id: 'gid://shopify/MediaImage/2' }] },
           variants: {
             nodes: [
               { id: 'gid://shopify/ProductVariant/1', sku: 'DB-1', media: { nodes: [{ id: 'gid://shopify/MediaImage/1' }] } },
@@ -692,18 +708,21 @@ describe('productVariantMediaState', () => {
           },
         },
       }))
-    const result = await productVariantMediaState(client, 'gid://shopify/Product/1')
-    expect(result).toEqual([
-      { id: 'gid://shopify/ProductVariant/1', sku: 'DB-1', mediaId: 'gid://shopify/MediaImage/1' },
-      { id: 'gid://shopify/ProductVariant/2', sku: undefined, mediaId: null },
-    ])
+    const result = await productMediaState(client, 'gid://shopify/Product/1')
+    expect(result).toEqual({
+      mediaIds: ['gid://shopify/MediaImage/1', 'gid://shopify/MediaImage/2'],
+      variants: [
+        { id: 'gid://shopify/ProductVariant/1', sku: 'DB-1', mediaId: 'gid://shopify/MediaImage/1' },
+        { id: 'gid://shopify/ProductVariant/2', sku: undefined, mediaId: null },
+      ],
+    })
     const { query, variables } = lastGraphqlCall(calls)
     expect(query).toMatch(/query[\s\S]*variants/)
     expect(variables).toEqual({ id: 'gid://shopify/Product/1' })
   })
-  it('returns [] when the product is missing', async () => {
+  it('returns empty mediaIds/variants when the product is missing', async () => {
     const { client } = makeClient(() => gql({ product: null }))
-    await expect(productVariantMediaState(client, 'gid://shopify/Product/404')).resolves.toEqual([])
+    await expect(productMediaState(client, 'gid://shopify/Product/404')).resolves.toEqual({ mediaIds: [], variants: [] })
   })
 })
 
@@ -721,23 +740,19 @@ describe('mediaImageStatus', () => {
   })
 })
 
-describe('productDeleteMedia', () => {
-  it('sends productId + mediaIds, resolves void', async () => {
+describe('mediaDelete', () => {
+  it('sends fileIds, resolves void', async () => {
     const { client, calls } = makeClient(() =>
-      gql({ productDeleteMedia: { deletedMediaIds: ['gid://shopify/MediaImage/1'], mediaUserErrors: [] } }))
-    await expect(
-      productDeleteMedia(client, 'gid://shopify/Product/1', ['gid://shopify/MediaImage/1']),
-    ).resolves.toBeUndefined()
+      gql({ fileDelete: { deletedFileIds: ['gid://shopify/MediaImage/1'], userErrors: [] } }))
+    await expect(mediaDelete(client, ['gid://shopify/MediaImage/1'])).resolves.toBeUndefined()
     const { query, variables } = lastGraphqlCall(calls)
-    expect(query).toMatch(/mutation[\s\S]*productDeleteMedia/)
-    expect(variables).toEqual({ productId: 'gid://shopify/Product/1', mediaIds: ['gid://shopify/MediaImage/1'] })
+    expect(query).toMatch(/mutation[\s\S]*fileDelete/)
+    expect(variables).toEqual({ fileIds: ['gid://shopify/MediaImage/1'] })
   })
-  it('throws on mediaUserErrors', async () => {
+  it('throws ShopifyUserError on userErrors', async () => {
     const { client } = makeClient(() =>
-      gql({ productDeleteMedia: { deletedMediaIds: null, mediaUserErrors: [{ message: 'Media not found' }] } }))
-    await expect(
-      productDeleteMedia(client, 'gid://shopify/Product/1', ['gid://shopify/MediaImage/1']),
-    ).rejects.toThrow('Media not found')
+      gql({ fileDelete: { deletedFileIds: null, userErrors: [{ message: 'Media not found' }] } }))
+    await expect(mediaDelete(client, ['gid://shopify/MediaImage/1'])).rejects.toThrow(ShopifyUserError)
   })
 })
 
