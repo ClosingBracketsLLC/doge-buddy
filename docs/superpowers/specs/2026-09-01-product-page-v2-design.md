@@ -217,3 +217,29 @@ collection cards · Judge.me integration (#15) · re-generating content for alre
   degrades to "no reviews section"; worst case is a fetch that never yields usable reviews until
   the mapping is corrected against the live shape.
 - **Per-variant `file` on this API version** — explicit fallback path specified (§Error handling).
+
+## Panel amendments (2026-09-01, adversarial 5-lens review of spec + plan — approved text above unchanged)
+
+1. **Fail-safe ratings (supersedes part of Decision 3 / §Risks).** The CJ review mapper defaulted a
+   missing/unparsable score to `rating: 5` — on the unverified `productComments` wire shape that
+   could publish a wall of fabricated 5-star cards. `SupplierProductReview.rating` is now optional,
+   never defaulted; rating-less reviews are never published or counted, and `average`/`count` run
+   over rated reviews only. The §Risks worst case is thereby "no reviews section", as intended.
+2. **No metafields on the DRAFT→ACTIVE flip (amends §A4.2).** Hoisting a partial metafields list
+   onto the flip leaned on unverified omit-preservation semantics; the flip stays byte-identical
+   to today (live products already prove stored metafields survive the metafield-less flip).
+   Content metafields ride the CREATE `productSet` only.
+3. **Metafield definitions on live (amends §Owner setup "None new").** The Storefront API serves a
+   metafield only where a definition with storefront exposure exists; the backfill v2 pass gains a
+   definitions-ensure step (list + create the four v2 definitions, `PUBLIC_READ`, same path the
+   original three took via seed-store).
+4. **Approval gate sees the copy (extends Decision 8).** The admin proposal preview renders
+   highlights/specs/what's-in-box (escaped); the apply worker additionally re-scrubs v2 content as
+   a plain-code backstop for payloads that never passed Stage 6 (`listing_content_claims_blocked`,
+   degrade to the pre-v2 page).
+5. **Mechanical corrections.** The returns-policy link is `/policies/returns` (Decision 11's
+   `/policies/refund-policy` handle does not exist); spec-table labels are scrubbed alongside
+   values; review dates are kept only as `YYYY-MM-DD`; backfill media work is grouped per unique
+   image URL with created-media cleanup on failure (idempotent reruns); review text is scrubbed
+   full-length before the display cap. Variant `weight`/`weightUnit` is confirmed available on
+   Storefront 2026-04, resolving §B2's open check.
