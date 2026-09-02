@@ -588,6 +588,58 @@ describe('validateAndSubmitWinners', () => {
   })
 })
 
+// To plant an agent-proposed imageUrl WITHOUT breaking the margin/cost numbers the default
+// builder is tuned to pass, spread it onto the builder's own default variant (there is no
+// variantFor helper). `runFor` again stands for the file's existing candidateSet-based input
+// construction; payload overrides go under the `payload` key (builder signature at :36).
+const withAgentImage = (pid: string) => {
+  const base = winnerFor(pid).payload as { variants: Record<string, unknown>[] }
+  return winnerFor(pid, {
+    payload: { variants: [{ ...base.variants[0], imageUrl: 'https://agent.example.com/invented.jpg' }] },
+  })
+}
+
+describe('step 7 — live variant image overwrite', () => {
+  it('replaces the agent-proposed imageUrl with the live CJ value', async () => {
+    const deps = makeDeps({
+      adapter: makeAdapter({
+        getProduct: async (pid) => ({
+          supplierProductId: pid,
+          title: 'CJ Dog Bed',
+          imageUrls: [],
+          variants: [{ supplierVariantId: `${pid}-v1`, priceCents: 1000, imageUrl: 'https://cj.example.com/live.jpg' }],
+        }),
+      }),
+    })
+    await validateAndSubmitWinners(deps, runFor([withAgentImage('pid-1')]))
+    const submitted = (deps.submit as ReturnType<typeof vi.fn>).mock.calls[0]![1]
+    expect(submitted.payload.variants[0].imageUrl).toBe('https://cj.example.com/live.jpg')
+  })
+
+  it('CLEARS the agent-proposed imageUrl when CJ shows no image for the variant', async () => {
+    const deps = makeDeps() // default adapter: live variant has no imageUrl
+    await validateAndSubmitWinners(deps, runFor([withAgentImage('pid-1')]))
+    const submitted = (deps.submit as ReturnType<typeof vi.fn>).mock.calls[0]![1]
+    expect(submitted.payload.variants[0].imageUrl).toBeUndefined()
+  })
+
+  it('treats a non-http(s) live value as absent', async () => {
+    const deps = makeDeps({
+      adapter: makeAdapter({
+        getProduct: async (pid) => ({
+          supplierProductId: pid,
+          title: 'CJ Dog Bed',
+          imageUrls: [],
+          variants: [{ supplierVariantId: `${pid}-v1`, priceCents: 1000, imageUrl: 'not a url' }],
+        }),
+      }),
+    })
+    await validateAndSubmitWinners(deps, runFor([winnerFor('pid-1')]))
+    const submitted = (deps.submit as ReturnType<typeof vi.fn>).mock.calls[0]![1]
+    expect(submitted.payload.variants[0].imageUrl).toBeUndefined()
+  })
+})
+
 describe('step 6: price-to-market gate', () => {
   it('gate skipped when marketLookups is null: winner submits, summary has NO market clause', async () => {
     const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({

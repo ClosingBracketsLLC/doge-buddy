@@ -207,10 +207,18 @@ async function processWinner(
 
     payload = {
       ...payload,
-      variants: payload.variants.map((v) => ({
-        ...v,
-        supplierCostCents: liveByVid.get(v.supplierVariantId)!.priceCents,
-      })),
+      variants: payload.variants.map((v) => {
+        const live = liveByVid.get(v.supplierVariantId)!
+        // v2 (spec 2026-09-01 Decision 1): the LIVE CJ variant image replaces whatever the agent
+        // proposed — undefined CLEARS it (a variant CJ shows no image for gets none), and a
+        // non-http(s) live value is treated as absent so this overwrite can never plant an
+        // unfetchable URL in the payload. Same trust pattern as the cost overwrite above.
+        const liveImage =
+          live.imageUrl && (live.imageUrl.startsWith('http://') || live.imageUrl.startsWith('https://'))
+            ? live.imageUrl
+            : undefined
+        return { ...v, supplierCostCents: live.priceCents, imageUrl: liveImage }
+      }),
     }
 
     deps.allowance.spend(10, `stock:${pid}`)
