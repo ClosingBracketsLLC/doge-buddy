@@ -130,6 +130,11 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
     cart, checkout hand-off) + *Claude* (fix list). Do after #6–#9 land, once, before launch.
 14. **SEO fields at listing time** — *Claude*, tiny. Set `seo.title`/`seo.description` from the
     proposal (today Hydrogen falls back to title + description, which is acceptable but generic).
+14b. **Market-price audit of pre-gate live products** — *Claude* (approved by Robert 2026-09-02).
+    The 23 products listed before the 1.3×-market gate merged were priced by the agent + the 60%
+    margin floor alone; run their titles through the SerpApi market-price lookup (one-off script,
+    ~23 requests against the monthly quota — schedule it away from a build week) and flag any
+    priced above 1.3× median for a manual repricing pass. Report, not auto-reprice.
 
 ## P2 — after launch
 
