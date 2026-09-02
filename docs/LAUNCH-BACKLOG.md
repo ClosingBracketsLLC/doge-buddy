@@ -89,12 +89,15 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
 
 6. **Product page: image gallery** — *Claude*, small. **ABSORBED 2026-09-01 into the Product Page
    v2 spec (`docs/superpowers/specs/2026-09-01-product-page-v2-design.md`) together with #7, plus
-   per-variant images end-to-end, labeled CJ supplier reviews, and trust badges — Robert's ask.**
-   Render all `media` (thumbnails + main), not just
+   per-variant images end-to-end, labeled CJ supplier reviews, and trust badges — Robert's ask.
+   BUILT 2026-09-01 on branch `product-page-v2` (worktree) — all 17 plan tasks committed,
+   code+tests green, typecheck clean; live tier pending (see `OWNER-CHECKLIST.md`'s "Product page
+   v2 LIVE CHECK").** Render all `media` (thumbnails + main), not just
    the variant image; the Clipper already has 3 images. Pair with the sourcing agent pulling ≥3 CJ
    images per proposal (the Snuff Pad has 1).
 7. **Product page: structured content** — *Claude* (template) + *sourcing agent* (content), medium.
-   **ABSORBED into the Product Page v2 spec — see #6.**
+   **ABSORBED into the Product Page v2 spec — see #6. BUILT 2026-09-01, same branch — live tier
+   pending, see #6.**
    Highlights (3–5 bullets), a specs block (size/material/weight from CJ data), "What's in the box",
    a **Shipping & returns** accordion sourced from `POLICY_COPY` (no new copy to maintain), the
    TrustStrip near the price, a quantity selector. The agent's `descriptionHtml` should be generated

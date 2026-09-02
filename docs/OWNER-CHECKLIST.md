@@ -453,6 +453,16 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 
   **Pass criteria:** (a) the script's closing `SerpApi requests made N (trends + market lookups)` line shows **N ≤ 25**; (b) at least one proposal summary carries `market $… median ×…` (visible in the Telegram notification and on the proposal page); (c) `SELECT keyword, score, snapshot->>'offerCount' AS offers FROM sourcing_signals WHERE source = 'market_price' ORDER BY created_at DESC LIMIT 5;` shows `offers ≥ 5`. Check (c) validates the Google Shopping response-shape FIXTURE-ASSUMPTION (spec §2) — `offers = 0` on every row means SerpApi's shape changed; tell Claude and the parser fixture gets corrected. If every winner drops with `sourcing_winner_no_market_price`/`price_above_market` instead, the run page's alerts carry the reason — also worth a look before re-running with `--force`. Prereqs: `SERPAPI_KEY` on the service + the quota check (footer).
 
+- [ ] ⚪ **Product page v2 LIVE CHECK** (after `product-page-v2` is merged to `main` and pushed; branch built 2026-09-01 — all 17 plan tasks committed, code+tests green, typecheck clean). Two runs, both from **inside the Railway ops service** (same localhost-DB trap as B14/the sourcing check above — a local run writes to the dev DB, not the live one):
+
+  1. `pnpm --filter @doge-buddy/ops backfill-listings --dry-run`, then the same command for real. This is the LIVE PROBE for `productUpdate(product, media)` create+attach, `productVariantAppendMedia`, `fileDelete`-of-MediaImage-gids (the one remaining FIXTURE-ASSUMPTION — a failure here degrades to non-fatal `backfill_media_orphaned` alerts, not a broken page), `metafieldsSet`, and `metafieldDefinitionCreate` on live — PLUS the `product/productComments` wire shape and its actual points cost (compare `pointsSpentToday` before/after the run, or the CJ dashboard — the adapter's `points: 10` is an assumption). **Pass:** live products show variant images + a reviews section (rendering also proves the metafield definitions landed).
+
+  2. One `pnpm --filter @doge-buddy/ops run-sourcing --max-winners 2` end-to-end (this may be the same run as the "Sourcing market-price LIVE CHECK" above — same command, both checks ride it). **Pass:** the proposal summary shows `N image(s)`; the admin proposal page shows the highlights/specs/what's-in-box preview (Task 4b's human gate); the listed product page shows gallery/highlights/specs/badges; switching variant changes the image. The per-variant `file` on `ProductVariantSetInput` was already introspection-verified at design time — this run exercises its *runtime* behavior. **Also record for observation** (not pass/fail): does `productSet` dedupe identical variant `file.originalSource` values, and where do variant files land in media order (the first media image drives `featuredImage` — collection cards and the OG image use it).
+
+  3. Eyeball the product page on the Fold (mobile-first).
+
+  4. After the probe: update `docs/cj-api-notes.md`'s "Still unverified" list with what the run proved (wire shape AND points cost) — it stays "Still unverified" until this runs; don't pre-claim it.
+
 - [ ] ⚪ **CJ wallet top-up ~$150** (Phase 7 canary). 🔴 blocks the first real order. Top-up is manual only — no API.
 - [ ] ⚪ **Policy pages → Shopify Settings** (Phase 7). Paste the `POLICY_COPY` text (`packages/core/src/policies.ts` — single-sourced; the storefront renders it and the agent quotes it) into Shopify Settings → Policies and review/finalize before launch. **Rewritten 2026-08-30 to match your no-refund stance:** returns = *All sales are final* (change of mind: keep it, discount code at our discretion) + *Damaged, defective, or wrong items* (photo within 14 days → return instructions, customer pays return shipping → replacement only after the return is received AND inspected, refund only if we can't replace); shipping = reship for non-delivery, refund only if we can't reship. Legally load-bearing: a no-refund policy is only enforceable when conspicuously posted (CA Civ. Code §1723 / NY GBL §218-a default to a 30-day return right otherwise), and non-delivery must still end in reship-or-refund (FTC Mail/Internet Order Rule) — refusing those turns into chargebacks that cost more than the refund.
 - [ ] ⚪ **Business checks before launch** (Phase 7): Shopify Payments setup, US tax registrations in Shopify Tax, general liability insurance for the LLC (recommended), policy pages review.
@@ -465,10 +475,13 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 is its live tier — canary is still next after that). When you complete an item, check it off and
 tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** **Product Page v2 spec written 2026-09-01
-(`docs/superpowers/specs/2026-09-01-product-page-v2-design.md` — variant images end-to-end,
-gallery, highlights/specs/what's-in-box, labeled CJ supplier reviews, trust badges, qty selector;
-absorbs backlog #6+#7): Robert reviews, then Claude writes the plan and builds on a branch.**
+**Next build session starts here →** **Product page v2 BUILT 2026-09-01 on branch
+`product-page-v2` (worktree) — spec + plan in
+`docs/superpowers/{specs,plans}/2026-09-01-product-page-v2*`, all 17 tasks committed, code+tests
+green (typecheck clean; the two known-benign dev-DB failures noted above). Next: Robert's
+merge/push call, then the two live checks (the `backfill-listings` v2 run, then one
+`run-sourcing --max-winners 2` — see "Product page v2 LIVE CHECK" above), THEN sourcing upgrade
+#2's spec (Google Trends rising related queries) after the market-price live check.**
 Also pending: sourcing upgrade 1 (market-price tool + 1.3× gate) is **MERGED to `main` 2026-09-01** (spec `2026-09-01-sourcing-market-price-design.md`; push is Robert's) — its **LIVE CHECK is the "Sourcing market-price LIVE CHECK" item above** (full command, flags, Railway-shell gotcha, pass criteria). Owner items before it: `SERPAPI_KEY` on the Railway ops service, and the SerpApi plan's monthly search quota (design assumed 250/mo; if it's 100, lower `SERPAPI_MAX_REQUESTS_PER_RUN` to 15 before a build week). Upgrade (2) — Google Trends rising related queries — gets its spec after the live check. Still queued behind it: runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
 one manual `run-sourcing --max-winners 2` → force an `inventory.sync` check → flip
 `workflow.sourcing.mode` to `auto` for the build-week runs → back to `manual` after). Once the
