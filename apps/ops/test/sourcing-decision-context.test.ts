@@ -84,4 +84,10 @@ describe('buildListingDecisionContext', () => {
     const ctx = buildListingDecisionContext({ ...base, candidate: { ...base.candidate, listedNum: null } } as never)
     expect(ctx.demand.cjListedCount).toBeNull()
   })
+
+  it('a non-integer live listedNum (CJ wire weirdness) degrades to null and stays schema-valid, not a throw', () => {
+    const ctx = buildListingDecisionContext({ ...base, candidate: { ...base.candidate, listedNum: 3.7 } } as never)
+    expect(ctx.demand.cjListedCount).toBeNull()
+    expect(ListingDecisionContextSchema.safeParse(ctx).success).toBe(true)
+  })
 })

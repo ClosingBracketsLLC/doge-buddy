@@ -41,6 +41,12 @@ describe('createSerpApiAmazonDemand', () => {
     expect(await createSerpApiAmazonDemand({ client }).probe('q')).toBeNull()
   })
 
+  it('a sub-cent extracted_price with no reviews is not usable (rounds to 0 cents, would fail the schema .positive())', async () => {
+    const thin = { organic_results: [{ extracted_price: 0.004 }, { extracted_price: 9.99 }, { reviews: 5 }] }
+    // only 2 usable entries (the sub-cent one is skipped) — below MIN_AMAZON_RESULTS
+    expect(await createSerpApiAmazonDemand({ client: clientWith(thin) }).probe('q')).toBeNull()
+  })
+
   it('samples only the first AMAZON_RESULTS_SAMPLED usable entries', async () => {
     const many = { organic_results: Array.from({ length: 15 }, (_, i) => ({ extracted_price: 10 + i, reviews: 100 + i })) }
     const snap = await createSerpApiAmazonDemand({ client: clientWith(many) }).probe('q')

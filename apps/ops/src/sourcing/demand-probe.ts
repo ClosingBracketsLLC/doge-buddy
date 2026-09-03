@@ -49,12 +49,15 @@ export function createSerpApiAmazonDemand(deps: { client: SerpApiClient }): Dema
       const reviews: number[] = []
       let sampled = 0
       for (const entry of json.organic_results ?? []) {
-        const priceOk = typeof entry.extracted_price === 'number' && Number.isFinite(entry.extracted_price) && entry.extracted_price > 0
+        // Compute cents first: a sub-cent extracted_price (e.g. 0.004) rounds to 0, which would
+        // fail the schema's medianPriceCents .positive() — such an entry is not usable as a price.
+        const priceCents = typeof entry.extracted_price === 'number' && Number.isFinite(entry.extracted_price) ? Math.round(entry.extracted_price * 100) : null
+        const priceOk = priceCents !== null && priceCents >= 1
         const reviewCount = parseReviews(entry.reviews)
         if (!priceOk && reviewCount === null) continue
         if (sampled >= AMAZON_RESULTS_SAMPLED) break
         sampled += 1
-        if (priceOk) prices.push(Math.round(entry.extracted_price! * 100))
+        if (priceOk) prices.push(priceCents)
         if (reviewCount !== null) reviews.push(reviewCount)
       }
       if (sampled < MIN_AMAZON_RESULTS) return null

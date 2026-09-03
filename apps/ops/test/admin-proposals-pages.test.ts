@@ -1095,7 +1095,7 @@ describe('proposals queue + detail pages', () => {
 
     const rendered = renderProposalDetail(row).value
 
-    expect(rendered).toContain('Decision numbers')
+    expect(rendered).toContain('Decision numbers (as computed at submit)') // caption: owner can edit the payload before approving
     expect(rendered).toContain('Demand signals — ESTIMATES, not sales')
     expect(rendered).toContain('$12.61') // landed for variant DB-1 (1261)
     expect(rendered).toContain('47.4%') // 4743 bps

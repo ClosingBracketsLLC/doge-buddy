@@ -92,6 +92,12 @@ export function buildListingDecisionContext(input: DecisionContextInput): Listin
   const usRows = stockRows.filter((s) => s.countryCode === 'US')
   const usStockUnits = usRows.length > 0 ? usRows.reduce((s, r) => s + r.quantity, 0) : null
 
+  // Live-data guard: candidate.listedNum comes raw off CJ's wire (agent-untyped, but not
+  // schema-typed either) — the core schema requires a nonnegative integer. A weird live value
+  // (non-integer, negative) degrades to null (unknown) rather than throwing at submit.
+  const listed = candidate?.listedNum
+  const cjListedCount = typeof listed === 'number' && Number.isInteger(listed) && listed >= 0 ? listed : null
+
   return {
     version: 1,
     economics: {
@@ -101,7 +107,7 @@ export function buildListingDecisionContext(input: DecisionContextInput): Listin
       usStockUnits,
     },
     demand: {
-      cjListedCount: candidate?.listedNum ?? null,
+      cjListedCount,
       cjReviews: reviews ?? null,
       marketOfferCount: lookup?.offerCount ?? null,
       trends: trendSignal ? { keyword: trendSignal.keyword, score: trendSignal.score, momentum: computeTrendMomentum(timelinePoints(trendSignal)) } : null,

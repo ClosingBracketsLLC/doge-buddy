@@ -435,10 +435,11 @@ if (config.shopify && config.adminBaseUrl && shopifyClient) {
 // is never silently retried — `claimDailyRun`'s same-day breaker is the only thing standing between
 // this cron and a second paid run today, so a blind retry would be actively dangerous here.
 if (config.anthropic) {
-  // A FACTORY, not baked-in instances (FIX C2): both providers share ONE SerpApiClient whose
-  // per-run request cap (25, trends + market lookups combined) never resets — a fresh client per
-  // run resets it every run. No SERPAPI_KEY => both null: trends stage skipped AND the market
-  // gate skipped (each with its own warning alert), the run otherwise proceeds.
+  // A FACTORY, not baked-in instances (FIX C2): all three providers (trends, market-price, amazon
+  // demand) share ONE SerpApiClient whose per-run request cap (defaults to 25, env-tunable via
+  // SERPAPI_MAX_REQUESTS_PER_RUN, shared across all three) never resets — a fresh client per run
+  // resets it every run. No SERPAPI_KEY => all null: trends stage skipped AND the market gate
+  // skipped (each with its own warning alert), the run otherwise proceeds.
   const providersFactory = (): SourcingProviders => {
     if (!config.serpapi) return { trends: null, marketPrice: null, demand: null }
     const client = createSerpApiClient({ apiKey: config.serpapi.apiKey, maxRequests: config.serpapi.maxRequestsPerRun })

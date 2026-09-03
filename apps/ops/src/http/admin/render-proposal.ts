@@ -69,7 +69,7 @@ function renderDecisionContext(rawContext: unknown): RawHtml {
   const { market, usStockUnits, freight } = ctx.economics
   const pct = (bps: number) => `${(bps / 100).toFixed(1)}%`
   return html`<section>
-    <h3>Decision numbers</h3>
+    <h3>Decision numbers (as computed at submit)</h3>
     <div class="table-wrap"><table class="rows">
       <thead><tr><th>SKU</th><th>Price</th><th>CJ cost</th><th>Freight</th><th>Landed</th><th>Profit</th><th>Margin</th></tr></thead>
       <tbody>

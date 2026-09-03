@@ -148,8 +148,10 @@ adapter.quoteShipping = async (q) => {
 }
 
 let serpApiRequests = 0
-// Factory (FIX C2): fresh client per run so the shared 25-request cap resets. This script drives
-// exactly one run; the counting fetchFn tallies BOTH stages' requests for the telemetry line.
+// Factory (FIX C2): fresh client per run so the shared request cap (defaults to 25, env-tunable
+// via SERPAPI_MAX_REQUESTS_PER_RUN) resets. This script drives exactly one run; the counting
+// fetchFn tallies ALL THREE providers' (trends, market-price, amazon demand) requests for the
+// telemetry line.
 const providersFactory = (): SourcingProviders => {
   if (!config.serpapi) return { trends: null, marketPrice: null, demand: null }
   const client = createSerpApiClient({
