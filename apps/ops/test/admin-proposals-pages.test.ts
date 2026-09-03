@@ -951,6 +951,7 @@ describe('proposals queue + detail pages', () => {
       status: 'pending',
       summary: 'Synthetic test proposal',
       payload: supportReplyPayload('ignored-ticket-id', 'We will follow up shortly.'),
+      decisionContext: null,
       sourceWorkflow: 'test',
       agentRunId: null,
       ticketId: null,
