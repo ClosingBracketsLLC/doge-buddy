@@ -14,6 +14,26 @@ export const CLAIM_TERMS = [
  * Case-insensitive substring match over the given text fields. Returns the matched term or null.
  * Returns the first matched term in EXCLUDED_CATEGORY_TERMS array order on overlaps (e.g., text 'treats' reports 'treat' if 'treat' comes first).
  */
+/**
+ * True when `term` occurs in `text` starting at a WORD BOUNDARY — the character before the match
+ * must not be a letter or digit. Terms encode their own trailing semantics ('cure ' vs 'cures',
+ * bare 'treat' deliberately catching 'treatment'), so only the leading edge is enforced here.
+ *
+ * Found live 2026-09-03 (runs 9cb42ad4/ee5602e6): plain `includes` made "snug, secure fit" match
+ * the claim term 'cure ' (se|cure |fit) — every winner whose copy used the word "secure" was
+ * scrubbed as a health claim — and would equally let "stick"/"Chewy" trip the exclusion terms
+ * 'tick'/'chew'.
+ */
+function matchesAtWordStart(text: string, term: string): boolean {
+  let from = 0
+  for (;;) {
+    const at = text.indexOf(term, from)
+    if (at === -1) return false
+    if (at === 0 || !/[a-z0-9]/.test(text[at - 1]!)) return true
+    from = at + 1
+  }
+}
+
 export function matchExcludedCategory(...texts: (string | null | undefined)[]): string | null {
   const combinedText = texts
     .filter((t) => t != null)
@@ -21,7 +41,7 @@ export function matchExcludedCategory(...texts: (string | null | undefined)[]): 
     .toLowerCase()
 
   for (const term of EXCLUDED_CATEGORY_TERMS) {
-    if (combinedText.includes(term)) {
+    if (matchesAtWordStart(combinedText, term)) {
       return term
     }
   }
@@ -48,7 +68,7 @@ export function findClaimViolations(...texts: (string | null | undefined)[]): st
 
   const violations: string[] = []
   for (const term of CLAIM_TERMS) {
-    if (combinedText.includes(term)) {
+    if (matchesAtWordStart(combinedText, term)) {
       violations.push(term)
     }
   }

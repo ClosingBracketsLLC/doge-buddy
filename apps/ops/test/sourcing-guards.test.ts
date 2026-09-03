@@ -20,6 +20,28 @@ describe('guards', () => {
     expect(findClaimViolations('the ultimate boredom cure')).toContain('cure ')
     expect(findClaimViolations('a', 'b', 'the ultimate boredom cure')).toContain('cure ')
   })
+  describe('leading word boundary: terms only match at a word START (live bug 2026-09-03)', () => {
+    it('"secure fit" does NOT match the claim term "cure " — the drop that killed the dog-boots winner', () => {
+      // se|cure |fit: plain substring matching saw c-u-r-e-space inside "secure fit" and scrubbed
+      // every winner whose copy said "secure" as a fake health claim (runs 9cb42ad4, ee5602e6).
+      expect(findClaimViolations('Adjustable strap for a snug, secure fit')).toEqual([])
+      expect(findClaimViolations('securely attaches to any leash')).toEqual([])
+    })
+    it('mid-word exclusion-term shadows do not fire: "stick" is not "tick", "seafood" is not "food"', () => {
+      expect(matchExcludedCategory('Fetch stick toy with non-stick coating')).toBeNull()
+      expect(matchExcludedCategory('seafood-grade stainless steel bowl')).toBeNull()
+      // word-START supersets still fire by design ('treat'→'treatment' above); note 'chew' does
+      // therefore still catch "Chewy"/"chewy" — acceptable collateral of the existing policy that
+      // excludes all chew products.
+    })
+    it('real word-start matches still fire, including word-start supersets', () => {
+      expect(findClaimViolations('a true cure for boredom')).toContain('cure ')
+      expect(findClaimViolations('this treatment works')).toContain('treatment')
+      expect(matchExcludedCategory('flea and tick collar')).toBe('flea')
+      expect(matchExcludedCategory('dog treats variety pack')).toBe('treat')
+    })
+  })
+
   it('htmlToText strips tags for scanning', () => {
     expect(htmlToText('<p>anxiety <strong>relief</strong></p>')).toBe('anxiety relief')
   })
