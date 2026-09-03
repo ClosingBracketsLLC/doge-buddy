@@ -441,7 +441,26 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 
 - [ ] ⚪ **FunkyDori webfont license check** (Phase 2). Not a blocker — Lilita One is the stand-in display face (the `--font-display` token in tailwind.css is the FunkyDori swap point); Poppins is the body face.
 - [x] ~~Apply for the Google Trends official API alpha.~~ **Applied (2026-08-24).** Approval is slow (months-to-never per applicant reports) — SerpApi bridges it meanwhile; the Phase 5 trends adapter is swappable, so approval landing later is a drop-in.
-- [ ] ⚪ **Local dev-DB hygiene (30 seconds):** run `psql "postgres://doge:doge@localhost:5433/doge_buddy" -c "DELETE FROM product_scores WHERE score_date = '2099-12-31';" -c "DELETE FROM support_tickets WHERE id = 'ac2d19a5-4748-4555-aaaf-4f4f549278e0' AND customer_email LIKE '%@example.com';"` — two orphaned score test-seed rows (leaked by a killed vitest run 2026-09-01) plus one leaked test ticket (`cc-…@example.com`, leaked 2026-09-03) make exactly three full-suite tests fail (`admin-dashboard` tests 8 + 13, `scoring-weekly-digest` freshness). Claude's DB deletes are classifier-blocked, so this one is yours; until then those three failures with exactly those signatures are known-benign.
+- [ ] ⚪ **Local dev-DB hygiene (60 seconds):** run
+
+  ```
+  psql "postgres://doge:doge@localhost:5433/doge_buddy" \
+    -c "DELETE FROM product_scores WHERE score_date = '2099-12-31';" \
+    -c "DELETE FROM support_tickets WHERE id = 'ac2d19a5-4748-4555-aaaf-4f4f549278e0' AND customer_email LIKE '%@example.com';" \
+    -c "DELETE FROM proposals WHERE created_at >= '2026-09-03T20:00:00Z' AND status = 'pending' AND type = 'new_listing';" \
+    -c "DELETE FROM agent_run_events WHERE run_id IN (SELECT id FROM agent_runs WHERE started_at >= '2026-09-03T20:00:00Z');" \
+    -c "DELETE FROM agent_runs WHERE started_at >= '2026-09-03T20:00:00Z';" \
+    -c "DELETE FROM sourcing_signals WHERE created_at >= '2026-09-03T20:00:00Z';"
+  ```
+
+  Cleans: two orphaned score test-seed rows (killed vitest run 2026-09-01), one leaked test
+  ticket (`cc-…@example.com`, 2026-09-03), and the two STRANDED blitz sourcing runs of
+  2026-09-03 evening (a fresh terminal lacked the `DATABASE_URL` export, so 2 agent runs +
+  7 pending proposals + their signals landed in the dev DB — the run-sourcing DB banner added
+  the same night makes this loud in future). Until cleaned, exactly four full-suite tests fail
+  with these signatures and are known-benign: `admin-dashboard` tests 8, 9 + 13,
+  `scoring-weekly-digest` freshness. Claude's DB deletes are classifier-blocked, so this one is
+  yours.
 
 - [ ] ⚪ **Sourcing market-price LIVE CHECK** (after `main` is pushed and Railway deploys; merged 2026-09-01). One run, from **inside the Railway ops service** (`railway ssh` into the service, then from `/app`) — a local run reads `apps/ops/.env`, whose `DATABASE_URL` is the localhost dev DB, so proposals/signals would land in the wrong database (same trap as the first backfill no-op):
 
