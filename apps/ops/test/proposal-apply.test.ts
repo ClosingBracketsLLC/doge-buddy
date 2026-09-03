@@ -1316,8 +1316,14 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
     const reviews = JSON.parse((create.metafields as any[]).find((m) => m.key === 'supplier_reviews').value)
     expect(reviews).toMatchObject({ average: 4.5, count: 2 })
     expect(reviews.reviews).toHaveLength(2)
-    // the variant's image URL must not double as a product-level file
-    expect(create.files.map((f: { originalSource: string }) => f.originalSource)).not.toContain('https://cdn.example.com/variant-1.jpg')
+    // LIVE-VERIFIED 2026-09-03 (proposal a6df7732 dead-letter): ProductVariantSetInput.file LINKS
+    // to an entry of the product-level `files` input by originalSource — it does not create media.
+    // Excluding variant URLs from `files` draws "File original source missing from the product
+    // files input" userErrors and fails the whole create. `files` must be the DEDUPED UNION of
+    // imageUrls and every variant imageUrl: present exactly once each.
+    const fileSources = create.files.map((f: { originalSource: string }) => f.originalSource)
+    expect(fileSources).toContain('https://cdn.example.com/variant-1.jpg')
+    expect(new Set(fileSources).size).toBe(fileSources.length)
 
     const flip = inputs[1] as any
     expect(flip.status).toBe('ACTIVE')

@@ -272,9 +272,18 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
         name: 'Title',
         values: payload.variants.map((v, i, all) => ({ name: all.length === 1 ? 'Default Title' : v.sku })),
       }],
-      files: payload.imageUrls
-        .filter((url) => !payload.variants.some((v) => v.imageUrl === url))
-        .map((url) => ({ originalSource: url, contentType: 'IMAGE' })),
+      // LIVE-VERIFIED 2026-09-03 (proposal a6df7732's dead-letter was the probe): a variant's
+      // `file.originalSource` LINKS to an entry of this product-level `files` input — it does not
+      // create media on its own. Omitting a variant's URL here fails the whole create with
+      // "File original source missing from the product files input" userErrors, so `files` is the
+      // DEDUPED UNION of the gallery images and every variant image (each URL exactly once;
+      // Shopify attaches one media per entry and the variant references it).
+      files: [
+        ...new Set([
+          ...payload.imageUrls,
+          ...payload.variants.flatMap((v) => (v.imageUrl ? [v.imageUrl] : [])),
+        ]),
+      ].map((url) => ({ originalSource: url, contentType: 'IMAGE' })),
       metafields,
       variants: payload.variants.map((v, i, all) => ({
         sku: v.sku,
