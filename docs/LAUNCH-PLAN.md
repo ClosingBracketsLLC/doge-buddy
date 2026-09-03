@@ -53,13 +53,36 @@ What was folded in (all pre-approved in principle):
 - **[C] catalog-P0-style follow-through per batch**: collections fill by tag automatically;
   spot-probe listings read-only (variant images, metafields, gallery) as batches land.
 
-## L3 — Catalog reset [R decision + C execution]
+## L3 — Catalog reset [R decision CONFIRMED 2026-09-03 + R execution, runbook ready]
 
-AFTER enough replacements have landed (keep the store non-empty for smoke tests): deprecate all
-22 pre-gate products (`deprecate-product --product <uuid> --reason catalog-reset`, the existing
-worker: DRAFT → unpublish → local deprecated → safe CJ unsubscribe; never deletes). Robert
-approves the list; the market-price audit (`docs/market-price-audit-2026-09-03.md`) is the
-reference. The audit's reprice option is SUPERSEDED by this reset decision.
+**Robert's ruling (2026-09-03 chat): deprecate ALL pre-gate products, no repricing** — the
+audit's reprice option is dead. Timing unchanged: run this AFTER enough L2 replacements have
+landed (suggested ≥ 30–40 live; keep the store non-empty). Deprecation ≠ deletion: the existing
+worker takes each product DRAFT → unpublished → local `deprecated` → safe CJ unsubscribe;
+reversible, order history intact. Reference list: `docs/market-price-audit-2026-09-03.md`.
+
+**Runbook (from `railway ssh` into the ops service, then `/app`):**
+
+1. Review the list — expect the 22 pre-gate products; the foldable water bottle (born through
+   the live gate 2026-09-03) and every wave listing must NOT appear (the `created_at` cutoff +
+   handle guard exclude them):
+
+   ```
+   psql "$DATABASE_URL" -c "SELECT id, title, status, created_at::date FROM products WHERE status <> 'deprecated' AND created_at < '2026-09-03T00:00:00Z' AND (handle IS NULL OR handle NOT LIKE 'foldable-portable-dog-water-bottle%') ORDER BY created_at;"
+   ```
+
+2. Generate the ready-to-paste command lines (same WHERE clause), then paste the output —
+   each line submits ONE `deprecate_product` proposal through `workflow.deprecation.mode`:
+
+   ```
+   psql "$DATABASE_URL" -At -c "SELECT 'pnpm --filter @doge-buddy/ops deprecate-product --product ' || id || ' --reason catalog-reset' FROM products WHERE status <> 'deprecated' AND created_at < '2026-09-03T00:00:00Z' AND (handle IS NULL OR handle NOT LIKE 'foldable-portable-dog-water-bottle%') ORDER BY created_at;"
+   ```
+
+3. In manual mode (recommended, stays on through launch) that's one Telegram Approve tap per
+   product — ~22 taps, idempotent to re-run (an existing live deprecation proposal is skipped,
+   never duplicated). If you'd rather one-shot the batch on auto, say so FIRST: the launch plan
+   gates any deprecation auto-flip behind the C19 digest FYI build (L4 item 5), which Claude
+   will build on request.
 
 ## L4 — Launch gates (all pre-existing OWNER-CHECKLIST items, consolidated) [R unless noted]
 
