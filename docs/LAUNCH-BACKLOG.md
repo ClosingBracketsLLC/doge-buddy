@@ -158,6 +158,16 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
     if you sell outside the US.
 19. Email capture (newsletter) — deliberately absent today (bot-flood history); revisit with the same
     Turnstile-gated pattern as `/contact` if wanted.
+20. **Subscriptions ("subscribe & save") — Robert's stretch goal (2026-09-03).** Shopify selling
+    plans + a recurring-order lane; natural first SKUs are low-risk consumable GEAR already in
+    catalog scope (poop bags, puppy pads, grooming wipes). **Dog FOOD on subscription is the
+    end-state but gated on a vetted supplier lane** — commercial pet food needs AAFCO-compliant
+    labeling and per-state registrations, and CJ-dropshipped food (unmanaged expiry, unvetted
+    ingredients, 3–7-day unrefrigerated transit) is a liability/chargeback trap under a no-refund
+    policy. Route: branded US food via Shopify Collective or a real distributor, post-launch.
+    Guard note: 'dog food' stays in EXCLUDED_CATEGORY_TERMS until that lane exists (ruling
+    2026-09-03: 'food'→'dog food' so feeding GEAR lists; 'calming' un-excluded, claims still
+    scrubbed).
 
 ## Suggested order
 
