@@ -252,8 +252,9 @@ or budget changes — the agent's job did not change; Robert's information did.
 
 `SourcingProviders` gains `demand: DemandProbeProvider | null`. Both roots build
 `createSerpApiAmazonDemand({ client })` from the same shared per-run client (null when no
-`SERPAPI_KEY`), and read the optional `SERPAPI_MAX_REQUESTS_PER_RUN` env var (integer 1–200;
-unparseable → default 25 + one boot warning) into `createSerpApiClient`'s `maxRequests`.
+`SERPAPI_KEY`), and read the optional `SERPAPI_MAX_REQUESTS_PER_RUN` env var (integer 1–200,
+parsed in `config.ts`'s `EnvSchema`; an invalid value fails config load loudly — the same
+throw-not-clamp stance as every `sourcing.*` knob) into `createSerpApiClient`'s `maxRequests`.
 `run-sourcing`'s closing line stays the single source of request-count truth.
 
 ## Error handling — every path degrades or drops per-winner, never aborts
