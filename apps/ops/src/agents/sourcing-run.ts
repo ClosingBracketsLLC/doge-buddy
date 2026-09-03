@@ -93,8 +93,10 @@ function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
         `returned id (same supplierProductId). Plain code enforces: the median of your variant prices`,
         `must be <= ${ratio}× the market median (e.g. market $24.99 → ceiling $${exampleCeiling}). A lookup with`,
         'fewer than 5 offers is inconclusive — broaden the query once. Winners with no conclusive lookup,',
-        'a lookup for a different product, or a price above the ceiling are dropped. Price TOWARD the',
-        "market median when the margin floor allows: don't overprice, don't leave money on the table.",
+        'a lookup for a different product, or a price above the ceiling are dropped. Set each variant price',
+        'to clear the freight-inclusive margin floor FIRST — price up to the ceiling when freight demands it.',
+        'Anchor toward the market median only when the floor is already comfortably cleared. Never exceed',
+        "the ceiling; don't leave money on the table.",
       ]
     : [
         '## Market price',

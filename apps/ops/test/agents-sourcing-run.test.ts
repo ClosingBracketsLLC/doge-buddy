@@ -200,6 +200,17 @@ describe('runSourcingAgent (fake SDK stream)', () => {
     expect(capturedSystem).toContain('lookup_market_price')
   })
 
+  it('armed prompt prices floor-first', async () => {
+    const runId = await claimRow('market-armed-floor-first')
+    let capturedPrompt = ''
+    const d = deps((args) => { capturedPrompt = args.prompt; return stream() })
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: [], marketGateArmed: true })
+
+    expect(capturedPrompt).toContain('clear the freight-inclusive margin floor FIRST')
+    expect(capturedPrompt).toContain('Anchor toward the market median only when the floor is already comfortably cleared')
+    expect(capturedPrompt).not.toContain('Price TOWARD the')
+  })
+
   it('unarmed (flag absent): advisory sentence, no HARD RULE, no marketLookupId contract', async () => {
     const runId = await claimRow('market-unarmed')
     let capturedPrompt = ''
@@ -208,6 +219,17 @@ describe('runSourcingAgent (fake SDK stream)', () => {
 
     expect(capturedPrompt).toContain('Market price lookup is unavailable this run')
     expect(capturedPrompt).not.toContain('## Market price — HARD RULE')
+  })
+
+  it('unarmed prompt unchanged: new floor-first wording absent', async () => {
+    const runId = await claimRow('market-unarmed-floor-first')
+    let capturedPrompt = ''
+    const d = deps((args) => { capturedPrompt = args.prompt; return stream() })
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: [] })
+
+    expect(capturedPrompt).toContain('Market price lookup is unavailable this run')
+    expect(capturedPrompt).not.toContain('clear the freight-inclusive margin floor FIRST')
+    expect(capturedPrompt).not.toContain('Anchor toward the market median only when the floor is already comfortably cleared')
   })
 
   it('a winner with marketLookupId parses; SOURCING_MAX_TURNS is 30', async () => {
