@@ -116,7 +116,10 @@ function loadDeferredData({context, params}: Route.LoaderArgs) {
   // renders nothing.
   const relatedProducts = params.handle
     ? context.storefront
-        .query(RELATED_PRODUCTS_QUERY, {variables: {handle: params.handle}})
+        .query(RELATED_PRODUCTS_QUERY, {
+          variables: {handle: params.handle},
+          cache: context.storefront.CacheLong(),
+        })
         .then((result) => pickRelated(result.product?.collections?.nodes, params.handle!))
         .catch((error: Error) => {
           console.error(error);

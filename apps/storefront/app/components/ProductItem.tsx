@@ -28,9 +28,9 @@ export function ProductItem({
     >
       <ProductCardImage image={product.featuredImage} title={product.title} />
       <h3 className="mt-2 text-ink">{product.title}</h3>
-      <p className="mt-1.5 inline-block rounded border-2 border-ink bg-badge px-2 py-0.5 font-display text-ink">
+      <div className="mt-1.5 inline-block rounded border-2 border-ink bg-badge px-2 py-0.5 font-display text-ink">
         <Money data={product.priceRange.minVariantPrice} />
-      </p>
+      </div>
     </Link>
   );
 }
