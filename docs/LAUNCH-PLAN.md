@@ -7,9 +7,21 @@ pre-gate products get deprecated once replacements land; (3) target **100 produc
 launch. This doc is the single ordered list of what remains; the OWNER-CHECKLIST footer points
 here. Robert-owned items marked **[R]**, Claude builds marked **[C]**.
 
-## L1 — Sourcing decision-support build [C] (next build session, ONE spec)
+## L1 — Sourcing decision-support build [C] — ✅ BUILT 2026-09-03
 
-Brainstorm → spec → plan → SDD, folding together (all pre-approved in principle):
+Spec: `docs/superpowers/specs/2026-09-03-sourcing-decision-support-design.md` · plan:
+`docs/superpowers/plans/2026-09-03-sourcing-decision-support.md` · branch
+`sourcing-decision-support` (14 tasks, TDD, all task reviews clean; ops 1590/1593 — the 3
+failures are the known-benign dev-DB-state trio in the checklist's hygiene item; typecheck
+clean). Live check = the **L1 decision-support LIVE CHECK** item in OWNER-CHECKLIST (two
+FIXTURE-ASSUMPTIONS to verify: Google RELATED_QUERIES + Amazon organic_results shapes).
+Spec-time verification recorded there: CJ's product-DETAIL wire carries no sold/listing counts
+(fixtures authoritative), so the demand block uses harvest's `listedNum`, agent-fetched review
+page-1 samples (code-recorded), market offer counts, Trends score+momentum, and the Amazon
+probe — all labeled ESTIMATES. `SERPAPI_MAX_REQUESTS_PER_RUN` is now an env knob on the ops
+service (default 25) — set it from the quota check below.
+
+What was folded in (all pre-approved in principle):
 - **Google Trends rising-related-queries** keyword expansion (upgrade #2, approved 2026-09-02)
   + the **Amazon Pet-Supplies demand cross-check** via SerpApi's Amazon engine (approved same
   day; category-popularity sort, not true Movers & Shakers — see

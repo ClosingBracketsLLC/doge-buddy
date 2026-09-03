@@ -441,7 +441,7 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 
 - [ ] ⚪ **FunkyDori webfont license check** (Phase 2). Not a blocker — Lilita One is the stand-in display face (the `--font-display` token in tailwind.css is the FunkyDori swap point); Poppins is the body face.
 - [x] ~~Apply for the Google Trends official API alpha.~~ **Applied (2026-08-24).** Approval is slow (months-to-never per applicant reports) — SerpApi bridges it meanwhile; the Phase 5 trends adapter is swappable, so approval landing later is a drop-in.
-- [ ] ⚪ **Local dev-DB hygiene (30 seconds):** run `psql "postgres://doge:doge@localhost:5433/doge_buddy" -c "DELETE FROM product_scores WHERE score_date = '2099-12-31';"` — two orphaned test-seed rows (leaked by a killed vitest run 2026-09-01) make exactly two full-suite tests fail (`admin-dashboard` test 13, `scoring-weekly-digest` freshness). Claude's DB deletes are classifier-blocked, so this one is yours; until then those two failures with exactly those signatures are known-benign.
+- [ ] ⚪ **Local dev-DB hygiene (30 seconds):** run `psql "postgres://doge:doge@localhost:5433/doge_buddy" -c "DELETE FROM product_scores WHERE score_date = '2099-12-31';" -c "DELETE FROM support_tickets WHERE id = 'ac2d19a5-4748-4555-aaaf-4f4f549278e0' AND customer_email LIKE '%@example.com';"` — two orphaned score test-seed rows (leaked by a killed vitest run 2026-09-01) plus one leaked test ticket (`cc-…@example.com`, leaked 2026-09-03) make exactly three full-suite tests fail (`admin-dashboard` tests 8 + 13, `scoring-weekly-digest` freshness). Claude's DB deletes are classifier-blocked, so this one is yours; until then those three failures with exactly those signatures are known-benign.
 
 - [ ] ⚪ **Sourcing market-price LIVE CHECK** (after `main` is pushed and Railway deploys; merged 2026-09-01). One run, from **inside the Railway ops service** (`railway ssh` into the service, then from `/app`) — a local run reads `apps/ops/.env`, whose `DATABASE_URL` is the localhost dev DB, so proposals/signals would land in the wrong database (same trap as the first backfill no-op):
 
@@ -452,6 +452,14 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
   All flags (each optional): `--force` (bypass the same-day circuit breaker for a repeat run today) · `--keywords "a,b,c"` (≤ 8, replaces the default five for this run) · `--max-winners N` (1–12) · `--budget USD` (0.5–10, agent stop-loss) · `--candidates N` (3–80) · `--pages N` (1–40). Both `--flag value` and `--flag=value` work; unknown flags abort loudly. There is **no flag for the price ratio** — that's the `sourcing.max_price_to_market_bps` setting on `/admin/settings` (default 13000 = 1.3×; range 10000–20000).
 
   **Pass criteria:** (a) the script's closing `SerpApi requests made N (trends + market lookups)` line shows **N ≤ 25**; (b) at least one proposal summary carries `market $… median ×…` (visible in the Telegram notification and on the proposal page); (c) `SELECT keyword, score, snapshot->>'offerCount' AS offers FROM sourcing_signals WHERE source = 'market_price' ORDER BY created_at DESC LIMIT 5;` shows `offers ≥ 5`. Check (c) validates the Google Shopping response-shape FIXTURE-ASSUMPTION (spec §2) — `offers = 0` on every row means SerpApi's shape changed; tell Claude and the parser fixture gets corrected. If every winner drops with `sourcing_winner_no_market_price`/`price_above_market` instead, the run page's alerts carry the reason — also worth a look before re-running with `--force`. Prereqs: `SERPAPI_KEY` on the service + the quota check (footer).
+
+- [ ] ⚪ **L1 decision-support LIVE CHECK** (after `main` is pushed and Railway deploys; built 2026-09-03 on branch `sourcing-decision-support`, spec `2026-09-03-sourcing-decision-support-design.md`). One wave-shaped run from **inside the Railway ops service** (`railway ssh` into the service, then from `/app` — same localhost-DB trap as every item below):
+
+  ```
+  pnpm --filter @doge-buddy/ops run-sourcing --max-winners 2 --force
+  ```
+
+  **Pass criteria:** (a) `SELECT keyword, score, snapshot->>'baseKeyword' AS base FROM sourcing_signals WHERE source = 'trends_rising' ORDER BY created_at DESC LIMIT 10;` shows rows — zero rows on a SerpApi-armed run means Google's RELATED_QUERIES response shape differs from the fixture (tell Claude; the parser fixture gets corrected, run still degrades safely to base keywords); (b) a proposal page shows the new **Decision numbers** section with a populated Amazon line — `amazon` missing on every winner means SerpApi's Amazon `organic_results` shape differs (same fixture-correction path as (a)); (c) the Telegram summary carries `profit $…` and `| est: …` clauses; (d) the closing `SerpApi requests made N (trends + market + amazon lookups)` line shows N ≤ 25 (or your env-set cap). **SerpApi cap is now env-tunable:** set `SERPAPI_MAX_REQUESTS_PER_RUN` on the Railway ops service — plan ≥ 750/mo → `35` for the wave month; ~250/mo → leave unset (default 25); 100/mo → `15`. Your L2 quota check decides this number.
 
 - [ ] ⚪ **Product page v2 LIVE CHECK** (after `product-page-v2` is merged to `main` and pushed; branch built 2026-09-01 — all 17 plan tasks committed, code+tests green, typecheck clean). Two runs, both from **inside the Railway ops service** (same localhost-DB trap as B14/the sourcing check above — a local run writes to the dev DB, not the live one):
 
@@ -475,16 +483,19 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 is its live tier — canary is still next after that). When you complete an item, check it off and
 tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** **LAUNCH PUSH — `docs/LAUNCH-PLAN.md` is now the ordered
-list of everything that remains (written 2026-09-03 on Robert's launch call: full catalog
-re-source through the new pipeline, 100-product target, every proposal carries economics +
-demand-estimate numbers before approval). First build = L1: ONE spec folding Google Trends
-keywords + the Amazon demand cross-check + the proposal economics/demand blocks + the pricing
-prompt tweak — brainstorm → spec → plan → SDD, research grounding in
-`docs/supplier-trend-research-2026-09-02.md`. Both live checks (product page v2 AND
-market-price) are CLOSED 2026-09-03 — first v2 listing live end-to-end, mode back to `manual`.
-Before the L2 wave starts, Robert's SerpApi quota check is the binding constraint (details in
-the plan). Post-canary, parked with research done: Zendrop as second supplier.**
+**Next build session starts here →** **L1 IS BUILT (2026-09-03, branch `sourcing-decision-support`
+merged to local main; spec `2026-09-03-sourcing-decision-support-design.md`, plan
+`2026-09-03-sourcing-decision-support.md`): Trends rising-query keyword expansion (Stage 1b),
+Amazon demand cross-check (code-driven Stage-6 probe), economics + demand-ESTIMATES blocks on
+every new_listing proposal (`proposals.decision_context`, migration 0011, rendered on `/admin` +
+Telegram one-liner), floor-first pricing prompt, and an env-tunable
+`SERPAPI_MAX_REQUESTS_PER_RUN`. Robert's next moves, in order: (1) SerpApi quota check — the L2
+binding constraint, now doubling as the env-cap decision (table in the L1 live-check item above);
+(2) push main + Railway deploy; (3) the L1 decision-support LIVE CHECK item above (two
+FIXTURE-ASSUMPTIONS — RELATED_QUERIES + Amazon response shapes — only verifiable live);
+(4) start the L2 wave per `docs/LAUNCH-PLAN.md` (~2 runs/day, `--max-winners 8 --force`,
+mode stays `manual` so every listing passes Robert with the L1 numbers). Then L3 catalog reset →
+L4 launch gates. Post-canary, parked with research done: Zendrop as second supplier.**
 Also pending: sourcing upgrade 1 (market-price tool + 1.3× gate) is **MERGED to `main` 2026-09-01** (spec `2026-09-01-sourcing-market-price-design.md`; push is Robert's) — its **LIVE CHECK is the "Sourcing market-price LIVE CHECK" item above** (full command, flags, Railway-shell gotcha, pass criteria). Owner items before it: `SERPAPI_KEY` on the Railway ops service, and the SerpApi plan's monthly search quota (design assumed 250/mo; if it's 100, lower `SERPAPI_MAX_REQUESTS_PER_RUN` to 15 before a build week). Upgrade (2) — Google Trends rising related queries — gets its spec after the live check. Still queued behind it: runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
 one manual `run-sourcing --max-winners 2` → force an `inventory.sync` check → flip
 `workflow.sourcing.mode` to `auto` for the build-week runs → back to `manual` after). Once the
