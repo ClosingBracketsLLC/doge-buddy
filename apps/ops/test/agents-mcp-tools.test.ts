@@ -9,6 +9,7 @@ import type {
 import { PointsAllowance, PointsAllowanceExceededError, SOURCING_POINTS_ALLOWANCE } from '../src/agents/points.ts'
 import { TOOL_POINT_COSTS, createSourcingMcpServer, createSourcingToolHandlers } from '../src/agents/mcp-tools.ts'
 import { MarketLookups, type MarketOffer, type MarketPriceProvider } from '../src/sourcing/market-price.ts'
+import { ReviewsSeen } from '../src/sourcing/decision-context.ts'
 
 type StubAdapter = Pick<SupplierAdapter, 'getProduct' | 'getProductReviews' | 'getVariantStock' | 'quoteShipping'>
 
@@ -351,6 +352,57 @@ describe('agents/mcp-tools', () => {
       expect(bareHandlers.lookup_market_price).toBeDefined()
       const bareResult = bareHandlers.lookup_market_price({ supplierProductId: 'p', query: 'q' })
       return expect(bareResult).resolves.toMatchObject({ isError: true })
+    })
+  })
+
+  describe('get_reviews ReviewsSeen recording', () => {
+    it('records page-1 results', async () => {
+      const adapter = makeStubAdapter({
+        getProductReviews: vi.fn(async () => [{ rating: 4, content: 'ok' }, { content: 'unrated' }]),
+      })
+      const reviewsSeen = new ReviewsSeen()
+      const handlers = createSourcingToolHandlers({ adapter, allowance: new PointsAllowance(), reviewsSeen })
+
+      const result = await handlers.get_reviews({ supplierProductId: 'pid1' }, undefined)
+
+      expect(result.isError).toBeUndefined()
+      expect(reviewsSeen.get('pid1')).toEqual({ page1Count: 2, ratedCount: 1, avgRating: 4 })
+    })
+
+    it('explicit page 1 records; page 2 does not', async () => {
+      const adapter = makeStubAdapter()
+      const reviewsSeen = new ReviewsSeen()
+      const handlers = createSourcingToolHandlers({ adapter, allowance: new PointsAllowance(), reviewsSeen })
+
+      await handlers.get_reviews({ supplierProductId: 'pid2', page: 2 }, undefined)
+      expect(reviewsSeen.get('pid2')).toBeUndefined()
+
+      await handlers.get_reviews({ supplierProductId: 'pid2', page: 1 }, undefined)
+      expect(reviewsSeen.get('pid2')).toBeDefined()
+    })
+
+    it('an adapter error records nothing', async () => {
+      const adapter = makeStubAdapter({
+        getProductReviews: vi.fn(async () => {
+          throw new Error('cj down')
+        }),
+      })
+      const reviewsSeen = new ReviewsSeen()
+      const handlers = createSourcingToolHandlers({ adapter, allowance: new PointsAllowance(), reviewsSeen })
+
+      const result = await handlers.get_reviews({ supplierProductId: 'pid3' }, undefined)
+
+      expect(result.isError).toBe(true)
+      expect(reviewsSeen.get('pid3')).toBeUndefined()
+    })
+
+    it('absent registry is a no-op (existing callers unaffected)', async () => {
+      const adapter = makeStubAdapter()
+      const handlers = createSourcingToolHandlers({ adapter, allowance: new PointsAllowance() })
+
+      const result = await handlers.get_reviews({ supplierProductId: 'pid4' }, undefined)
+
+      expect(result.isError).not.toBe(true)
     })
   })
 })

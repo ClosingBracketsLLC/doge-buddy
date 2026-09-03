@@ -4,6 +4,7 @@ import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { z } from 'zod'
 import { PointsAllowance, PointsAllowanceExceededError } from './points.ts'
 import { MarketLookups, type MarketPriceProvider } from '../sourcing/market-price.ts'
+import type { ReviewsSeen } from '../sourcing/decision-context.ts'
 
 /** CJ points cost charged against the run's PointsAllowance for each tool call. */
 export const TOOL_POINT_COSTS = {
@@ -26,6 +27,10 @@ export interface SourcingMcpDeps {
    *  absent => the tool does not exist and the prompt says the gate is skipped (spec Decision 5). */
   marketPrice?: MarketPriceProvider | null
   marketLookups?: MarketLookups
+  /** L1 (spec 2026-09-03 Decision 7): when present, page-1 get_reviews results are summarized
+   *  into this run-scoped registry as they pass through — code-recorded provenance for the
+   *  proposal demand block, zero extra CJ calls. Absent = no recording (existing callers). */
+  reviewsSeen?: ReviewsSeen
 }
 
 function ok(result: unknown): CallToolResult {
@@ -63,7 +68,7 @@ function trySpend(allowance: PointsAllowance, cost: number, name: string): CallT
  * handlers object (for tests), but the MCP server only registers it when both market deps are
  * present. */
 export function createSourcingToolHandlers(deps: SourcingMcpDeps) {
-  const { adapter, allowance, marketPrice, marketLookups } = deps
+  const { adapter, allowance, marketPrice, marketLookups, reviewsSeen } = deps
 
   return {
     // Second `_extra` param is unused but kept so these handlers structurally match the SDK's
@@ -85,6 +90,9 @@ export function createSourcingToolHandlers(deps: SourcingMcpDeps) {
       if (exhausted) return exhausted
       try {
         const result = await adapter.getProductReviews(args.supplierProductId, { page: args.page })
+        if (args.page === undefined || args.page === 1) {
+          reviewsSeen?.record(args.supplierProductId, result)
+        }
         return ok(result)
       } catch (err) {
         return errorResult(scrubMessage(err))
