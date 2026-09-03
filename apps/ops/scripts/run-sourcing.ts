@@ -202,6 +202,13 @@ try {
 
   // Resolved here purely to PRINT what this run will do before it costs anything; the pipeline
   // resolves the same knobs itself (one settings read each — no shared state to get out of sync).
+  // Which database this run writes to, on line one — a run against the localhost dev DB sends
+  // Telegram links the Railway admin can't resolve (hit live 2026-09-03: 7 proposals stranded in
+  // dev because a fresh terminal lacked the DATABASE_URL export). Loud beats stranded.
+  const dbHost = new URL(config.databaseUrl).hostname
+  console.log(
+    `run-sourcing: DATABASE → ${dbHost}${dbHost === 'localhost' || dbHost === '127.0.0.1' ? '  ⚠ LOCAL DEV DB — proposals will NOT reach the live store/admin (export DATABASE_URL for a live run)' : ''}`,
+  )
   console.log(`run-sourcing: knobs — ${describeSourcingKnobs(await resolveSourcingKnobs(settings, overrides))}`)
   console.log(`run-sourcing: starting${force ? ' (--force)' : ''}...`)
   const result = await runSourcingPipeline(deps)
