@@ -44,6 +44,7 @@ import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
 import { scoringNightlyHandler, SCORING_NIGHTLY_QUEUE, type ScoringNightlyDeps } from './jobs/scoring-nightly.ts'
 import { scoringWeeklyHandler, SCORING_WEEKLY_QUEUE, type ScoringWeeklyDeps } from './jobs/scoring-weekly-digest.ts'
 import { shopifyWebhookAudit } from './jobs/shopify-webhook-audit.ts'
+import { sourcingManualHandler } from './jobs/sourcing-manual.ts'
 import { sourcingWeeklyHandler } from './jobs/sourcing-weekly.ts'
 import { supportAgentRunHandler, SUPPORT_AGENT_QUEUE, type SupportAgentJobDeps } from './jobs/support-agent-run.ts'
 import { formAckHandler, FORM_ACK_QUEUE } from './jobs/support-form-ack.ts'
@@ -456,6 +457,16 @@ if (config.anthropic) {
     retryLimit: 0,
     expireInSeconds: 3600,
   })
+  // Dashboard "Run sourcing now" (owner ask 2026-09-03): manual queue with the same no-blind-retry
+  // stance as the cron. `policy: 'singleton'` = one queued/active job at a time — a double-click or
+  // an impatient second press while a run is going is absorbed, never a second paid run.
+  await createQueueRetrying(queue.boss, 'sourcing.manual', {
+    name: 'sourcing.manual',
+    policy: 'singleton',
+    retryLimit: 0,
+    expireInSeconds: 3600,
+  })
+  await queue.boss.work('sourcing.manual', sourcingManualHandler(sourcingDeps))
   // No number in this line on purpose: since the catalog-p0 knobs (spec §5) the stop-loss is
   // resolved PER RUN from `sourcing.max_budget_cents` (`sourcing/knobs.ts`), which the owner can
   // change on /admin/settings at any time — a figure printed once at boot would go stale and lie.

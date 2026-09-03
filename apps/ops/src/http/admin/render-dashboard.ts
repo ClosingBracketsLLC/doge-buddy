@@ -116,6 +116,24 @@ export function renderDashboard(h: HealthStrip, now: Date = new Date()): RawHtml
       ${modeCard('Refunds', 'workflow.refund.mode', h.modes.refund)}
       ${modeCard('Deprecation', 'workflow.deprecation.mode', h.modes.deprecation)}
     </div>
+    <h2>Run sourcing</h2>
+    <div class="card">
+      <form method="post" action="/admin/sourcing/run">
+        <label for="rs-keywords">Keywords (comma-separated, up to 8 — blank uses the default five)</label>
+        <input id="rs-keywords" name="keywords" placeholder="dog toy,dog leash,dog bed,dog grooming,dog">
+        <div class="grid">
+          <label>Max winners <input name="maxWinners" type="number" min="1" max="12" placeholder="8"></label>
+          <label>Candidates <input name="candidates" type="number" min="3" max="80" placeholder="40"></label>
+          <label>Pages <input name="pages" type="number" min="1" max="40" placeholder="20"></label>
+          <label>Budget USD <input name="budget" type="number" step="0.5" min="0.5" max="10" placeholder="4"></label>
+        </div>
+        <button type="submit">Run sourcing now</button>
+        <p>Runs on the server (API billing, roughly $1–3/run). Progress appears on the Runs page
+        within seconds; listings arrive as proposals (Telegram + the Proposals page). One run at a
+        time — extra clicks while a run is queued or going are absorbed. Blank fields fall back to
+        the /admin/settings sourcing knobs.</p>
+      </form>
+    </div>
     <h2>Agents &amp; jobs</h2>
     <div class="card">
       ${kv('Sourcing last run', runLine(h.sourcingLastRun), h.sourcingLastRun?.startedAt)}

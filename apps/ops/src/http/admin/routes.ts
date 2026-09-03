@@ -28,6 +28,7 @@ import {
 } from '../../proposals/support-decision.ts'
 import { applyProposalTransition, StaleProposalStatusError } from '../../proposals/transitions.ts'
 import { SETTINGS_DEFAULTS, type Settings, type SettingKey, type WorkflowMode } from '../../settings.ts'
+import { normalizeKeywords, resolveSourcingKnobs, type SourcingOverrides } from '../../sourcing/knobs.ts'
 import { clearRedraftCycle, resolveRejectAction } from '../../support/redraft.ts'
 import { senderAuthNote } from '../../support/validator.ts'
 import {
@@ -414,6 +415,53 @@ export function adminRoutes(deps: AdminDeps): FastifyPluginAsync {
       // ticket with no linked order still renders (its `linkedOrderNumber` comes back null and
       // render-tickets.ts falls back to the claimed/unverified number, per triage.ts's
       // ownership-checked linking).
+      // Dashboard "Run sourcing now" (owner ask 2026-09-03). Parses the panel's form into
+      // SourcingOverrides, validates them EXACTLY the way a run would (resolveSourcingKnobs —
+      // throw-not-clamp, message names the offending knob) so a typo dies here as a 400 instead
+      // of as a failed job, then enqueues one `sourcing.manual` job. The queue's singleton policy
+      // (index.ts) absorbs double-clicks; the run itself executes on the worker with the same
+      // deps as the Monday cron and appears on /admin/runs within seconds.
+      authed.post('/admin/sourcing/run', async (request, reply) => {
+        return safeHandle('sourcing-run', reply, async () => {
+          const body = (request.body ?? {}) as Record<string, string | undefined>
+          const num = (v: string | undefined) => (v != null && v.trim() !== '' ? Number(v) : undefined)
+
+          let overrides: SourcingOverrides
+          try {
+            overrides = {}
+            const kw = body.keywords?.trim()
+            if (kw) {
+              const normalized = normalizeKeywords(kw.split(','))
+              if (normalized) overrides.keywords = normalized
+            }
+            const maxWinners = num(body.maxWinners)
+            if (maxWinners !== undefined) overrides.maxWinners = maxWinners
+            const candidateTarget = num(body.candidates)
+            if (candidateTarget !== undefined) overrides.candidateTarget = candidateTarget
+            const maxPages = num(body.pages)
+            if (maxPages !== undefined) overrides.maxPages = maxPages
+            const maxBudgetUsd = num(body.budget)
+            if (maxBudgetUsd !== undefined) overrides.maxBudgetUsd = maxBudgetUsd
+            await resolveSourcingKnobs(deps.settings, overrides)
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            return reply
+              .code(400)
+              .type('text/html; charset=utf-8')
+              .send(await page('Run sourcing', html`<p>${message}</p><p><a href="/admin">Back to dashboard</a></p>`, request.url))
+          }
+
+          await deps.enqueue('sourcing.manual', { overrides }, { singletonKey: 'sourcing-manual', retryLimit: 0, expireInSeconds: 3600 })
+          await deps.db.insert(auditLog).values({
+            actor: 'owner',
+            action: 'sourcing.manual_run_requested',
+            entityType: 'agent_run',
+            detail: { overrides },
+          })
+          return reply.code(303).header('location', '/admin/runs').send()
+        })
+      })
+
       authed.get('/admin/tickets', async (request, reply) => {
         return safeHandle('tickets-list', reply, async () => {
           const { status } = request.query as { status?: string }
