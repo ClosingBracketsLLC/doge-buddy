@@ -13,9 +13,21 @@ export interface TrendSignal {
   snapshot: Record<string, unknown>
 }
 
+/** One rising related query for a base keyword. `value` is SerpApi's display string ("+120%",
+ *  "Breakout"); `extractedValue` its numeric form when present (absent for Breakout). */
+export interface RisingQuery {
+  query: string
+  value: string | null
+  extractedValue: number | null
+}
+
 export interface TrendsProvider {
   readonly key: string // 'serpapi' now; 'google_trends_alpha' later
   fetchInterest(keywords: string[]): Promise<TrendSignal[]>
+  /** Rising related queries for ONE keyword (RELATED_QUERIES takes a single q per request,
+   *  unlike TIMESERIES's 5-comma batch). null = client could not look (cap/HTTP); [] = looked,
+   *  nothing rising. FIXTURE-ASSUMPTION on the rising[] shape — verify on the first live run. */
+  fetchRisingQueries(keyword: string): Promise<RisingQuery[] | null>
 }
 
 /** SerpApi's google_trends TIMESERIES engine accepts at most 5 comma-joined `q` terms per request. */
@@ -38,6 +50,12 @@ interface SerpApiTimelinePoint {
 interface SerpApiTrendsResponse {
   interest_over_time?: {
     timeline_data?: SerpApiTimelinePoint[]
+  }
+}
+
+interface SerpApiRelatedQueriesResponse {
+  related_queries?: {
+    rising?: Array<{ query?: string; value?: string | number; extracted_value?: number }>
   }
 }
 
@@ -127,6 +145,25 @@ export function createSerpApiTrends(deps: { client: SerpApiClient }): TrendsProv
         results.push(...(await fetchBatch(batch)))
       }
       return results
+    },
+    async fetchRisingQueries(keyword: string): Promise<RisingQuery[] | null> {
+      const json = (await client.get({
+        engine: 'google_trends',
+        data_type: 'RELATED_QUERIES',
+        q: keyword,
+        date: SERPAPI_DATE_RANGE,
+      })) as SerpApiRelatedQueriesResponse | null
+      if (json === null) return null
+      const rising: RisingQuery[] = []
+      for (const entry of json.related_queries?.rising ?? []) {
+        if (typeof entry.query !== 'string' || entry.query.trim().length === 0) continue
+        rising.push({
+          query: entry.query.trim(),
+          value: entry.value != null ? String(entry.value) : null,
+          extractedValue: typeof entry.extracted_value === 'number' && Number.isFinite(entry.extracted_value) ? entry.extracted_value : null,
+        })
+      }
+      return rising
     },
   }
 }

@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSerpApiTrends } from '../src/sourcing/trends.ts'
 import { createSerpApiClient } from '../src/sourcing/serpapi.ts'
+import type { SerpApiClient } from '../src/sourcing/serpapi.ts'
+
+/** Minimal SerpApiClient double for tests that assert on request shape or client-level behavior
+ *  (null/cap) directly, without routing through createSerpApiClient's fetch mocking. */
+function fakeClient(response: unknown, requestsMade = 1): SerpApiClient {
+  return {
+    get: async () => response,
+    requestsMade: () => requestsMade,
+  }
+}
 
 // Never a real key — SerpApi calls are always mocked via fetchFn in this suite.
 const FAKE_API_KEY = 'fake-serp-key-for-tests-only'
@@ -170,5 +180,46 @@ describe('createSerpApiTrends', () => {
       const serialized = call.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')
       expect(serialized).not.toContain(FAKE_API_KEY)
     }
+  })
+})
+
+describe('fetchRisingQueries', () => {
+  const risingFixture = {
+    related_queries: {
+      rising: [
+        { query: 'dog water bottle', value: '+120%', extracted_value: 120 },
+        { query: 'led dog collar', value: 'Breakout' }, // no extracted_value
+        { value: '+50%', extracted_value: 50 }, // no query — skipped
+        { query: '', value: '+10%', extracted_value: 10 }, // empty query — skipped
+      ],
+      top: [{ query: 'dog bed', value: '100', extracted_value: 100 }], // ignored
+    },
+  }
+
+  it('parses rising entries, skipping those without a non-empty query', async () => {
+    const client = fakeClient(risingFixture)
+    const trends = createSerpApiTrends({ client })
+    const rising = await trends.fetchRisingQueries('dog bottle')
+    expect(rising).toEqual([
+      { query: 'dog water bottle', value: '+120%', extractedValue: 120 },
+      { query: 'led dog collar', value: 'Breakout', extractedValue: null },
+    ])
+  })
+
+  it('sends a single-q RELATED_QUERIES request with the shared date window', async () => {
+    const calls: Record<string, string>[] = []
+    const client = { get: async (p: Record<string, string>) => (calls.push(p), risingFixture), requestsMade: () => 1 }
+    await createSerpApiTrends({ client }).fetchRisingQueries('dog bottle')
+    expect(calls[0]).toEqual({ engine: 'google_trends', data_type: 'RELATED_QUERIES', q: 'dog bottle', date: 'today 3-m' })
+  })
+
+  it('returns null when the client returns null (cap/HTTP)', async () => {
+    const client = { get: async () => null, requestsMade: () => 0 }
+    expect(await createSerpApiTrends({ client }).fetchRisingQueries('dog')).toBeNull()
+  })
+
+  it('returns [] when the response has no rising list', async () => {
+    const client = fakeClient({ related_queries: {} })
+    expect(await createSerpApiTrends({ client }).fetchRisingQueries('dog')).toEqual([])
   })
 })

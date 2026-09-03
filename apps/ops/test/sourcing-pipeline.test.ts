@@ -104,6 +104,7 @@ function stubTrends(): TrendsProvider {
   return {
     key: 'stub',
     fetchInterest: vi.fn(async (keywords: string[]) => keywords.map((keyword) => ({ keyword, score: 80, snapshot: { keyword } }))),
+    fetchRisingQueries: vi.fn(async () => []),
   }
 }
 
@@ -516,6 +517,7 @@ describe('runSourcingPipeline', () => {
       const provider: TrendsProvider = {
         key: 'stub',
         fetchInterest: vi.fn(async (keywords: string[]) => keywords.map((keyword) => ({ keyword, score: 80, snapshot: { keyword } }))),
+        fetchRisingQueries: vi.fn(async () => []),
       }
       providers.push(provider)
       return { trends: provider, marketPrice: null }
