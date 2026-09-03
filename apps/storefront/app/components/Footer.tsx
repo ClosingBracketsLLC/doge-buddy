@@ -8,9 +8,11 @@ interface FooterProps {
   publicStoreDomain: string;
 }
 
-// Hardcoded policy links — routes arrive in Task 10, so these are dead
-// links until then (expected; see task-4 brief).
-const POLICY_LINKS: Array<{to: string; title: string}> = [
+// Hardcoded footer links — routes arrive in Task 10, so most are dead
+// links until then (expected; see task-4 brief). /pages/about 404s until
+// the About page is created in Shopify admin — owner item in OWNER-CHECKLIST.
+const FOOTER_LINKS: Array<{to: string; title: string}> = [
+  {to: '/pages/about', title: 'About'},
   {to: '/policies/shipping', title: 'Shipping'},
   {to: '/policies/returns', title: 'Returns'},
   {to: '/policies/privacy', title: 'Privacy'},
@@ -29,7 +31,7 @@ export function Footer(_props: FooterProps) {
           className="flex flex-wrap justify-center gap-x-6 gap-y-2"
           role="navigation"
         >
-          {POLICY_LINKS.map((link) => (
+          {FOOTER_LINKS.map((link) => (
             <Link
               key={link.to}
               to={link.to}
