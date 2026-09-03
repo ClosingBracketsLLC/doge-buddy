@@ -1,10 +1,12 @@
 import {Await, useLoaderData} from 'react-router';
 import type {Route} from './+types/_index';
 import {Suspense} from 'react';
-import type {RecommendedProductsQuery} from 'storefrontapi.generated';
+import type {NewArrivalsQuery} from 'storefrontapi.generated';
 import {Hero} from '~/components/brand/Hero';
 import {ProductItem} from '~/components/ProductItem';
 import {RibbonHeading} from '~/components/brand/RibbonHeading';
+import {ValueProps} from '~/components/brand/ValueProps';
+import {CategoryTiles} from '~/components/brand/CategoryTiles';
 
 export const meta: Route.MetaFunction = () => {
   return [
@@ -18,29 +20,9 @@ export const meta: Route.MetaFunction = () => {
 };
 
 export async function loader(args: Route.LoaderArgs) {
-  // Start fetching non-critical data without blocking time to first byte
-  const deferredData = loadDeferredData(args);
-
-  // Await the critical data required to render initial state of the page
-  const criticalData = await loadCriticalData(args);
-
-  return {...deferredData, ...criticalData};
-}
-
-/**
- * Load data necessary for rendering content above the fold. This is the critical data
- * needed to render the page. If it's unavailable, the whole page should 400 or 500 error.
- */
-async function loadCriticalData({context}: Route.LoaderArgs) {
-  const [{collections}] = await Promise.all([
-    context.storefront.query(FEATURED_COLLECTION_QUERY),
-    // Add other queries here, so that they are loaded in parallel
-  ]);
-
-  return {
-    isShopLinked: Boolean(context.env.PUBLIC_STORE_DOMAIN),
-    featuredCollection: collections.nodes[0],
-  };
+  // All home data is deferred (spec Decision 7) — the old critical-path FEATURED_COLLECTION_QUERY
+  // was never rendered and is gone.
+  return loadDeferredData(args);
 }
 
 /**
@@ -50,7 +32,7 @@ async function loadCriticalData({context}: Route.LoaderArgs) {
  */
 function loadDeferredData({context}: Route.LoaderArgs) {
   const recommendedProducts = context.storefront
-    .query(RECOMMENDED_PRODUCTS_QUERY)
+    .query(NEW_ARRIVALS_QUERY)
     .catch((error: Error) => {
       // Log query errors, but don't throw them so the page can still render
       console.error(error);
@@ -67,20 +49,22 @@ export default function Homepage() {
   return (
     <div className="home mx-auto max-w-5xl px-4 py-8 md:py-12">
       <Hero />
-      <RecommendedProducts products={data.recommendedProducts} />
+      <ValueProps />
+      <CategoryTiles />
+      <NewArrivals products={data.recommendedProducts} />
     </div>
   );
 }
 
-function RecommendedProducts({
+function NewArrivals({
   products,
 }: {
-  products: Promise<RecommendedProductsQuery | null>;
+  products: Promise<NewArrivalsQuery | null>;
 }) {
   return (
-    <section className="mt-12" aria-labelledby="recommended-products">
-      <div id="recommended-products">
-        <RibbonHeading>Fan favorites</RibbonHeading>
+    <section className="mt-12" aria-labelledby="new-arrivals">
+      <div id="new-arrivals">
+        <RibbonHeading>New arrivals</RibbonHeading>
       </div>
       <Suspense fallback={<div className="mt-4 text-info">Loading...</div>}>
         <Await resolve={products}>
@@ -99,30 +83,7 @@ function RecommendedProducts({
   );
 }
 
-const FEATURED_COLLECTION_QUERY = `#graphql
-  fragment FeaturedCollection on Collection {
-    id
-    title
-    image {
-      id
-      url
-      altText
-      width
-      height
-    }
-    handle
-  }
-  query FeaturedCollection($country: CountryCode, $language: LanguageCode)
-    @inContext(country: $country, language: $language) {
-    collections(first: 1, sortKey: UPDATED_AT, reverse: true) {
-      nodes {
-        ...FeaturedCollection
-      }
-    }
-  }
-` as const;
-
-const RECOMMENDED_PRODUCTS_QUERY = `#graphql
+const NEW_ARRIVALS_QUERY = `#graphql
   fragment RecommendedProduct on Product {
     id
     title
@@ -141,9 +102,9 @@ const RECOMMENDED_PRODUCTS_QUERY = `#graphql
       height
     }
   }
-  query RecommendedProducts ($country: CountryCode, $language: LanguageCode)
+  query NewArrivals ($country: CountryCode, $language: LanguageCode)
     @inContext(country: $country, language: $language) {
-    products(first: 4, sortKey: UPDATED_AT, reverse: true) {
+    products(first: 8, sortKey: CREATED_AT, reverse: true) {
       nodes {
         ...RecommendedProduct
       }
