@@ -57,6 +57,7 @@ import { runDeprecationJudge } from './scoring/judge.ts'
 import { createQueueRetrying, registerCron, startQueue, type Queue } from './queue.ts'
 import { buildServer } from './server.ts'
 import { createSettings } from './settings.ts'
+import { createSerpApiAmazonDemand } from './sourcing/demand-probe.ts'
 import { createSerpApiMarketPrice } from './sourcing/market-price.ts'
 import type { SourcingPipelineDeps, SourcingProviders } from './sourcing/pipeline.ts'
 import { createSerpApiClient } from './sourcing/serpapi.ts'
@@ -439,11 +440,13 @@ if (config.anthropic) {
   // run resets it every run. No SERPAPI_KEY => both null: trends stage skipped AND the market
   // gate skipped (each with its own warning alert), the run otherwise proceeds.
   const providersFactory = (): SourcingProviders => {
-    // demand: null here — Task 11 wires the real createSerpApiAmazonDemand provider into both
-    // composition roots; this stopgap only keeps `SourcingProviders` (Task 9) satisfied.
     if (!config.serpapi) return { trends: null, marketPrice: null, demand: null }
-    const client = createSerpApiClient({ apiKey: config.serpapi.apiKey })
-    return { trends: createSerpApiTrends({ client }), marketPrice: createSerpApiMarketPrice({ client }), demand: null }
+    const client = createSerpApiClient({ apiKey: config.serpapi.apiKey, maxRequests: config.serpapi.maxRequestsPerRun })
+    return {
+      trends: createSerpApiTrends({ client }),
+      marketPrice: createSerpApiMarketPrice({ client }),
+      demand: createSerpApiAmazonDemand({ client }),
+    }
   }
   const sourcingDeps: SourcingPipelineDeps = {
     db, adapter: supplierAdapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, providersFactory,

@@ -29,6 +29,7 @@ const EnvSchema = z
     TELEGRAM_CHAT_ID: z.string().optional(),
     ANTHROPIC_API_KEY: z.string().min(1).optional(),
     SERPAPI_KEY: z.string().min(1).optional(),
+    SERPAPI_MAX_REQUESTS_PER_RUN: z.coerce.number().int().min(1).max(200).optional(),
     GMAIL_SERVICE_ACCOUNT_EMAIL: z.string().optional(),
     GMAIL_SERVICE_ACCOUNT_KEY: z.string().optional(),
     GMAIL_IMPERSONATE: z.string().optional(),
@@ -117,7 +118,7 @@ export interface Config {
   cj?: { apiKey: string; openId: string }
   telegram?: { botToken: string; chatId: string }
   anthropic?: { apiKey: string }
-  serpapi?: { apiKey: string }
+  serpapi?: { apiKey: string; maxRequestsPerRun?: number }
   gmail?: { saEmail: string; saKey: string; impersonate: string; supportAddress: string }
   turnstile?: { secretKey: string }
 }
@@ -168,7 +169,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   }
 
   if (data.SERPAPI_KEY !== undefined) {
-    config.serpapi = { apiKey: data.SERPAPI_KEY }
+    config.serpapi = {
+      apiKey: data.SERPAPI_KEY,
+      ...(data.SERPAPI_MAX_REQUESTS_PER_RUN !== undefined ? { maxRequestsPerRun: data.SERPAPI_MAX_REQUESTS_PER_RUN } : {}),
+    }
   }
 
   if (

@@ -8,6 +8,7 @@ import { loadDotEnv } from '../src/load-env.ts'
 import type { NotifyOwner } from '../src/notify/notify.ts'
 import { createTelegramNotifier } from '../src/notify/telegram.ts'
 import { createSettings } from '../src/settings.ts'
+import { createSerpApiAmazonDemand } from '../src/sourcing/demand-probe.ts'
 import { describeSourcingKnobs, parseRunSourcingArgs, resolveSourcingKnobs } from '../src/sourcing/knobs.ts'
 import { createSerpApiMarketPrice } from '../src/sourcing/market-price.ts'
 import { runSourcingPipeline, type SourcingPipelineDeps, type SourcingProviders } from '../src/sourcing/pipeline.ts'
@@ -150,17 +151,20 @@ let serpApiRequests = 0
 // Factory (FIX C2): fresh client per run so the shared 25-request cap resets. This script drives
 // exactly one run; the counting fetchFn tallies BOTH stages' requests for the telemetry line.
 const providersFactory = (): SourcingProviders => {
-  // demand: null here — Task 11 wires the real createSerpApiAmazonDemand provider into both
-  // composition roots; this stopgap only keeps `SourcingProviders` (Task 9) satisfied.
   if (!config.serpapi) return { trends: null, marketPrice: null, demand: null }
   const client = createSerpApiClient({
     apiKey: config.serpapi.apiKey,
+    maxRequests: config.serpapi.maxRequestsPerRun,
     fetchFn: (...args: Parameters<typeof fetch>) => {
       serpApiRequests += 1
       return fetch(...args)
     },
   })
-  return { trends: createSerpApiTrends({ client }), marketPrice: createSerpApiMarketPrice({ client }), demand: null }
+  return {
+    trends: createSerpApiTrends({ client }),
+    marketPrice: createSerpApiMarketPrice({ client }),
+    demand: createSerpApiAmazonDemand({ client }),
+  }
 }
 
 let failed = false
@@ -196,7 +200,7 @@ try {
     `run-sourcing: CJ points spent (estimate) ~${cjPointsSpentEstimate} (${searchProductsPages} harvest page(s) + tool/verify calls)`,
   )
   console.log(
-    `run-sourcing: SerpApi requests made ${serpApiRequests} (trends + market lookups)${config.serpapi ? '' : ' (SERPAPI_KEY not set — trends and market-price stages skipped)'}`,
+    `run-sourcing: SerpApi requests made ${serpApiRequests} (trends + market + amazon lookups)${config.serpapi ? '' : ' (SERPAPI_KEY not set — trends, market-price and demand stages skipped)'}`,
   )
 
   if (result.outcome === 'agent_failed') {

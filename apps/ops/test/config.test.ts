@@ -149,6 +149,29 @@ describe('loadConfig', () => {
     expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', SERPAPI_KEY: 'serp-x' }).serpapi).toEqual({ apiKey: 'serp-x' })
   })
 
+  it('parses SERPAPI_MAX_REQUESTS_PER_RUN into serpapi.maxRequestsPerRun', () => {
+    const c = loadConfig({
+      DATABASE_URL: 'postgres://u:p@h:5432/d',
+      SERPAPI_KEY: 'k',
+      SERPAPI_MAX_REQUESTS_PER_RUN: '35',
+    })
+    expect(c.serpapi).toEqual({ apiKey: 'k', maxRequestsPerRun: 35 })
+  })
+
+  it('rejects an out-of-range or non-integer cap loudly', () => {
+    expect(() =>
+      loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', SERPAPI_KEY: 'k', SERPAPI_MAX_REQUESTS_PER_RUN: '0' }),
+    ).toThrow(/SERPAPI_MAX_REQUESTS_PER_RUN/)
+    expect(() =>
+      loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', SERPAPI_KEY: 'k', SERPAPI_MAX_REQUESTS_PER_RUN: 'lots' }),
+    ).toThrow()
+  })
+
+  it('cap without SERPAPI_KEY is ignored (serpapi stays undefined)', () => {
+    const c = loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', SERPAPI_MAX_REQUESTS_PER_RUN: '35' })
+    expect(c.serpapi).toBeUndefined()
+  })
+
   it('assembles the gmail block when the full quartet is set, unescaping \\n in the key', () => {
     const c = loadConfig({
       DATABASE_URL: 'postgres://u:p@h:5432/d',
