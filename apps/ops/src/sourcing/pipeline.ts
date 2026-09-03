@@ -10,7 +10,10 @@ import type { NotifyOwner } from '../notify/notify.ts'
 import type { SubmitProposalDeps } from '../proposals/submit.ts'
 import { submitProposal } from '../proposals/submit.ts'
 import type { Settings } from '../settings.ts'
+import { ReviewsSeen } from './decision-context.ts'
+import type { DemandProbeProvider } from './demand-probe.ts'
 import { MIN_CANDIDATES, runHarvest } from './harvest.ts'
+import { expandKeywords } from './keyword-expansion.ts'
 import { resolveSourcingKnobs, type SourcingOverrides } from './knobs.ts'
 import { MarketLookups, type MarketLookup, type MarketPriceProvider } from './market-price.ts'
 import { validateAndSubmitWinners } from './submit-winners.ts'
@@ -23,6 +26,7 @@ type Enqueue = (name: string, data: object, opts?: SendOpts) => Promise<void>
 export interface SourcingProviders {
   trends: TrendsProvider | null
   marketPrice: MarketPriceProvider | null
+  demand: DemandProbeProvider | null
 }
 
 export interface SourcingPipelineDeps {
@@ -122,12 +126,40 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
   // status; the guarded UPDATE below (`where status = 'running'`) is a no-op when it did, so we
   // never double-flip a succeeded/failed/aborted row.
   try {
+    // Construct FRESH providers per run (FIX C2) so their shared per-run SerpApi request counter
+    // resets. Moved up (was Stage 3) so Stage 1b below can use `trends` before harvest runs.
+    const { trends, marketPrice, demand } = providersFactory()
+
+    // --- Stage 1b: keyword expansion (spec 2026-09-03 Decisions 1-4) — best-effort, never blocks.
+    // Base keywords always survive; expansion only appends. Persist/alert failures must not cost
+    // the run its expanded keywords (same stance as persistMarketLookups).
+    let runKeywords: readonly string[] = knobs.keywords
+    if (trends) {
+      const expansion = await expandKeywords(trends, knobs.keywords)
+      runKeywords = expansion.keywords
+      if (expansion.kept.length > 0) {
+        try {
+          await db.insert(sourcingSignals).values(
+            expansion.kept.map((k) => ({
+              source: 'trends_rising' as const,
+              keyword: k.query,
+              score: k.extractedValue != null ? String(k.extractedValue) : null,
+              snapshot: { baseKeyword: k.baseKeyword, value: k.value, extractedValue: k.extractedValue },
+            })),
+          )
+        } catch (err) {
+          await alert('warning', 'keyword_expansion_persist_failed', { error: errorMessage(err) }).catch(() => {})
+        }
+        await alert('info', 'sourcing_keywords_expanded', { added: expansion.kept.map((k) => k.query), dropped: expansion.dropped }).catch(() => {})
+      }
+    }
+
     // --- Stage 2: harvest (Task 9) -------------------------------------------------------------
     const { candidates, pagesFetched } = await runHarvest({
       db,
       adapter,
       alert,
-      keywords: knobs.keywords,
+      keywords: runKeywords,
       candidateTarget: knobs.candidateTarget,
       maxPages: knobs.maxPages,
     })
@@ -141,9 +173,6 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
     }
 
     // --- Stage 3: trends (Task 7) — best-effort, never blocks the run --------------------------
-    // Construct FRESH providers per run (FIX C2) so their shared per-run SerpApi request counter
-    // resets.
-    const { trends, marketPrice } = providersFactory()
     let trendSignals: TrendSignal[] = []
     if (!trends) {
       await alert('warning', 'trends_stage_skipped', {}).catch(() => {})
@@ -178,7 +207,8 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
     if (!marketPrice) {
       await alert('warning', 'market_price_stage_skipped', {}).catch(() => {})
     }
-    const mcpServer = createSourcingMcpServer({ adapter, allowance, marketPrice, marketLookups })
+    const reviewsSeen = new ReviewsSeen()
+    const mcpServer = createSourcingMcpServer({ adapter, allowance, marketPrice, marketLookups, reviewsSeen })
     const agentResult = await runSourcingAgent(
       { db, alert, mcpServer, queryFn },
       { runId, candidates, trendSignals, knobs, marketGateArmed: marketPrice !== null },
@@ -208,6 +238,9 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
         settings,
         alert,
         marketLookups: marketPrice ? marketLookups : null,
+        demandProbe: demand,
+        reviewsSeen,
+        trendSignalsByKeyword: new Map(trendSignals.map((s) => [s.keyword, s])),
       },
       { runId, candidateIds, candidatesByPid, winners: agentResult.output.winners, maxPriceToMarketBps: knobs.maxPriceToMarketBps },
     )

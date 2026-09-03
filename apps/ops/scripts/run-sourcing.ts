@@ -150,7 +150,9 @@ let serpApiRequests = 0
 // Factory (FIX C2): fresh client per run so the shared 25-request cap resets. This script drives
 // exactly one run; the counting fetchFn tallies BOTH stages' requests for the telemetry line.
 const providersFactory = (): SourcingProviders => {
-  if (!config.serpapi) return { trends: null, marketPrice: null }
+  // demand: null here — Task 11 wires the real createSerpApiAmazonDemand provider into both
+  // composition roots; this stopgap only keeps `SourcingProviders` (Task 9) satisfied.
+  if (!config.serpapi) return { trends: null, marketPrice: null, demand: null }
   const client = createSerpApiClient({
     apiKey: config.serpapi.apiKey,
     fetchFn: (...args: Parameters<typeof fetch>) => {
@@ -158,7 +160,7 @@ const providersFactory = (): SourcingProviders => {
       return fetch(...args)
     },
   })
-  return { trends: createSerpApiTrends({ client }), marketPrice: createSerpApiMarketPrice({ client }) }
+  return { trends: createSerpApiTrends({ client }), marketPrice: createSerpApiMarketPrice({ client }), demand: null }
 }
 
 let failed = false

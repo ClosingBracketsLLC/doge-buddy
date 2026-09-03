@@ -439,9 +439,11 @@ if (config.anthropic) {
   // run resets it every run. No SERPAPI_KEY => both null: trends stage skipped AND the market
   // gate skipped (each with its own warning alert), the run otherwise proceeds.
   const providersFactory = (): SourcingProviders => {
-    if (!config.serpapi) return { trends: null, marketPrice: null }
+    // demand: null here — Task 11 wires the real createSerpApiAmazonDemand provider into both
+    // composition roots; this stopgap only keeps `SourcingProviders` (Task 9) satisfied.
+    if (!config.serpapi) return { trends: null, marketPrice: null, demand: null }
     const client = createSerpApiClient({ apiKey: config.serpapi.apiKey })
-    return { trends: createSerpApiTrends({ client }), marketPrice: createSerpApiMarketPrice({ client }) }
+    return { trends: createSerpApiTrends({ client }), marketPrice: createSerpApiMarketPrice({ client }), demand: null }
   }
   const sourcingDeps: SourcingPipelineDeps = {
     db, adapter: supplierAdapter, settings, alert, enqueue, notify, adminBaseUrl: config.adminBaseUrl, providersFactory,

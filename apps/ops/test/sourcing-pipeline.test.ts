@@ -17,8 +17,20 @@ import { createSettings } from '../src/settings.ts'
 import { HARVEST_KEYWORDS } from '../src/sourcing/harvest.ts'
 import { MarketLookups, type MarketOffer } from '../src/sourcing/market-price.ts'
 import { persistMarketLookups, runSourcingPipeline, type SourcingPipelineDeps, type SourcingProviders } from '../src/sourcing/pipeline.ts'
-import type { TrendsProvider } from '../src/sourcing/trends.ts'
+import { ReviewsSeen } from '../src/sourcing/decision-context.ts'
+import type { DemandProbeProvider } from '../src/sourcing/demand-probe.ts'
+import { validateAndSubmitWinners } from '../src/sourcing/submit-winners.ts'
+import type { RisingQuery, TrendsProvider } from '../src/sourcing/trends.ts'
 import type { NotifyOwner } from '../src/notify/notify.ts'
+
+// Task 9 test (4): wraps the REAL implementation so every other test's behavior is unchanged,
+// but lets that test inspect the deps `runSourcingPipeline` actually passed to Stage 6.
+vi.mock('../src/sourcing/submit-winners.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/sourcing/submit-winners.ts')>()
+  return { ...actual, validateAndSubmitWinners: vi.fn(actual.validateAndSubmitWinners) }
+})
+
+type Db = ReturnType<typeof createDb>['db']
 
 const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/doge_buddy'
 
@@ -106,6 +118,55 @@ function stubTrends(): TrendsProvider {
     fetchInterest: vi.fn(async (keywords: string[]) => keywords.map((keyword) => ({ keyword, score: 80, snapshot: { keyword } }))),
     fetchRisingQueries: vi.fn(async () => []),
   }
+}
+
+function rq(query: string, extractedValue: number): RisingQuery {
+  return { query, value: `+${extractedValue}%`, extractedValue }
+}
+
+/** Trends stub whose `fetchRisingQueries` returns `rising` for the FIRST keyword it's asked about
+ *  (Stage 1b calls it once per base keyword, in order) and `[]` for every other keyword. */
+function stubTrendsWithRising(rising: RisingQuery[]): TrendsProvider {
+  let first = true
+  return {
+    key: 'stub',
+    fetchInterest: vi.fn(async (keywords: string[]) => keywords.map((keyword) => ({ keyword, score: 80, snapshot: { keyword } }))),
+    fetchRisingQueries: vi.fn(async () => {
+      if (first) {
+        first = false
+        return rising
+      }
+      return []
+    }),
+  }
+}
+
+/** Wraps a real `Db` so an insert into `sourcingSignals` whose rows carry `source: 'trends_rising'`
+ *  throws — every other insert (harvest's `cj_trending`, the day-claim, proposals, ...) passes
+ *  straight through to the real db. Used to prove Stage 1b's persist failure is caught and never
+ *  costs the run its expanded keywords. */
+function withFailingTrendsRisingInsert(realDb: Db): Db {
+  return new Proxy(realDb as object, {
+    get(target, prop, receiver) {
+      if (prop === 'insert') {
+        return (table: unknown) => {
+          if (table === sourcingSignals) {
+            return {
+              values: async (rows: unknown) => {
+                if (Array.isArray(rows) && rows.some((r) => (r as { source?: string }).source === 'trends_rising')) {
+                  throw new Error('sourcing-pipeline test: poisoned trends_rising insert')
+                }
+                return (realDb.insert(table as typeof sourcingSignals) as unknown as { values: (v: unknown) => Promise<unknown> }).values(rows)
+              },
+            }
+          }
+          return (realDb.insert as (t: unknown) => unknown)(table)
+        }
+      }
+      const value = Reflect.get(target, prop, receiver)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as Db
 }
 
 /** Winner payload that clears every Stage 4 gate against the matching ProductSpec: live cost
@@ -206,6 +267,9 @@ describe('runSourcingPipeline', () => {
   // title — `candidateSpecs()` below pushes both as it builds each test's fixtures).
   const createdPids: string[] = []
   const createdKeywords: string[] = []
+  // Stage 1b's `trends_rising` rows are keyed by the EXPANDED keyword (e.g. 'dog water bottle'),
+  // never a harvest keyword or a candidate pid, so they need their own tracking list.
+  const createdRisingKeywords: string[] = []
   afterEach(async () => {
     if (createdRunIds.length > 0) {
       await db.delete(agentRunEvents).where(inArray(agentRunEvents.runId, createdRunIds))
@@ -230,6 +294,12 @@ describe('runSourcingPipeline', () => {
         .where(and(eq(sourcingSignals.source, 'google_trends'), inArray(sourcingSignals.keyword, createdKeywords)))
       createdKeywords.length = 0
     }
+    if (createdRisingKeywords.length > 0) {
+      await db
+        .delete(sourcingSignals)
+        .where(and(eq(sourcingSignals.source, 'trends_rising'), inArray(sourcingSignals.keyword, createdRisingKeywords)))
+      createdRisingKeywords.length = 0
+    }
   })
 
   function baseDeps(overrides: Partial<SourcingPipelineDeps> = {}): SourcingPipelineDeps {
@@ -241,7 +311,7 @@ describe('runSourcingPipeline', () => {
       enqueue: noopEnqueue,
       notify: noopNotify,
       adminBaseUrl: 'http://localhost:3001',
-      providersFactory: () => ({ trends: stubTrends(), marketPrice: null }),
+      providersFactory: () => ({ trends: stubTrends(), marketPrice: null, demand: null }),
       ...overrides,
     }
   }
@@ -356,7 +426,7 @@ describe('runSourcingPipeline', () => {
     const alert = vi.fn(async () => {})
 
     const result = await runSourcingPipeline(
-      baseDeps({ adapter, alert, providersFactory: () => ({ trends, marketPrice: null }), force: true, queryFn: fakeQueryFn([]) }),
+      baseDeps({ adapter, alert, providersFactory: () => ({ trends, marketPrice: null, demand: null }), force: true, queryFn: fakeQueryFn([]) }),
     )
     expect(result.outcome).toBe('completed')
     createdRunIds.push(result.runId!)
@@ -375,7 +445,7 @@ describe('runSourcingPipeline', () => {
     const alert = vi.fn(async () => {})
 
     const result = await runSourcingPipeline(
-      baseDeps({ adapter, alert, providersFactory: () => ({ trends: null, marketPrice: null }), force: true, queryFn: fakeQueryFn(winners) }),
+      baseDeps({ adapter, alert, providersFactory: () => ({ trends: null, marketPrice: null, demand: null }), force: true, queryFn: fakeQueryFn(winners) }),
     )
     expect(result.outcome).toBe('completed')
     expect(result.submitted).toBe(1)
@@ -419,7 +489,7 @@ describe('runSourcingPipeline', () => {
         alert,
         force: true,
         queryFn: fakeQueryFn(winners),
-        providersFactory: () => ({ trends: stubTrends(), marketPrice: null }),
+        providersFactory: () => ({ trends: stubTrends(), marketPrice: null, demand: null }),
       }),
     )
     expect(result.outcome).toBe('completed')
@@ -443,7 +513,7 @@ describe('runSourcingPipeline', () => {
         alert,
         force: true,
         queryFn: fakeQueryFn(winners),
-        providersFactory: () => ({ trends: stubTrends(), marketPrice: { key: 'stub', fetchOffers: async () => [] } }),
+        providersFactory: () => ({ trends: stubTrends(), marketPrice: { key: 'stub', fetchOffers: async () => [] }, demand: null }),
       }),
     )
     expect(result.outcome).toBe('completed')
@@ -520,7 +590,7 @@ describe('runSourcingPipeline', () => {
         fetchRisingQueries: vi.fn(async () => []),
       }
       providers.push(provider)
-      return { trends: provider, marketPrice: null }
+      return { trends: provider, marketPrice: null, demand: null }
     })
 
     const first = await runSourcingPipeline(baseDeps({ adapter, providersFactory, force: true, queryFn: fakeQueryFn([]) }))
@@ -561,6 +631,140 @@ describe('runSourcingPipeline', () => {
     const failed = rows.filter((r) => r.status === 'failed')
     expect(failed.length).toBeGreaterThanOrEqual(1)
     expect(failed.every((r) => r.finishedAt !== null)).toBe(true)
+  })
+
+  // --- Task 9: Stage 1b keyword expansion + Stage 6 provider/registry threading -----------------
+
+  it('Stage 1b: expanded keywords reach harvest, trends_rising rows persist, expansion alert fires', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const searchSpy = vi.fn(adapter.searchProducts.bind(adapter))
+    adapter.searchProducts = searchSpy as unknown as SupplierAdapter['searchProducts']
+    const trends = stubTrendsWithRising([rq('dog water bottle', 120)])
+    const alert = vi.fn(async () => {})
+    createdRisingKeywords.push('dog water bottle')
+
+    const result = await runSourcingPipeline(
+      baseDeps({
+        adapter,
+        alert,
+        force: true,
+        queryFn: fakeQueryFn([]),
+        providersFactory: () => ({ trends, marketPrice: null, demand: null }),
+      }),
+    )
+    expect(result.outcome).toBe('completed')
+    createdRunIds.push(result.runId!)
+
+    // harvest received the expanded keyword list.
+    const searchedKeywords = new Set(searchSpy.mock.calls.map(([q]) => (q as { keyword?: string }).keyword))
+    expect(searchedKeywords.has('dog water bottle')).toBe(true)
+
+    // the trends_rising signal persisted with the expansion's own shape.
+    const rows = await db
+      .select()
+      .from(sourcingSignals)
+      .where(and(eq(sourcingSignals.source, 'trends_rising'), eq(sourcingSignals.keyword, 'dog water bottle')))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.score).toBe('120')
+    expect(rows[0]!.snapshot).toEqual({ baseKeyword: HARVEST_KEYWORDS[0], value: '+120%', extractedValue: 120 })
+
+    expect(alert).toHaveBeenCalledWith('info', 'sourcing_keywords_expanded', { added: ['dog water bottle'], dropped: 0 })
+  })
+
+  it('Stage 1b: null providers -> base keywords only, no expansion alert, both existing skip alerts unchanged', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const searchSpy = vi.fn(adapter.searchProducts.bind(adapter))
+    adapter.searchProducts = searchSpy as unknown as SupplierAdapter['searchProducts']
+    const alert = vi.fn(async () => {})
+
+    const result = await runSourcingPipeline(
+      baseDeps({
+        adapter,
+        alert,
+        force: true,
+        queryFn: fakeQueryFn([]),
+        providersFactory: () => ({ trends: null, marketPrice: null, demand: null }),
+      }),
+    )
+    expect(result.outcome).toBe('completed')
+    createdRunIds.push(result.runId!)
+
+    // No expansion happened: harvest saw exactly the base HARVEST_KEYWORDS, nothing more.
+    const searchedKeywords = new Set(searchSpy.mock.calls.map(([q]) => (q as { keyword?: string }).keyword))
+    expect([...searchedKeywords].sort()).toEqual([...HARVEST_KEYWORDS].sort())
+
+    expect(alert).not.toHaveBeenCalledWith('info', 'sourcing_keywords_expanded', expect.anything())
+    expect(alert).toHaveBeenCalledWith('warning', 'trends_stage_skipped', {})
+    expect(alert).toHaveBeenCalledWith('warning', 'market_price_stage_skipped', expect.anything())
+  })
+
+  it('Stage 1b: a trends_rising persist failure warns and the run continues with expanded keywords', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const searchSpy = vi.fn(adapter.searchProducts.bind(adapter))
+    adapter.searchProducts = searchSpy as unknown as SupplierAdapter['searchProducts']
+    const trends = stubTrendsWithRising([rq('dog water bottle', 120)])
+    const alert = vi.fn(async () => {})
+    const poisonedDb = withFailingTrendsRisingInsert(db)
+
+    const result = await runSourcingPipeline(
+      baseDeps({
+        db: poisonedDb,
+        adapter,
+        alert,
+        force: true,
+        queryFn: fakeQueryFn([]),
+        providersFactory: () => ({ trends, marketPrice: null, demand: null }),
+      }),
+    )
+    expect(result.outcome).toBe('completed')
+    createdRunIds.push(result.runId!)
+
+    expect(alert).toHaveBeenCalledWith('warning', 'keyword_expansion_persist_failed', expect.objectContaining({ error: expect.any(String) }))
+    // The alert fires anyway, and the run still keeps the expanded keywords for harvest — a
+    // persist failure must never cost the run its expanded keywords.
+    expect(alert).toHaveBeenCalledWith('info', 'sourcing_keywords_expanded', { added: ['dog water bottle'], dropped: 0 })
+
+    const searchedKeywords = new Set(searchSpy.mock.calls.map(([q]) => (q as { keyword?: string }).keyword))
+    expect(searchedKeywords.has('dog water bottle')).toBe(true)
+
+    // Nothing persisted — the insert was poisoned.
+    const rows = await db
+      .select()
+      .from(sourcingSignals)
+      .where(and(eq(sourcingSignals.source, 'trends_rising'), eq(sourcingSignals.keyword, 'dog water bottle')))
+    expect(rows).toHaveLength(0)
+  })
+
+  it('Stage 6 receives demandProbe, reviewsSeen, and trendSignalsByKeyword', async () => {
+    const specs = candidateSpecs()
+    const adapter = makeAdapter(specs)
+    const winners = [winnerFor(specs[0]!)]
+    const alert = vi.fn(async () => {})
+    const demand: DemandProbeProvider = { key: 'stub_demand', probe: vi.fn(async () => null) }
+
+    const result = await runSourcingPipeline(
+      baseDeps({
+        adapter,
+        alert,
+        force: true,
+        queryFn: fakeQueryFn(winners),
+        providersFactory: () => ({ trends: stubTrends(), marketPrice: null, demand }),
+      }),
+    )
+    expect(result.outcome).toBe('completed')
+    createdRunIds.push(result.runId!)
+
+    expect(validateAndSubmitWinners).toHaveBeenCalledWith(
+      expect.objectContaining({
+        demandProbe: demand,
+        reviewsSeen: expect.any(ReviewsSeen),
+        trendSignalsByKeyword: expect.any(Map),
+      }),
+      expect.anything(),
+    )
   })
 
   // --- (h)-(j) catalog-build knobs (spec 2026-08-31 catalog-p0 §5) ---------------------------
