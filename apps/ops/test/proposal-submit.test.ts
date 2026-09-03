@@ -43,6 +43,24 @@ function deprecateProductPayload(productId: string = crypto.randomUUID()) {
   }
 }
 
+// Task 8: same shape as `validContext` in packages/core/test/proposals.test.ts.
+const validContext = {
+  version: 1 as const,
+  economics: {
+    freight: { priceCents: 649, name: 'USPS Ground', minDays: 3, maxDays: 7 },
+    variants: [{ sku: 'DB-1', priceCents: 2399, supplierCostCents: 612, landedCents: 1261, profitCents: 1138, marginBps: 4743 }],
+    market: { query: 'dog water bottle', offerCount: 12, medianCents: 2199, typicalCents: 2399, ceilingCents: 2858, maxPriceToMarketBps: 13000 },
+    usStockUnits: 214,
+  },
+  demand: {
+    cjListedCount: 1200,
+    cjReviews: { page1Count: 10, ratedCount: 8, avgRating: 4.6 },
+    marketOfferCount: 12,
+    trends: { keyword: 'dog leash', score: 62.1, momentum: 8 },
+    amazon: { query: 'dog water bottle', resultsSampled: 10, medianPriceCents: 2199, medianReviews: 3400, totalReviews: 54000 },
+  },
+}
+
 describe('submitProposal', () => {
   const { db, pool } = createDb(url)
 
@@ -760,5 +778,94 @@ describe('submitProposal', () => {
     } finally {
       await settings.set('workflow.deprecation.mode', 'manual')
     }
+  })
+
+  // -- Task 8: submitProposal carries decisionContext ------------------------------------------
+
+  it('persists a valid decisionContext on the manual path', async () => {
+    const settings = createSettings(db)
+    const { notify } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+
+    const result = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'new_listing',
+        summary: 'New listing: Dog Snuff Pad',
+        payload: newListingPayload(),
+        sourceWorkflow: 'sourcing-agent',
+        decisionContext: validContext,
+      },
+    )
+
+    const [row] = await db.select().from(proposals).where(eq(proposals.id, result.id))
+    expect(row!.decisionContext).toEqual(validContext)
+  })
+
+  it('persists decisionContext on the auto path too', async () => {
+    const settings = createSettings(db)
+    const { notify } = createCaptureNotifier()
+    const enqueue = vi.fn(async () => {})
+    const alert = vi.fn()
+
+    await settings.set('workflow.sourcing.mode', 'auto')
+    try {
+      const result = await submitProposal(
+        { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+        {
+          type: 'new_listing',
+          summary: 'New listing: Dog Snuff Pad',
+          payload: newListingPayload(),
+          sourceWorkflow: 'sourcing-agent',
+          decisionContext: validContext,
+        },
+      )
+
+      const [row] = await db.select().from(proposals).where(eq(proposals.id, result.id))
+      expect(row!.decisionContext).toEqual(validContext)
+    } finally {
+      await settings.set('workflow.sourcing.mode', 'manual')
+    }
+  })
+
+  it('inserts null when decisionContext absent (existing callers unchanged)', async () => {
+    const settings = createSettings(db)
+    const { notify } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+
+    const result = await submitProposal(
+      { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+      {
+        type: 'new_listing',
+        summary: 'New listing: Dog Snuff Pad',
+        payload: newListingPayload(),
+        sourceWorkflow: 'sourcing-agent',
+      },
+    )
+
+    const [row] = await db.select().from(proposals).where(eq(proposals.id, result.id))
+    expect(row!.decisionContext).toBeNull()
+  })
+
+  it('throws on a decisionContext that fails its schema', async () => {
+    const settings = createSettings(db)
+    const { notify } = createCaptureNotifier()
+    const enqueue = vi.fn()
+    const alert = vi.fn()
+
+    await expect(
+      submitProposal(
+        { db, settings, notify, enqueue, alert, adminBaseUrl: 'https://ops.test' },
+        {
+          type: 'new_listing',
+          summary: 'New listing: Dog Snuff Pad',
+          payload: newListingPayload(),
+          sourceWorkflow: 'sourcing-agent',
+          decisionContext: { version: 2 } as never,
+        },
+      ),
+    ).rejects.toThrow()
   })
 })

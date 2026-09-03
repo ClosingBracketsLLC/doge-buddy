@@ -1,7 +1,8 @@
 import { formatCents } from '@doge-buddy/core'
 import {
   NewListingPayloadSchema, SupportReplyPayloadSchema, RefundPayloadSchema,
-  DeprecateProductPayloadSchema, type ProposalType, type SupportReplyPayload, type RefundPayload,
+  DeprecateProductPayloadSchema, ListingDecisionContextSchema,
+  type ProposalType, type SupportReplyPayload, type RefundPayload, type ListingDecisionContext,
 } from '@doge-buddy/core'
 import { proposals, auditLog, orders, supportMessages, supportTickets, type createDb } from '@doge-buddy/db'
 import { and, eq, sql } from 'drizzle-orm'
@@ -240,6 +241,9 @@ export interface SubmitProposalInput {
   ticketId?: string
   productId?: string
   orderId?: string
+  /** L1 (spec 2026-09-03 Decision 10): code-computed decision numbers for a new_listing —
+   *  validated here, stored on the row's decision_context column, display-only downstream. */
+  decisionContext?: ListingDecisionContext
 }
 
 /**
@@ -267,6 +271,7 @@ export async function submitProposal(
 ): Promise<{ id: string; status: 'pending' | 'approved' }> {
   const schema = PAYLOAD_SCHEMAS[input.type]
   const parsed = schema.parse(input.payload) as { amountCents?: number }
+  const decisionContext = input.decisionContext !== undefined ? ListingDecisionContextSchema.parse(input.decisionContext) : null
 
   const modeKey = MODE_KEYS[input.type]
   let mode = await deps.settings.get(modeKey)
@@ -299,6 +304,7 @@ export async function submitProposal(
         orderId: input.orderId,
         autoApproved: false,
         actionTokenHash: hash,
+        decisionContext,
       })
       .returning()
     const id = row!.id
@@ -357,6 +363,7 @@ export async function submitProposal(
       decidedBy: 'system:auto',
       decidedAt,
       actionTokenHash: null,
+      decisionContext,
     })
     .returning()
   const id = row!.id
