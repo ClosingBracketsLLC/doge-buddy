@@ -78,6 +78,13 @@
       "when": 1788293621477,
       "tag": "0010_gifted_galactus",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788407888661,
+      "tag": "0011_soft_whirlwind",
+      "breakpoints": true
     }
   ]
 }

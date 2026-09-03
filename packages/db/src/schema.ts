@@ -25,7 +25,7 @@ export const proposalStatus = pgEnum('proposal_status', [
 ])
 export const scoreVerdict = pgEnum('score_verdict', ['keep', 'watch', 'deprecate'])
 export const agentRunStatus = pgEnum('agent_run_status', ['running', 'succeeded', 'failed', 'aborted'])
-export const signalSource = pgEnum('signal_source', ['cj_trending', 'web_search', 'google_trends', 'owner_manual', 'market_price'])
+export const signalSource = pgEnum('signal_source', ['cj_trending', 'web_search', 'google_trends', 'owner_manual', 'market_price', 'trends_rising'])
 
 // -- Catalog --
 export const products = pgTable('products', {
@@ -218,6 +218,9 @@ export const proposals = pgTable('proposals', {
   status: proposalStatus('status').notNull().default('pending'),
   summary: text('summary').notNull(),
   payload: jsonb('payload').notNull(),
+  /** L1 decision-support (spec 2026-09-03): code-computed economics + demand ESTIMATES for a
+   *  new_listing, display-only — never read by apply. Null for other types and legacy rows. */
+  decisionContext: jsonb('decision_context'),
   sourceWorkflow: text('source_workflow').notNull(),
   agentRunId: uuid('agent_run_id'),
   ticketId: uuid('ticket_id'),

@@ -89,4 +89,23 @@ describe('migrations', () => {
     await c.end()
     expect(res.rows.map((r) => r.v)).toContain('market_price')
   })
+
+  it('signal_source enum includes trends_rising (migration 0011)', async () => {
+    const c = new Client({ connectionString: testUrl })
+    await c.connect()
+    const res = await c.query(`SELECT unnest(enum_range(NULL::signal_source))::text AS v`)
+    await c.end()
+    expect(res.rows.map((r) => r.v)).toContain('trends_rising')
+  })
+
+  it('proposals has a nullable decision_context jsonb column (migration 0011)', async () => {
+    const c = new Client({ connectionString: testUrl })
+    await c.connect()
+    const res = await c.query(
+      `SELECT data_type, is_nullable FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'proposals' AND column_name = 'decision_context'`,
+    )
+    await c.end()
+    expect(res.rows).toEqual([{ data_type: 'jsonb', is_nullable: 'YES' }])
+  })
 })
