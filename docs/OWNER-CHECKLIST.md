@@ -471,6 +471,10 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 
   4. After the probe: update `docs/cj-api-notes.md`'s "Still unverified" list with what the run proved (wire shape AND points cost) — it stays "Still unverified" until this runs; don't pre-claim it.
 
+- [ ] ⚪ **Create the About page** (Shopify admin → Online Store → Pages → title "About", handle
+  `about` — a few honest paragraphs; the natural home for the LLC's legal name). The footer
+  already links `/pages/about` (built 2026-09-03) and 404s until this exists. Not launch-blocking,
+  but cheap trust — do it before the password wall drops.
 - [ ] ⚪ **CJ wallet top-up ~$150** (Phase 7 canary). 🔴 blocks the first real order. Top-up is manual only — no API.
 - [ ] ⚪ **Policy pages → Shopify Settings** (Phase 7). Paste the `POLICY_COPY` text (`packages/core/src/policies.ts` — single-sourced; the storefront renders it and the agent quotes it) into Shopify Settings → Policies and review/finalize before launch. **Rewritten 2026-08-30 to match your no-refund stance:** returns = *All sales are final* (change of mind: keep it, discount code at our discretion) + *Damaged, defective, or wrong items* (photo within 14 days → return instructions, customer pays return shipping → replacement only after the return is received AND inspected, refund only if we can't replace); shipping = reship for non-delivery, refund only if we can't reship. Legally load-bearing: a no-refund policy is only enforceable when conspicuously posted (CA Civ. Code §1723 / NY GBL §218-a default to a 30-day return right otherwise), and non-delivery must still end in reship-or-refund (FTC Mail/Internet Order Rule) — refusing those turns into chargebacks that cost more than the refund.
 - [ ] ⚪ **Business checks before launch** (Phase 7): Shopify Payments setup, US tax registrations in Shopify Tax, general liability insurance for the LLC (recommended), policy pages review.

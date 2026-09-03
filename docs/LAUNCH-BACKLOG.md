@@ -114,22 +114,34 @@ scripts, via the house SDD pattern for anything non-trivial) or **Robert** (Shop
    a **Shipping & returns** accordion sourced from `POLICY_COPY` (no new copy to maintain), the
    TrustStrip near the price, a quantity selector. The agent's `descriptionHtml` should be generated
    in that structure (metafields for bullets/specs, or structured HTML the template parses).
-8. **Related products** — *Claude*, small. "You might also like" from the same collection (the
-   template already has the hook comment).
-9. **Home page** — *Claude*, small. Category tiles under the hero (reuse `CollectionTile` from
-   `/collections`), a value-props strip (US warehouses · 3–7 days · all-sales-final honesty), "New
-   arrivals" once the catalog exists. Needs #1's collection images.
-10. **Kill the skeleton blog** — *Claude*, tiny. Remove `/blogs*` routes (empty "News" blog) or hide
-    them from nav/sitemap; add back only when there's content.
+8. **Related products** — *Claude*, small. **BUILT 2026-09-03** (branch `storefront-p1-polish`,
+   spec `2026-09-03-storefront-p1-polish-design.md`): "You might also like" after the reviews
+   section — deferred query, products from the product's own CATEGORY collection (never
+   frontpage), current product excluded, ≤ 4 shown; empty/failed renders nothing.
+9. **Home page** — *Claude*, small. **BUILT 2026-09-03** (same branch): value-props strip (US
+   warehouses · 3–7 days · all-sales-final linking the returns policy), static "Shop by category"
+   tile grid from `CATEGORIES` (CollectionTile carries its own art — no collection images needed
+   after all), and "Fan favorites" renamed **"New arrivals"** (first: 8, sortKey CREATED_AT — with
+   zero sales data "favorites" was a fabricated claim). Dead critical-path
+   FEATURED_COLLECTION_QUERY removed.
+10. **Kill the skeleton blog** — *Claude*, tiny. **BUILT 2026-09-03** (same branch): the three
+    `/blogs*` routes deleted (catch-all 404s them), sitemap index restricted to
+    products/collections/pages, direct `/sitemap/blogs|articles|metaObjects/N.xml` requests 404.
+    Dormant follow-ups (fine while the blog has zero articles): predictive search WOULD link
+    `/blogs/...` if articles ever existed; robots.txt's `/blogs/*` disallow is now inert.
 11. **About page + footer link** — *Robert* (Shopify → Online Store → Pages → "About", a few honest
     paragraphs) + *Claude* (footer link). Cheap trust; also the natural home for the LLC's legal name.
+    **[C] footer link BUILT 2026-09-03** (same branch — links `/pages/about`, 404s until the page
+    exists; owner item added to OWNER-CHECKLIST).
 12. **Customer Account API on the production domain** — *Robert*, before C14. The login flow works on
     the preview host; the Customer Account app's redirect URIs must include `https://dogebuddy.com`
     (Hydrogen channel → Customer Account API settings) or "Sign in" breaks on the real domain.
 13. **Mobile + Lighthouse pass** — *Robert* (eyes, on the preview URL: nav drawer, product page,
     cart, checkout hand-off) + *Claude* (fix list). Do after #6–#9 land, once, before launch.
-14. **SEO fields at listing time** — *Claude*, tiny. Set `seo.title`/`seo.description` from the
-    proposal (today Hydrogen falls back to title + description, which is acceptable but generic).
+14. **SEO fields at listing time** — *Claude*, tiny. **Verified already BUILT (2026-09-03 check):**
+    catalog-p0 shipped `seoTitle`/`seoDescription` in `packages/core` and the listing worker sets
+    `seo:` in its `productSet` (`apply-new-listing.ts`); the backfill repaired the pre-gate
+    products. No work was needed.
 14b. **Market-price audit of pre-gate live products** — *Claude* (approved by Robert 2026-09-02).
     The 23 products listed before the 1.3×-market gate merged were priced by the agent + the 60%
     margin floor alone; run their titles through the SerpApi market-price lookup (one-off script,
