@@ -144,6 +144,13 @@ describe('loadConfig', () => {
     expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', ANTHROPIC_API_KEY: 'sk-ant-x' }).anthropic).toEqual({ apiKey: 'sk-ant-x' })
   })
 
+  it('empty-string ANTHROPIC_API_KEY means unset (the `ANTHROPIC_API_KEY= pnpm …` subscription-auth override)', () => {
+    // loadDotEnv never overrides a var already in process.env, so `ANTHROPIC_API_KEY=` on the
+    // command line masks the .env key — and must parse as "no key", not a config error, so a
+    // manual run can fall back to the local Claude Code sign-in (subscription auth).
+    expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', ANTHROPIC_API_KEY: '' }).anthropic).toBeUndefined()
+  })
+
   it('serpapi block present iff SERPAPI_KEY set', () => {
     expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d' }).serpapi).toBeUndefined()
     expect(loadConfig({ DATABASE_URL: 'postgres://u:p@h:5432/d', SERPAPI_KEY: 'serp-x' }).serpapi).toEqual({ apiKey: 'serp-x' })

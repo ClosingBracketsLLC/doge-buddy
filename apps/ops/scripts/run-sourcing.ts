@@ -62,8 +62,17 @@ function formatError(err: unknown): string {
 }
 
 if (!config.anthropic) {
-  console.error('run-sourcing: FAILED — ANTHROPIC_API_KEY is not set; the sourcing agent cannot run')
-  process.exit(1)
+  // No API key: the Agent SDK subprocess falls back to the machine's `claude` sign-in — the
+  // owner's Claude subscription. That is the intended path for manual runs from Robert's own
+  // machine (2026-09-03 blitz: ~20 runs on subscription instead of per-token API billing); on a
+  // host with no sign-in (Railway) the first agent call fails loudly instead of silently free.
+  // The empty-string override (`ANTHROPIC_API_KEY= pnpm …`) must not reach the subprocess env,
+  // where the CLI could read it as a (bad) credential rather than an absence.
+  delete process.env.ANTHROPIC_API_KEY
+  console.warn(
+    'run-sourcing: ANTHROPIC_API_KEY not set — using the local Claude Code sign-in (subscription auth). ' +
+      'Note: the SDK cost estimate reads ~$0 on subscription, so --budget is inert; the 30-turn cap is the effective stop-loss.',
+  )
 }
 
 const { db, pool } = createDb(config.databaseUrl)

@@ -27,7 +27,9 @@ const EnvSchema = z
     CJ_OPEN_ID: z.string().optional(),
     TELEGRAM_BOT_TOKEN: z.string().optional(),
     TELEGRAM_CHAT_ID: z.string().optional(),
-    ANTHROPIC_API_KEY: z.string().min(1).optional(),
+    // No .min(1): an EMPTY value means "unset" (see the loader below) so `ANTHROPIC_API_KEY=
+    // pnpm run-sourcing …` can mask a key in apps/ops/.env for a subscription-auth local run.
+    ANTHROPIC_API_KEY: z.string().optional(),
     SERPAPI_KEY: z.string().min(1).optional(),
     SERPAPI_MAX_REQUESTS_PER_RUN: z.coerce.number().int().min(1).max(200).optional(),
     GMAIL_SERVICE_ACCOUNT_EMAIL: z.string().optional(),
@@ -164,7 +166,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     config.telegram = { botToken: data.TELEGRAM_BOT_TOKEN, chatId: data.TELEGRAM_CHAT_ID }
   }
 
-  if (data.ANTHROPIC_API_KEY !== undefined) {
+  // Truthy check, not !== undefined: `ANTHROPIC_API_KEY=` (empty) on the command line masks the
+  // .env key (loadDotEnv never overrides real env) and must read as "no key configured" — the
+  // Agent SDK then falls back to the local Claude Code sign-in (subscription auth) on manual runs.
+  if (data.ANTHROPIC_API_KEY) {
     config.anthropic = { apiKey: data.ANTHROPIC_API_KEY }
   }
 
