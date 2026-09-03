@@ -19,29 +19,23 @@ jobs:
           node-version: "lts/*"
           check-latest: true
 
-      # Shopify's generated template assumes a single-repo npm project (npm ci at the root,
-      # package-lock.json cache key, hydrogen deploy from the root). This repo is a pnpm
-      # monorepo with the Hydrogen app in apps/storefront, so the install/deploy steps are
-      # adapted; the checkout/setup-node pins above are kept as generated.
-      - name: Enable corepack (pnpm)
-        run: corepack enable
-
-      - name: Cache pnpm store
+      - name: Cache node modules
+        id: cache-npm
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          cache-name: cache-node-modules
         with:
-          path: ~/.local/share/pnpm/store
-          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          path: ~/.npm
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
-            ${{ runner.os }}-pnpm-
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci
 
       - name: Build and Publish to Oxygen
-        working-directory: apps/storefront
-        # --path "$PWD" for the same pnpm INIT_CWD quirk the storefront's own scripts work
-        # around (see README): without it the Shopify CLI resolves the project root to the
-        # repo root and Hydrogen's project detection breaks.
-        run: pnpm exec shopify hydrogen deploy --path "$PWD" --no-lockfile-check
+        run: npx shopify hydrogen deploy
         env:
           SHOPIFY_HYDROGEN_DEPLOYMENT_TOKEN: ${{ secrets.OXYGEN_DEPLOYMENT_TOKEN_1000173017 }}
