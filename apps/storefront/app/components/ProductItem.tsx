@@ -4,6 +4,7 @@ import type {
   ProductItemFragment,
   CollectionItemFragment,
   RecommendedProductFragment,
+  RelatedProductFragment,
 } from 'storefrontapi.generated';
 import {useVariantUrl} from '~/lib/variants';
 import {ProductCardImage} from '~/components/brand/ProductCardImage';
@@ -14,7 +15,8 @@ export function ProductItem({
   product:
     | CollectionItemFragment
     | ProductItemFragment
-    | RecommendedProductFragment;
+    | RecommendedProductFragment
+    | RelatedProductFragment;
   loading?: 'eager' | 'lazy';
 }) {
   const variantUrl = useVariantUrl(product.handle);

@@ -1,4 +1,5 @@
-import {redirect, useLoaderData} from 'react-router';
+import {redirect, useLoaderData, Await} from 'react-router';
+import {Suspense} from 'react';
 import type {Route} from './+types/products.$handle';
 import {
   getSelectedProductOptions,
@@ -21,6 +22,8 @@ import {ProductSpecs} from '~/components/product/ProductSpecs';
 import {WhatsInBox} from '~/components/product/WhatsInBox';
 import {ShippingReturnsAccordion} from '~/components/product/ShippingReturnsAccordion';
 import {SupplierReviews} from '~/components/product/SupplierReviews';
+import {RelatedProducts} from '~/components/product/RelatedProducts';
+import {pickRelated} from '~/lib/related';
 
 export const meta: Route.MetaFunction = ({data}) => {
   if (!data?.product) return [];
@@ -108,14 +111,24 @@ async function loadCriticalData({context, params, request}: Route.LoaderArgs) {
  * Make sure to not throw any errors here, as it will cause the page to 500.
  */
 function loadDeferredData({context, params}: Route.LoaderArgs) {
-  // Put any API calls that is not critical to be available on first page render
-  // For example: product reviews, product recommendations, social feeds.
+  // Related products (spec 2026-09-03 storefront-p1 Decision 2): deferred, never blocks TTFB,
+  // never 500s — a failed query or an uncategorized product resolves to null and the section
+  // renders nothing.
+  const relatedProducts = params.handle
+    ? context.storefront
+        .query(RELATED_PRODUCTS_QUERY, {variables: {handle: params.handle}})
+        .then((result) => pickRelated(result.product?.collections?.nodes, params.handle!))
+        .catch((error: Error) => {
+          console.error(error);
+          return null;
+        })
+    : Promise.resolve(null);
 
-  return {};
+  return {relatedProducts};
 }
 
 export default function Product() {
-  const {product, content} = useLoaderData<typeof loader>();
+  const {product, content, relatedProducts} = useLoaderData<typeof loader>();
 
   // Optimistically selects a variant with given available variant information
   const selectedVariant = useOptimisticVariant(
@@ -184,6 +197,11 @@ export default function Product() {
         </div>
       </div>
       <SupplierReviews data={content.supplierReviews} />
+      <Suspense fallback={null}>
+        <Await resolve={relatedProducts}>
+          {(related) => <RelatedProducts products={related} />}
+        </Await>
+      </Suspense>
       <Analytics.ProductView
         data={{
           products: [
@@ -331,4 +349,40 @@ const PRODUCT_QUERY = `#graphql
     }
   }
   ${PRODUCT_FRAGMENT}
+` as const;
+
+const RELATED_PRODUCTS_QUERY = `#graphql
+  fragment RelatedProduct on Product {
+    id
+    title
+    handle
+    priceRange {
+      minVariantPrice {
+        amount
+        currencyCode
+      }
+    }
+    featuredImage {
+      id
+      url
+      altText
+      width
+      height
+    }
+  }
+  query RelatedProducts($handle: String!, $country: CountryCode, $language: LanguageCode)
+    @inContext(country: $country, language: $language) {
+    product(handle: $handle) {
+      collections(first: 5) {
+        nodes {
+          handle
+          products(first: 8) {
+            nodes {
+              ...RelatedProduct
+            }
+          }
+        }
+      }
+    }
+  }
 ` as const;
