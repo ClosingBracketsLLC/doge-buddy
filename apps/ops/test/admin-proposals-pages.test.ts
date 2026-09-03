@@ -14,6 +14,25 @@ const url = process.env.DATABASE_URL ?? 'postgres://doge:doge@localhost:5433/dog
 
 const FORM_HEADERS = { 'content-type': 'application/x-www-form-urlencoded' }
 
+// Same shape as `validContext` in packages/core/test/proposals.test.ts — Task 2's schema fixture,
+// reused here for Task 12's render tests.
+const VALID_DECISION_CONTEXT = {
+  version: 1,
+  economics: {
+    freight: { priceCents: 649, name: 'USPS Ground', minDays: 3, maxDays: 7 },
+    variants: [{ sku: 'DB-1', priceCents: 2399, supplierCostCents: 612, landedCents: 1261, profitCents: 1138, marginBps: 4743 }],
+    market: { query: 'dog water bottle', offerCount: 12, medianCents: 2199, typicalCents: 2399, ceilingCents: 2858, maxPriceToMarketBps: 13000 },
+    usStockUnits: 214,
+  },
+  demand: {
+    cjListedCount: 1200,
+    cjReviews: { page1Count: 10, ratedCount: 8, avgRating: 4.6 },
+    marketOfferCount: 12,
+    trends: { keyword: 'dog leash', score: 62.1, momentum: 8 },
+    amazon: { query: 'dog water bottle', resultsSampled: 10, medianPriceCents: 2199, medianReviews: 3400, totalReviews: 54000 },
+  },
+}
+
 const VALID_NEW_LISTING_PAYLOAD = {
   type: 'new_listing' as const,
   title: 'Squeaky Widget',
@@ -1064,5 +1083,49 @@ describe('proposals queue + detail pages', () => {
     // sanity: the top-of-section imageUrls gallery still renders its one <img> — this assertion
     // is specifically about the variants-table cell, not the gallery above it
     expect((rendered.match(/<img /g) ?? []).length).toBe(1)
+  })
+
+  // -- Task 12: "Decision numbers" section on new_listing proposals ------------------------------
+  // Render-level (no DB, no HTTP), same idiom as 27-32: a synthetic new_listing row with
+  // decisionContext set. `status: 'rejected'` keeps the raw-JSON edit-payload textarea out of the
+  // way (per 29's own note) so it can't accidentally satisfy an assertion on its own.
+
+  it('33. render-level: valid decision_context renders the Decision numbers section with formatted economics + demand estimates', () => {
+    const row = syntheticProposalRow({ type: 'new_listing', status: 'rejected', payload: VALID_NEW_LISTING_PAYLOAD, decisionContext: VALID_DECISION_CONTEXT })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).toContain('Decision numbers')
+    expect(rendered).toContain('Demand signals — ESTIMATES, not sales')
+    expect(rendered).toContain('$12.61') // landed for variant DB-1 (1261)
+    expect(rendered).toContain('47.4%') // 4743 bps
+    expect(rendered).toContain('×1.09') // 2399/2199 typical/median ratio, 2dp
+    expect(rendered).toContain('~3400 reviews') // amazon.medianReviews
+  })
+
+  it('34. render-level: decision_context null renders identically to today (no Decision numbers section)', () => {
+    const row = syntheticProposalRow({ type: 'new_listing', status: 'rejected', payload: VALID_NEW_LISTING_PAYLOAD, decisionContext: null })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).not.toContain('Decision numbers')
+  })
+
+  it('35. render-level: an unparseable decision_context is omitted (section absent) rather than crashing the page', () => {
+    const row = syntheticProposalRow({ type: 'new_listing', status: 'rejected', payload: VALID_NEW_LISTING_PAYLOAD, decisionContext: { version: 99 } })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).not.toContain('Decision numbers')
+    expect(rendered).toContain('Squeaky Widget') // page still renders the rest of the preview
+  })
+
+  it('36. render-level: a null demand field is omitted rather than printed as 0', () => {
+    const degraded = { ...VALID_DECISION_CONTEXT, demand: { ...VALID_DECISION_CONTEXT.demand, cjListedCount: null } }
+    const row = syntheticProposalRow({ type: 'new_listing', status: 'rejected', payload: VALID_NEW_LISTING_PAYLOAD, decisionContext: degraded })
+
+    const rendered = renderProposalDetail(row).value
+
+    expect(rendered).not.toContain('CJ listings')
   })
 })

@@ -1,5 +1,6 @@
 import {
   formatCents,
+  ListingDecisionContextSchema,
   type DeprecateProductPayload,
   type NewListingPayload,
   type RefundPayload,
@@ -52,6 +53,53 @@ function renderDescriptionSection(descriptionHtml: string): RawHtml {
     <h3>Description (as it will appear)</h3>
     <p style="color:red">failed HTML validation — showing source</p>
     <pre>${descriptionHtml}</pre>
+  </section>`
+}
+
+/**
+ * L1 "Decision numbers" (spec 2026-09-03 Decision 11): economics table + demand ESTIMATES from
+ * the row's decision_context. safeParse, not cast — display code refuses to render a context
+ * that doesn't match the schema (section absent) rather than crashing the page; a null/absent
+ * context renders nothing, so legacy and support-path proposals look exactly as before.
+ */
+function renderDecisionContext(rawContext: unknown): RawHtml {
+  const parsed = ListingDecisionContextSchema.safeParse(rawContext)
+  if (!parsed.success) return html``
+  const ctx = parsed.data
+  const { market, usStockUnits, freight } = ctx.economics
+  const pct = (bps: number) => `${(bps / 100).toFixed(1)}%`
+  return html`<section>
+    <h3>Decision numbers</h3>
+    <div class="table-wrap"><table class="rows">
+      <thead><tr><th>SKU</th><th>Price</th><th>CJ cost</th><th>Freight</th><th>Landed</th><th>Profit</th><th>Margin</th></tr></thead>
+      <tbody>
+        ${ctx.economics.variants.map(
+          (v) => html`<tr>
+            <td data-label="SKU">${v.sku}</td>
+            <td data-label="Price">${formatCents(v.priceCents)}</td>
+            <td data-label="CJ cost">${formatCents(v.supplierCostCents)}</td>
+            <td data-label="Freight">${formatCents(freight.priceCents)}</td>
+            <td data-label="Landed">${formatCents(v.landedCents)}</td>
+            <td data-label="Profit">${formatCents(v.profitCents)}</td>
+            <td data-label="Margin">${pct(v.marginBps)}</td>
+          </tr>`,
+        )}
+      </tbody>
+    </table></div>
+    <p>Freight: ${formatCents(freight.priceCents)} ${freight.name} (${freight.minDays}–${freight.maxDays} days)${
+      usStockUnits != null ? html` · US stock (first variant): ${usStockUnits} units` : html``
+    }</p>
+    ${market
+      ? html`<p>Market ("${market.query}"): ${formatCents(market.medianCents)} median (${market.offerCount} offers) — ours ×${(market.typicalCents / market.medianCents).toFixed(2)} vs ceiling ${formatCents(market.ceilingCents)}</p>`
+      : html`<p>Market: gate skipped this run (no SerpApi)</p>`}
+    <h3>Demand signals — ESTIMATES, not sales</h3>
+    <ul>
+      ${ctx.demand.cjListedCount != null ? html`<li>CJ listings using this product: ${ctx.demand.cjListedCount}</li>` : html``}
+      ${ctx.demand.cjReviews ? html`<li>CJ reviews (page-1 sample): ${ctx.demand.cjReviews.ratedCount} rated of ${ctx.demand.cjReviews.page1Count}${ctx.demand.cjReviews.avgRating != null ? html`, avg ${ctx.demand.cjReviews.avgRating.toFixed(1)}` : html``}</li>` : html``}
+      ${ctx.demand.marketOfferCount != null ? html`<li>Market offers found: ${ctx.demand.marketOfferCount}</li>` : html``}
+      ${ctx.demand.trends && ctx.demand.trends.score != null ? html`<li>Trends "${ctx.demand.trends.keyword}": ${Math.round(ctx.demand.trends.score)} mean interest${ctx.demand.trends.momentum != null ? html` (momentum ${ctx.demand.trends.momentum >= 0 ? '+' : ''}${ctx.demand.trends.momentum})` : html``}</li>` : html``}
+      ${ctx.demand.amazon ? html`<li>Amazon "${ctx.demand.amazon.query}" (${ctx.demand.amazon.resultsSampled} sampled): ${ctx.demand.amazon.medianReviews != null ? html`median ~${ctx.demand.amazon.medianReviews} reviews` : html``}${ctx.demand.amazon.medianPriceCents != null ? html`, median price ${formatCents(ctx.demand.amazon.medianPriceCents)}` : html``}${ctx.demand.amazon.totalReviews != null ? html`, ~${ctx.demand.amazon.totalReviews} total` : html``}</li>` : html``}
+    </ul>
   </section>`
 }
 
@@ -332,7 +380,7 @@ function renderResendForm(p: ProposalRow): RawHtml {
 export function renderProposalDetail(p: ProposalRow, extras: ProposalDetailExtras = {}): RawHtml {
   const preview =
     p.type === 'new_listing'
-      ? renderNewListingPreview(p.payload as NewListingPayload)
+      ? html`${renderNewListingPreview(p.payload as NewListingPayload)}${renderDecisionContext(p.decisionContext)}`
       : p.type === 'support_reply'
         ? renderSupportReplyPreview(p.payload)
         : p.type === 'refund'
