@@ -1,13 +1,16 @@
-import { NewListingPayloadSchema, type NewListingPayload } from '@doge-buddy/core'
+import { formatCents, NewListingPayloadSchema, type NewListingPayload } from '@doge-buddy/core'
 import type { createDb } from '@doge-buddy/db'
-import type { SupplierAdapter } from '@doge-buddy/supplier'
+import type { ShippingOption, SupplierAdapter, WarehouseStock } from '@doge-buddy/supplier'
 import type { SourcingWinner } from '../agents/output-schema.ts'
 import type { PointsAllowance } from '../agents/points.ts'
 import { submitProposal, type SubmitProposalDeps } from '../proposals/submit.ts'
 import type { Settings } from '../settings.ts'
+import { buildListingDecisionContext, type ReviewsSeen } from './decision-context.ts'
+import type { AmazonDemandSnapshot, DemandProbeProvider } from './demand-probe.ts'
 import { findClaimViolations, htmlToText, matchExcludedCategory, validateDescriptionHtml } from './guards.ts'
 import type { HarvestCandidate } from './harvest.ts'
-import { quantileCents, type MarketLookups } from './market-price.ts'
+import { quantileCents, type MarketLookup, type MarketLookups } from './market-price.ts'
+import type { TrendSignal } from './trends.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: Record<string, unknown>) => Promise<void>
@@ -30,6 +33,16 @@ export interface SubmitWinnersDeps {
    *  run (no SERPAPI_KEY) — null SKIPS step 6 entirely (spec Decision 5). Required, not optional:
    *  every caller must decide, absence is not a default. */
   marketLookups: MarketLookups | null
+  /** Amazon demand cross-check provider, or null when the market-price provider was absent this
+   *  run (no SERPAPI_KEY) — null SKIPS step 8b's probe entirely (same stance as `marketLookups`).
+   *  Required, not optional: every caller must decide, absence is not a default. */
+  demandProbe: DemandProbeProvider | null
+  /** Run-scoped registry of what the agent's own get_reviews calls actually saw (spec 2026-09-03
+   *  Decision 8) — code-recorded provenance, mirroring `marketLookups`. Required, not optional. */
+  reviewsSeen: ReviewsSeen
+  /** Trend signals fetched once per run keyed by keyword (spec 2026-09-03 Decision 9) — display
+   *  support only, never a gate input. Required, not optional: every caller must decide. */
+  trendSignalsByKeyword: Map<string, TrendSignal>
 }
 
 export interface WinnerOutcome {
@@ -155,6 +168,7 @@ async function processWinner(
   // ONLY what the tool handler recorded (MarketLookups), never a number the agent typed; the
   // agent's marketLookupId is a key, and a key for the wrong product is as dead as no key.
   let marketClause = ''
+  let marketLookup: MarketLookup | null = null
   if (deps.marketLookups !== null) {
     const lookup = winner.marketLookupId ? deps.marketLookups.get(winner.marketLookupId) : undefined
     if (!lookup || lookup.supplierProductId !== pid || lookup.medianCents == null) {
@@ -180,6 +194,7 @@ async function processWinner(
       })
     }
     marketClause = `, market $${(lookup.medianCents / 100).toFixed(2)} median ×${(typicalCents / lookup.medianCents).toFixed(2)}`
+    marketLookup = lookup
   }
 
   // Step 7: ground-truth re-verification against CJ (spends from the run's shared allowance).
@@ -187,6 +202,7 @@ async function processWinner(
   // be within tolerance of the agent's claimed cost — on pass, the LIVE figure overwrites the
   // payload (fulfillment pays what CJ actually charges, never the agent's guess). Verified US
   // stock is checked on the first variant only, mirroring the order-time gate's stock pool.
+  let stockRows: WarehouseStock[] = []
   try {
     deps.allowance.spend(10, `verify:${pid}`)
     const detail = await deps.adapter.getProduct(pid)
@@ -224,6 +240,7 @@ async function processWinner(
     deps.allowance.spend(10, `stock:${pid}`)
     const firstVid = payload.variants[0]!.supplierVariantId
     const stock = await deps.adapter.getVariantStock(firstVid)
+    stockRows = stock
     const hasUsStock = stock.some((s) => s.countryCode === 'US' && s.quantity >= 1)
     if (!hasUsStock) {
       throw new Error(`no verified US stock (qty >= 1) for ${firstVid}`)
@@ -236,6 +253,7 @@ async function processWinner(
   // exactly: `Math.floor(((total - projected) * 10_000) / total)` — integer bps, floored, never
   // rounded, so a margin a hair under the floor never gets rounded up into a false pass.
   let freightCents: number
+  let freightOption: ShippingOption
   try {
     deps.allowance.spend(10, `freight:${pid}`)
     const firstVid = payload.variants[0]!.supplierVariantId
@@ -252,7 +270,9 @@ async function processWinner(
     if (eligible.length === 0) {
       throw new Error('no freight within window')
     }
-    freightCents = Math.min(...eligible.map((o) => o.priceCents))
+    const chosen = eligible.reduce((a, b) => (b.priceCents < a.priceCents ? b : a))
+    freightOption = chosen
+    freightCents = chosen.priceCents
   } catch (err) {
     return drop('sourcing_winner_margin_below_floor', { error: errMessage(err) })
   }
@@ -267,9 +287,46 @@ async function processWinner(
     if (marginBps < minMarginBps) minMarginBps = marginBps
   }
 
-  // Step 9: submit. The summary is composed by plain code from the already-scrubbed title and
-  // the code-computed margin, never from free agent text.
-  const summary = `New listing: ${payload.title} — ${payload.variants.length} variant(s), ${payload.imageUrls.length} image(s), margin ${minMarginBps}bps${marketClause}`
+  // Step 8b: decision context (spec 2026-09-03 Decisions 5, 8, 11). Everything here is
+  // display-support for the owner: a probe failure must NEVER drop a winner that already
+  // passed every gate.
+  let amazon: AmazonDemandSnapshot | null = null
+  if (deps.demandProbe && marketLookup) {
+    try {
+      amazon = await deps.demandProbe.probe(marketLookup.query)
+    } catch (err) {
+      await deps.alert('info', 'demand_probe_failed', { runId: input.runId, supplierProductId: pid, error: errMessage(err) }).catch(() => {})
+    }
+  }
+  const candidate = input.candidatesByPid.get(pid)
+  const decisionContext = buildListingDecisionContext({
+    payload,
+    freightCents,
+    freightOption,
+    lookup: marketLookup,
+    maxPriceToMarketBps: input.maxPriceToMarketBps,
+    stockRows,
+    candidate,
+    trendSignal: candidate ? deps.trendSignalsByKeyword.get(candidate.keyword) : undefined,
+    reviews: deps.reviewsSeen.get(pid),
+    amazon,
+  })
+
+  // Step 9: summary stays code-composed. Profit range + estimate clauses; null sources are
+  // OMITTED, never rendered as 0 — an absent number must read as unknown.
+  const profits = decisionContext.economics.variants.map((v) => v.profitCents)
+  const minProfit = Math.min(...profits)
+  const maxProfit = Math.max(...profits)
+  const profitClause = minProfit === maxProfit ? `, profit ${formatCents(minProfit)}` : `, profit ${formatCents(minProfit)}–${formatCents(maxProfit)}`
+  const estParts: string[] = []
+  if (decisionContext.demand.amazon?.medianReviews != null) estParts.push(`amzn ~${decisionContext.demand.amazon.medianReviews} reviews`)
+  if (decisionContext.demand.cjListedCount != null) estParts.push(`CJ ${decisionContext.demand.cjListedCount} listed`)
+  if (decisionContext.demand.trends?.score != null) {
+    const momentum = decisionContext.demand.trends.momentum
+    estParts.push(`trends ${Math.round(decisionContext.demand.trends.score)}${momentum != null ? ` (${momentum >= 0 ? '+' : ''}${momentum})` : ''}`)
+  }
+  const estClause = estParts.length > 0 ? ` | est: ${estParts.join(', ')}` : ''
+  const summary = `New listing: ${payload.title} — ${payload.variants.length} variant(s), ${payload.imageUrls.length} image(s), margin ${minMarginBps}bps${marketClause}${profitClause}${estClause}`
   try {
     await deps.submit(deps.submitDeps, {
       type: 'new_listing',
@@ -277,6 +334,7 @@ async function processWinner(
       payload,
       sourceWorkflow: 'sourcing.weekly',
       agentRunId: input.runId,
+      decisionContext,
     })
   } catch (err) {
     return drop('sourcing_winner_submit_failed', { error: errMessage(err) })

@@ -1,8 +1,11 @@
+import { ListingDecisionContextSchema } from '@doge-buddy/core'
 import type { ShippingOption, SupplierProductDetail, WarehouseStock } from '@doge-buddy/supplier'
 import { describe, expect, it, vi } from 'vitest'
 import type { SourcingWinner } from '../src/agents/output-schema.ts'
 import { PointsAllowance } from '../src/agents/points.ts'
 import type { SubmitProposalDeps, SubmitProposalInput } from '../src/proposals/submit.ts'
+import { ReviewsSeen } from '../src/sourcing/decision-context.ts'
+import type { AmazonDemandSnapshot, DemandProbeProvider } from '../src/sourcing/demand-probe.ts'
 import type { HarvestCandidate } from '../src/sourcing/harvest.ts'
 import { MarketLookups, type MarketOffer } from '../src/sourcing/market-price.ts'
 import {
@@ -11,6 +14,7 @@ import {
   type SubmitWinnersDeps,
 } from '../src/sourcing/submit-winners.ts'
 import type { Settings } from '../src/settings.ts'
+import type { TrendSignal } from '../src/sourcing/trends.ts'
 
 function marketOffers(...cents: number[]): MarketOffer[] {
   return cents.map((c, i) => ({ title: `o${i}`, priceCents: c, merchant: null, url: null }))
@@ -112,8 +116,15 @@ function makeDeps(overrides: Partial<SubmitWinnersDeps> & { submit?: SubmitWinne
     settings: makeSettings(),
     alert: vi.fn(async () => {}),
     marketLookups: null,
+    demandProbe: null,
+    reviewsSeen: new ReviewsSeen(),
+    trendSignalsByKeyword: new Map(),
     ...overrides,
   }
+}
+
+function makeDemandProbe(probe?: DemandProbeProvider['probe']): DemandProbeProvider {
+  return { key: 'serpapi_amazon', probe: vi.fn(probe ?? (async () => null)) }
 }
 
 function candidateSet(pids: string[]): { candidateIds: Set<string>; candidatesByPid: Map<string, HarvestCandidate> } {
@@ -168,7 +179,9 @@ describe('validateAndSubmitWinners', () => {
     // Live cost (1000c) overwrote the agent's claimed cost (1050c).
     expect((submitInput.payload as { variants: { supplierCostCents: number }[] }).variants[0]!.supplierCostCents).toBe(1000)
     // margin = floor((5000 - 1000 - 500) * 10000 / 5000) = 7000bps
-    expect(submitInput.summary).toBe('New listing: Cozy Dog Bed — 1 variant(s), 1 image(s), margin 7000bps')
+    // profit = 5000 - 1000 (live cost) - 500 (freight) = 3500c = $35.00; est clause carries the
+    // candidate's harvested listedNum (100) — populated regardless of the market/demand gates.
+    expect(submitInput.summary).toBe('New listing: Cozy Dog Bed — 1 variant(s), 1 image(s), margin 7000bps, profit $35.00 | est: CJ 100 listed')
 
     // FIX C5: Stage 4.6 verified US stock, so freight MUST be quoted from US (mirroring the
     // order-time gate in run-place-order.ts). A CN quote returns China-origin ~15-30d options that
@@ -875,5 +888,162 @@ describe('step 6: price-to-market gate', () => {
       { supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_price_above_market' },
       { supplierProductId: 'cjp-1', outcome: 'submitted' },
     ])
+  })
+})
+
+describe('step 8b decision context', () => {
+  it('submits with a populated decisionContext and extended summary', async () => {
+    const registry = new MarketLookups()
+    const lookup = registry.record({ supplierProductId: 'cjp-1', query: 'cozy dog bed', offers: marketOffers(1000, 2000, 2199, 2400, 3000) })
+    const probe = vi.fn(
+      async (query: string): Promise<AmazonDemandSnapshot> => ({
+        query,
+        resultsSampled: 8,
+        medianPriceCents: 2500,
+        medianReviews: 3400,
+        totalReviews: 40000,
+      }),
+    )
+    const reviewsSeen = new ReviewsSeen()
+    reviewsSeen.record('cjp-1', [
+      { rating: 5, content: 'great' },
+      { rating: 4, content: 'nice' },
+    ])
+    const trendSignalsByKeyword = new Map<string, TrendSignal>([['dog bed', { keyword: 'dog bed', score: 62.1, snapshot: {} }]])
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({ id: 'proposal-1', status: 'pending' as const }))
+    const deps = makeDeps({
+      submit,
+      marketLookups: registry,
+      demandProbe: { key: 'serpapi_amazon', probe },
+      reviewsSeen,
+      trendSignalsByKeyword,
+    })
+    const candidateIds = new Set(['cjp-1'])
+    const candidatesByPid = new Map([['cjp-1', candidate('cjp-1', { listedNum: 1200, keyword: 'dog bed' })]])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 50000,
+      winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    const [, submitInput] = submit.mock.calls[0]!
+    const decisionContext = ListingDecisionContextSchema.parse(submitInput.decisionContext)
+    // live cost (1000c) + freight (500c)
+    expect(decisionContext.economics.variants[0]!.landedCents).toBe(1500)
+    expect(decisionContext.economics.market!.medianCents).toBe(2199)
+    expect(decisionContext.demand.amazon!.medianReviews).toBe(3400)
+    expect(probe).toHaveBeenCalledWith(lookup.query)
+    expect(submitInput.summary).toContain(', profit $')
+    expect(submitInput.summary).toContain(' | est: amzn ~3400 reviews, CJ 1200 listed, trends 62')
+  })
+
+  it('probes ONLY survivors, reusing the lookup query', async () => {
+    const registry = new MarketLookups()
+    // cjp-2's lookup: median 1000, ceiling generous enough for its 5000c price to pass.
+    const lookup2 = registry.record({ supplierProductId: 'cjp-2', query: 'cozy dog bed cjp-2', offers: marketOffers(500, 800, 1000, 1200, 1500) })
+    const probe = vi.fn(async (query: string): Promise<AmazonDemandSnapshot> => ({ query, resultsSampled: 5, medianPriceCents: null, medianReviews: 100, totalReviews: 500 }))
+    const deps = makeDeps({ marketLookups: registry, demandProbe: { key: 'serpapi_amazon', probe } })
+    const candidateIds = new Set(['cjp-1', 'cjp-2'])
+    const candidatesByPid = new Map([
+      ['cjp-1', candidate('cjp-1')],
+      ['cjp-2', candidate('cjp-2')],
+    ])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 50000,
+      // cjp-1 has NO marketLookupId -> dropped at step 6, never reaches the probe.
+      winners: [winnerFor('cjp-1'), winnerFor('cjp-2', { winner: { marketLookupId: lookup2.lookupId } })],
+    })
+
+    expect(outcomes).toEqual([
+      { supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_no_market_price' },
+      { supplierProductId: 'cjp-2', outcome: 'submitted' },
+    ])
+    expect(probe).toHaveBeenCalledTimes(1)
+    expect(probe).toHaveBeenCalledWith(lookup2.query)
+  })
+
+  it('a probe throw alerts info demand_probe_failed and still submits (amazon null)', async () => {
+    const registry = new MarketLookups()
+    const lookup = registry.record({ supplierProductId: 'cjp-1', query: 'cozy dog bed', offers: marketOffers(1000, 2000, 2199, 2400, 3000) })
+    const probe = vi.fn(async (): Promise<AmazonDemandSnapshot> => {
+      throw new Error('SerpApi 500')
+    })
+    const alert = vi.fn(async () => {})
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({ id: 'proposal-1', status: 'pending' as const }))
+    const deps = makeDeps({ submit, alert, marketLookups: registry, demandProbe: { key: 'serpapi_amazon', probe } })
+    const candidateIds = new Set(['cjp-1'])
+    const candidatesByPid = new Map([['cjp-1', candidate('cjp-1')]])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 50000,
+      winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    expect(alert).toHaveBeenCalledWith(
+      'info',
+      'demand_probe_failed',
+      expect.objectContaining({ runId: RUN_ID, supplierProductId: 'cjp-1', error: 'SerpApi 500' }),
+    )
+    const [, submitInput] = submit.mock.calls[0]!
+    const decisionContext = ListingDecisionContextSchema.parse(submitInput.decisionContext)
+    expect(decisionContext.demand.amazon).toBeNull()
+    expect(submitInput.summary).not.toContain('amzn')
+  })
+
+  it('market gate skipped run: market and amazon are null, economics still populated, summary has no est amzn clause', async () => {
+    const probe = makeDemandProbe()
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({ id: 'proposal-1', status: 'pending' as const }))
+    const deps = makeDeps({ submit, marketLookups: null, demandProbe: probe }) // marketLookups null -> step 6 skipped entirely
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1')],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    expect(probe.probe).not.toHaveBeenCalled()
+    const [, submitInput] = submit.mock.calls[0]!
+    const decisionContext = ListingDecisionContextSchema.parse(submitInput.decisionContext)
+    expect(decisionContext.economics.market).toBeNull()
+    expect(decisionContext.demand.amazon).toBeNull()
+    expect(submitInput.summary).not.toContain('amzn')
+  })
+
+  it('null-source clauses are omitted, never rendered as 0', async () => {
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({ id: 'proposal-1', status: 'pending' as const }))
+    const deps = makeDeps({ submit, demandProbe: null, trendSignalsByKeyword: new Map() })
+    const candidateIds = new Set(['cjp-1'])
+    const candidatesByPid = new Map([['cjp-1', candidate('cjp-1', { listedNum: null })]])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1')],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    const [, submitInput] = submit.mock.calls[0]!
+    expect(submitInput.summary).not.toMatch(/ \| est:/)
+    expect(submitInput.summary).not.toContain('CJ')
+    expect(submitInput.summary).not.toContain('trends')
+    expect(submitInput.summary).not.toContain('amzn')
   })
 })
