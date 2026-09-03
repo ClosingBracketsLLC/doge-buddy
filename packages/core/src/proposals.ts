@@ -108,6 +108,70 @@ export const DeprecateProductPayloadSchema = z.object({
 })
 export type DeprecateProductPayload = z.infer<typeof DeprecateProductPayloadSchema>
 
+/**
+ * L1 decision-support context (spec 2026-09-03): the code-computed numbers Robert decides a
+ * new_listing on — economics per variant plus demand ESTIMATES. Produced ONLY by Stage 6
+ * (plain code) and stored on `proposals.decision_context`; display-only, never read by apply.
+ * `profitCents` may be any integer in principle, but every producer runs AFTER the margin-floor
+ * gate. `demand.*` are estimates — every renderer labels them so.
+ */
+export const ListingDecisionContextSchema = z.object({
+  version: z.literal(1),
+  economics: z.object({
+    freight: z.object({
+      priceCents: cents.nonnegative(),
+      name: z.string(),
+      minDays: z.number().int().nonnegative(),
+      maxDays: z.number().int().nonnegative(),
+    }),
+    variants: z
+      .array(
+        z.object({
+          sku: z.string(),
+          priceCents: cents.positive(),
+          supplierCostCents: cents.nonnegative(),
+          landedCents: cents.nonnegative(),
+          profitCents: z.number().int(),
+          marginBps: z.number().int(),
+        }),
+      )
+      .min(1),
+    market: z
+      .object({
+        query: z.string(),
+        offerCount: z.number().int().nonnegative(),
+        medianCents: cents.positive(),
+        typicalCents: cents.positive(),
+        ceilingCents: cents.nonnegative(),
+        maxPriceToMarketBps: z.number().int(),
+      })
+      .nullable(),
+    usStockUnits: z.number().int().nonnegative().nullable(),
+  }),
+  demand: z.object({
+    cjListedCount: z.number().int().nonnegative().nullable(),
+    cjReviews: z
+      .object({
+        page1Count: z.number().int().nonnegative(),
+        ratedCount: z.number().int().nonnegative(),
+        avgRating: z.number().min(1).max(5).nullable(),
+      })
+      .nullable(),
+    marketOfferCount: z.number().int().nonnegative().nullable(),
+    trends: z.object({ keyword: z.string(), score: z.number().nullable(), momentum: z.number().nullable() }).nullable(),
+    amazon: z
+      .object({
+        query: z.string(),
+        resultsSampled: z.number().int().nonnegative(),
+        medianPriceCents: cents.positive().nullable(),
+        medianReviews: z.number().int().nonnegative().nullable(),
+        totalReviews: z.number().int().nonnegative().nullable(),
+      })
+      .nullable(),
+  }),
+})
+export type ListingDecisionContext = z.infer<typeof ListingDecisionContextSchema>
+
 // NOTE: z.discriminatedUnion cannot contain .refine()-wrapped members in zod v4 —
 // use a plain union; the `type` literals still discriminate correctly on parse.
 export const ProposalPayloadSchema = z.union([

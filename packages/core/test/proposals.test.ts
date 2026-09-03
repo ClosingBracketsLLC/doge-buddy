@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ProposalPayloadSchema, NewListingPayloadSchema, RefundPayloadSchema, SupportReplyPayloadSchema,
+  ListingDecisionContextSchema,
 } from '@doge-buddy/core'
 
 const validListing = {
@@ -159,5 +160,45 @@ describe('NewListingPayloadSchema v2 fields', () => {
 
   it('rejects whatsInBox over 200 chars', () => {
     expect(NewListingPayloadSchema.safeParse({ ...base, whatsInBox: 'x'.repeat(201) }).success).toBe(false)
+  })
+})
+
+describe('ListingDecisionContextSchema', () => {
+  const validContext = {
+    version: 1,
+    economics: {
+      freight: { priceCents: 649, name: 'USPS Ground', minDays: 3, maxDays: 7 },
+      variants: [{ sku: 'DB-1', priceCents: 2399, supplierCostCents: 612, landedCents: 1261, profitCents: 1138, marginBps: 4743 }],
+      market: { query: 'dog water bottle', offerCount: 12, medianCents: 2199, typicalCents: 2399, ceilingCents: 2858, maxPriceToMarketBps: 13000 },
+      usStockUnits: 214,
+    },
+    demand: {
+      cjListedCount: 1200,
+      cjReviews: { page1Count: 10, ratedCount: 8, avgRating: 4.6 },
+      marketOfferCount: 12,
+      trends: { keyword: 'dog leash', score: 62.1, momentum: 8 },
+      amazon: { query: 'dog water bottle', resultsSampled: 10, medianPriceCents: 2199, medianReviews: 3400, totalReviews: 54000, },
+    },
+  }
+
+  it('accepts a fully populated context', () => {
+    expect(ListingDecisionContextSchema.safeParse(validContext).success).toBe(true)
+  })
+  it('accepts every nullable source as null (market-gate-skipped run)', () => {
+    const degraded = {
+      ...validContext,
+      economics: { ...validContext.economics, market: null, usStockUnits: null },
+      demand: { cjListedCount: null, cjReviews: null, marketOfferCount: null, trends: null, amazon: null },
+    }
+    expect(ListingDecisionContextSchema.safeParse(degraded).success).toBe(true)
+  })
+  it('rejects version 2 and missing economics', () => {
+    expect(ListingDecisionContextSchema.safeParse({ ...validContext, version: 2 }).success).toBe(false)
+    expect(ListingDecisionContextSchema.safeParse({ version: 1, demand: validContext.demand }).success).toBe(false)
+  })
+  it('rejects non-integer cents', () => {
+    const bad = structuredClone(validContext)
+    bad.economics.variants[0].priceCents = 23.99
+    expect(ListingDecisionContextSchema.safeParse(bad).success).toBe(false)
   })
 })
