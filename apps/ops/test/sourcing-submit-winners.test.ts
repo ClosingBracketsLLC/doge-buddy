@@ -352,7 +352,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
-      winners: [winnerFor('cjp-1', { payload: { title: 'Calming Dog Bed' } })],
+      winners: [winnerFor('cjp-1', { payload: { title: 'Flea Collar Deluxe' } })],
     })
 
     expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_excluded_category' }])
@@ -366,7 +366,7 @@ describe('validateAndSubmitWinners', () => {
   it('step 4 — sourcing_winner_excluded_category: harvested categoryName hits the exclusion list', async () => {
     const deps = makeDeps()
     const candidateIds = new Set(['cjp-1'])
-    const candidatesByPid = new Map([['cjp-1', candidate('cjp-1', { categoryName: 'Calming Aids' })]])
+    const candidatesByPid = new Map([['cjp-1', candidate('cjp-1', { categoryName: 'Flea & Tick Aids' })]])
 
     const outcomes = await validateAndSubmitWinners(deps, {
       runId: RUN_ID,

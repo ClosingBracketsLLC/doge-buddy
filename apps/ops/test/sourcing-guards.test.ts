@@ -3,9 +3,22 @@ import { matchExcludedCategory, findClaimViolations, htmlToText, validateDescrip
 
 describe('guards', () => {
   it('matchExcludedCategory hits on any text field, case-insensitively', () => {
-    expect(matchExcludedCategory('Dog CALMING Bed', 'Beds')).toBe('calming')
+    expect(matchExcludedCategory('Premium DOG FOOD 5lb bag', 'Pet Food')).toBe('dog food')
     expect(matchExcludedCategory('Rope Toy', 'Pet Toys')).toBeNull()
     expect(matchExcludedCategory(undefined, 'Flea & Tick Collar')).toBe('flea')
+  })
+
+  it('owner ruling 2026-09-03: calming GEAR and feeding GEAR list; consumables and claims stay out', () => {
+    // 'calming' left the category exclusions — a calming donut bed is mainstream merchandising —
+    // but the claims scrubber still bans every therapeutic promise, and 'anxiety' remains an
+    // excluded CATEGORY term (an "anxiety wrap" is a therapeutic product, not a style).
+    expect(matchExcludedCategory('Calming Donut Dog Bed', 'Beds')).toBeNull()
+    expect(matchExcludedCategory('Dog Anxiety Wrap Vest')).toBe('anxiety')
+    expect(findClaimViolations('Calming plush bed', '<p>provides anxiety relief</p>')).toContain('anxiety relief')
+    // 'food' narrowed to 'dog food': gear that merely MENTIONS food (feeders, bowls, storage)
+    // lists; actual food products still trip on their own naming.
+    expect(matchExcludedCategory('Slow Feeder Bowl', "slows your dog's food intake for healthier eating")).toBeNull()
+    expect(matchExcludedCategory('Airtight Dog Food Storage Container')).toBe('dog food') // known collateral: storage GEAR named "dog food …" still drops — acceptable, rare
   })
   it('findClaimViolations returns every hit', () => {
     expect(findClaimViolations('Vet Approved shampoo', '<p>clinically proven pain relief</p>')).toEqual(
@@ -64,7 +77,7 @@ describe('guards', () => {
       expect(matchExcludedCategory(htmlToText('<p>&#99;ures &#97;nxiety</p>'))).toBe('anxiety')
     })
     it('matchExcludedCategory catches an excluded term hidden behind a hex entity', () => {
-      expect(matchExcludedCategory(htmlToText('<p>&#x63;alming bed</p>'))).toBe('calming')
+      expect(matchExcludedCategory(htmlToText('<p>&#x66;lea collar</p>'))).toBe('flea')
     })
   })
   describe('validateDescriptionHtml', () => {

@@ -1,7 +1,12 @@
+// Owner ruling 2026-09-03 (blitz day): 'food' narrowed to 'dog food' and 'calming' removed —
+// feeding GEAR (slow feeders, bowls) and calming-style beds are mainstream dog merchandising
+// that the broad terms were dropping wholesale. The safety line is unchanged: actual consumables
+// ('dog food', 'edible', 'treat…'), meds/supplements, and 'anxiety'-positioned products stay
+// excluded, and CLAIM_TERMS still bans every therapeutic promise in copy.
 export const EXCLUDED_CATEGORY_TERMS = [
   'supplement', 'vitamin', 'cbd', 'hemp', 'flea', 'tick', 'dewormer', 'medicated',
-  'medicine', 'antibiotic', 'pharmaceutical', 'treat', 'treats', 'food', 'edible',
-  'chew', 'consumable', 'calming', 'anxiety', 'probiotic', 'oil drops',
+  'medicine', 'antibiotic', 'pharmaceutical', 'treat', 'treats', 'dog food', 'edible',
+  'chew', 'consumable', 'anxiety', 'probiotic', 'oil drops',
 ] as const
 
 export const CLAIM_TERMS = [
