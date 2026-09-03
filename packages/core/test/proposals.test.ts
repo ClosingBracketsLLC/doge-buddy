@@ -198,7 +198,7 @@ describe('ListingDecisionContextSchema', () => {
   })
   it('rejects non-integer cents', () => {
     const bad = structuredClone(validContext)
-    bad.economics.variants[0].priceCents = 23.99
+    bad.economics.variants[0]!.priceCents = 23.99
     expect(ListingDecisionContextSchema.safeParse(bad).success).toBe(false)
   })
 })
