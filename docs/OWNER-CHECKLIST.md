@@ -475,20 +475,16 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 is its live tier — canary is still next after that). When you complete an item, check it off and
 tell Claude — especially the credential items, so live verification can run.*
 
-**Next build session starts here →** **Sourcing upgrade #2 spec: Google Trends rising related
-queries PLUS the Amazon Pet-Supplies demand cross-check via SerpApi's Amazon engine (Robert
-approved folding both into one spec, 2026-09-02 — see
-`docs/supplier-trend-research-2026-09-02.md` for the research grounding; note the Amazon engine
-covers search + category-popularity sort, NOT true Movers & Shakers). House flow: brainstorm the
-spec with Robert → spec → plan → SDD build. Context for the session: product page v2 is MERGED,
-PUSHED, and its backfill live check PASSED 2026-09-02 (see the checked item above — media,
-reviews, definitions, productComments wire shape all live-verified). Still open from that check,
-all Robert's: the forced `run-sourcing` (`railway ssh` then
-`pnpm --filter @doge-buddy/ops run-sourcing --max-winners 2 --force` — it closes BOTH the
-market-price and product-page-v2 live checks; check `/admin` runs first to be sure run b0500313…
-isn't still running), the Fold eyeball of a product page, and the CJ-dashboard points-cost
-glance. Post-canary, parked with research done: Zendrop as the second supplier ($49/mo Pro probe
-first — memo has the plan).**
+**Next build session starts here →** **LAUNCH PUSH — `docs/LAUNCH-PLAN.md` is now the ordered
+list of everything that remains (written 2026-09-03 on Robert's launch call: full catalog
+re-source through the new pipeline, 100-product target, every proposal carries economics +
+demand-estimate numbers before approval). First build = L1: ONE spec folding Google Trends
+keywords + the Amazon demand cross-check + the proposal economics/demand blocks + the pricing
+prompt tweak — brainstorm → spec → plan → SDD, research grounding in
+`docs/supplier-trend-research-2026-09-02.md`. Both live checks (product page v2 AND
+market-price) are CLOSED 2026-09-03 — first v2 listing live end-to-end, mode back to `manual`.
+Before the L2 wave starts, Robert's SerpApi quota check is the binding constraint (details in
+the plan). Post-canary, parked with research done: Zendrop as second supplier.**
 Also pending: sourcing upgrade 1 (market-price tool + 1.3× gate) is **MERGED to `main` 2026-09-01** (spec `2026-09-01-sourcing-market-price-design.md`; push is Robert's) — its **LIVE CHECK is the "Sourcing market-price LIVE CHECK" item above** (full command, flags, Railway-shell gotcha, pass criteria). Owner items before it: `SERPAPI_KEY` on the Railway ops service, and the SerpApi plan's monthly search quota (design assumed 250/mo; if it's 100, lower `SERPAPI_MAX_REQUESTS_PER_RUN` to 15 before a build week). Upgrade (2) — Google Trends rising related queries — gets its spec after the live check. Still queued behind it: runway **B14** (`seed-collections` → `backfill-listings --dry-run` then real →
 one manual `run-sourcing --max-winners 2` → force an `inventory.sync` check → flip
 `workflow.sourcing.mode` to `auto` for the build-week runs → back to `manual` after). Once the
