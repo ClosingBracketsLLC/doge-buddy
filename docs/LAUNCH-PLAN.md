@@ -37,27 +37,36 @@ What was folded in (all pre-approved in principle):
 - **Pricing guidance prompt tweak** (parked 2026-09-03): price up to the 1.3× ceiling when
   freight demands it; median-anchoring second.
 
-## L2 — The 100-product wave [R runs + approvals, C support]
+## L2 — The 100-product BLITZ [R runs + approvals, C support] — RESCHEDULED 2026-09-03
 
-- **[R] SerpApi quota check FIRST** — the binding constraint. ~20–30 runs × ≤25 requests ≈
-  400–600 requests; if the plan is 250/month, bump the tier for the wave month or halve
-  `SERPAPI_MAX_REQUESTS_PER_RUN` and accept fewer market lookups per run.
-- **[R] `SERPAPI_KEY` confirmed on Railway** (already done if the market clause showed in run
-  summaries — it did on 2026-09-03).
-- Cadence math: CJ daily points budget 50k, ~25k allowance/run ⇒ ≤2 runs/day; realistic yield
-  3–6 listed winners per forced run with `--max-winners 8` ⇒ **100 products ≈ 1.5–2 weeks of
-  daily runs**. Keep `workflow.sourcing.mode = manual` so every listing passes Robert with the
-  L1 numbers (that's the point of L1 landing first); Telegram approve keeps 100 approvals quick.
-- Command per run (from `railway ssh`):
-  `pnpm --filter @doge-buddy/ops run-sourcing --max-winners 8 --force --keywords "<rotate: see harvest defaults + Trends output once L1 lands>"`
-- **[C] catalog-P0-style follow-through per batch**: collections fill by tag automatically;
-  spot-probe listings read-only (variant images, metafields, gallery) as batches land.
+**Robert's call (2026-09-03 chat): 100 products by END OF DAY 2026-09-03, launch THIS WEEKEND
+(2026-09-05/06), next week = enhancements + marketing prep.** Prereqs done: SerpApi Starter
+(1,000 searches/mo), env cap set, main pushed + deployed, L1 live check passed.
+
+- **Cadence (revised for the blitz):** the old "≤2 runs/day" used the 25k per-run STOP-LOSS as if
+  it were typical spend; real runs print ~1.5–3k CJ points each, so 15–25 serial runs fit inside
+  CJ's ~50k/day API quota. SerpApi: ~25–35 requests/run × ~20 runs ≈ 500–700 of the 1,000/mo.
+  Watch both printed closing lines per run; if points estimates trend high or CJ 429s rove
+  (backoff absorbs bursts), space runs out.
+- Per-run command (from `railway ssh`, `/app`), widened knobs for maximum yield per run:
+  `pnpm --filter @doge-buddy/ops run-sourcing --max-winners 8 --candidates 40 --pages 20 --budget 4 --force --keywords "<rotate>"`
+  Rotate keyword sets across runs (expansion auto-adds rising queries on top). Yield decays as
+  the harvest dedupe exhausts CJ's US-warehouse dog catalog — `no_candidates` short-circuits or
+  near-zero submissions mean a keyword set is spent, not that something broke. If yield plateaus
+  well short of 100, launch with what listed — the number is a target, not a gate.
+- **Approvals:** `workflow.sourcing.mode = manual` (default) = one Telegram Approve per listing
+  with the L1 decision numbers — the gate Robert asked L1 for. For raw speed he MAY flip the
+  setting to `auto` on `/admin/settings` for the blitz (numbers become FYI on the proposal page)
+  and back to `manual` after — his call, made knowingly.
+- **[C] follow-through**: collections fill by tag automatically; Claude spot-probes listings
+  read-only (variant images, metafields, gallery) as batches land.
 
 ## L3 — Catalog reset [R decision CONFIRMED 2026-09-03 + R execution, runbook ready]
 
 **Robert's ruling (2026-09-03 chat): deprecate ALL pre-gate products, no repricing** — the
-audit's reprice option is dead. Timing unchanged: run this AFTER enough L2 replacements have
-landed (suggested ≥ 30–40 live; keep the store non-empty). Deprecation ≠ deletion: the existing
+audit's reprice option is dead. Timing under the blitz schedule: run this TONIGHT or Friday
+morning, as soon as the blitz has landed ≥ 30–40 live replacements (keep the store non-empty).
+Deprecation ≠ deletion: the existing
 worker takes each product DRAFT → unpublished → local `deprecated` → safe CJ unsubscribe;
 reversible, order history intact. Reference list: `docs/market-price-audit-2026-09-03.md`.
 
@@ -84,20 +93,36 @@ reversible, order history intact. Reference list: `docs/market-price-audit-2026-
    gates any deprecation auto-flip behind the C19 digest FYI build (L4 item 5), which Claude
    will build on request.
 
-## L4 — Launch gates (all pre-existing OWNER-CHECKLIST items, consolidated) [R unless noted]
+## L4 — Launch gates, WEEKEND SCHEDULE (launch target 2026-09-05/06) [R unless noted]
 
-1. **CJ wallet top-up ~$150** — wallet is at $0 and alerting critical; blocks any real order.
-2. **Policies → Shopify Settings** — paste `POLICY_COPY` (legally load-bearing, see checklist).
-3. **Business checks** — Shopify Payments, US tax registrations, LLC insurance (recommended).
-4. **Canary self-purchase** (C18) — one real order end-to-end: pay CJ, tracking, and close
-   Tier-2 #4 (`openCjDispute` on the real supplier order). Watch `fulfillment.margin` alerts.
-5. **[C] auto-mode deprecation digest FYI** before flipping deprecation to auto (C19) — only if
-   auto is wanted; manual mode needs nothing.
-6. **DMARC**: parse aggregate reports, then `p=quarantine` flip (B12).
-7. **Mobile + Lighthouse pass** — [R] eyes on the Fold + [C] fix list (backlog #13).
-8. **Remove the storefront password wall** (deliberate until now) — the actual launch switch.
-9. Backlog P1 items that can ride post-launch if time-boxed: related products (#8), home-page
-   category tiles (#9), kill skeleton blog, About page. Judge.me (#15) once real orders exist.
+**Thursday 09-03 (blitz day), alongside the runs:**
+1. **CJ wallet top-up ~$150** — wallet is at $0 and alerting critical; blocks the canary AND any
+   real order. Do it today so the canary can go in Friday.
+2. **Policies → Shopify Settings** — paste `POLICY_COPY` (legally load-bearing; a no-refund
+   policy is only enforceable when conspicuously posted — this is NOT optional before the wall
+   drops).
+3. **Business checks** — Shopify Payments live, US tax registrations in Shopify Tax, LLC
+   insurance (recommended). Payments especially: no launch without a working checkout.
+4. **About page** (checklist item — footer already links it).
+
+**Friday 09-04:**
+5. **L3 catalog reset** (runbook above) if not done Thursday night.
+6. **Canary self-purchase** (C18) — place the real order end-to-end: pay CJ, watch
+   `fulfillment.margin` alerts. HONEST CAVEAT: delivery takes 3–7 days, so a weekend launch means
+   launching while the canary is still in transit — order placement/payment/tracking-start are
+   verified before the wall drops; delivery + the `openCjDispute` close (Tier-2 #4) complete
+   NEXT week. Acceptable risk, decided knowingly, or slip launch a few days — Robert's call.
+7. **[R] Fold eyeball + [C] Lighthouse fix list** (backlog #13) — Robert walks the store on the
+   Fold with the full catalog, tells Claude what looks off; Claude ships the fix list same day.
+8. **Store-transfer re-verifications** (checklist item): confirm app installs/API credentials,
+   custom domain, and Shopify Payments all live on the MERCHANT account before the wall drops.
+
+**Weekend 09-05/06 — launch:**
+9. **Remove the storefront password wall** — the actual launch switch.
+10. **DMARC** (B12) and Judge.me (#15) ride post-launch; the auto-mode deprecation digest (C19)
+    only if deprecation auto is ever wanted. Storefront P1 (#8/#9/#10/#11C) shipped 2026-09-03.
+
+**Next week:** enhancements + marketing campaign prep (Robert's directive 2026-09-03).
 
 ## Standing facts for the next session
 
