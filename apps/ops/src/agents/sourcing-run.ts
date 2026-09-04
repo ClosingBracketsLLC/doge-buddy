@@ -97,6 +97,11 @@ function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
         'to clear the freight-inclusive margin floor FIRST — price up to the ceiling when freight demands it.',
         'Anchor toward the market median only when the floor is already comfortably cleared. Never exceed',
         "the ceiling; don't leave money on the table.",
+        `Plain code ALSO enforces the same ${ratio}× ceiling against Amazon's median price for your exact`,
+        'query — a wide-spread category (strollers, beds) can have a high Google median while shoppers',
+        'actually compare against a much cheaper Amazon price, and such a winner is dropped. If a candidate',
+        'cannot clear the margin floor at a price competitive with what it sells for on Amazon, it is not',
+        'sellable: SKIP it and spend your effort on a different candidate.',
       ]
     : [
         '## Market price',

@@ -169,6 +169,7 @@ async function processWinner(
   // agent's marketLookupId is a key, and a key for the wrong product is as dead as no key.
   let marketClause = ''
   let marketLookup: MarketLookup | null = null
+  let amazon: AmazonDemandSnapshot | null = null
   if (deps.marketLookups !== null) {
     const lookup = winner.marketLookupId ? deps.marketLookups.get(winner.marketLookupId) : undefined
     if (!lookup || lookup.supplierProductId !== pid || lookup.medianCents == null) {
@@ -195,6 +196,34 @@ async function processWinner(
     }
     marketClause = `, market $${(lookup.medianCents / 100).toFixed(2)} median ×${(typicalCents / lookup.medianCents).toFixed(2)}`
     marketLookup = lookup
+
+    // Step 6b: the AMAZON ceiling (owner ruling 2026-09-03, the $140-stroller-vs-$47-Amazon
+    // catch). Google Shopping's MEDIAN is inflated by premium brands in wide-spread categories,
+    // so the same maxPriceToMarketBps ratio is ALSO enforced against Amazon's median price for
+    // the identical shopper query — the number buyers actually comparison-shop against. The
+    // probe was display-only before (L1 Decision 5); it now bites. Probe failure/inconclusive
+    // degrades to display-null and no Amazon gate — same absence semantics as SerpApi-less runs.
+    if (deps.demandProbe) {
+      try {
+        amazon = await deps.demandProbe.probe(lookup.query)
+      } catch (err) {
+        await deps.alert('info', 'demand_probe_failed', { runId: input.runId, supplierProductId: pid, error: errMessage(err) }).catch(() => {})
+      }
+      if (amazon?.medianPriceCents != null) {
+        const amazonCeilingCents = Math.floor((amazon.medianPriceCents * input.maxPriceToMarketBps) / 10_000)
+        if (typicalCents > amazonCeilingCents) {
+          return drop('sourcing_winner_price_above_market', {
+            source: 'amazon',
+            typicalCents,
+            amazonMedianCents: amazon.medianPriceCents,
+            ceilingCents: amazonCeilingCents,
+            maxPriceToMarketBps: input.maxPriceToMarketBps,
+            query: lookup.query,
+            resultsSampled: amazon.resultsSampled,
+          })
+        }
+      }
+    }
   }
 
   // Step 7: ground-truth re-verification against CJ (spends from the run's shared allowance).
@@ -287,17 +316,9 @@ async function processWinner(
     if (marginBps < minMarginBps) minMarginBps = marginBps
   }
 
-  // Step 8b: decision context (spec 2026-09-03 Decisions 5, 8, 11). Everything here is
-  // display-support for the owner: a probe failure must NEVER drop a winner that already
-  // passed every gate.
-  let amazon: AmazonDemandSnapshot | null = null
-  if (deps.demandProbe && marketLookup) {
-    try {
-      amazon = await deps.demandProbe.probe(marketLookup.query)
-    } catch (err) {
-      await deps.alert('info', 'demand_probe_failed', { runId: input.runId, supplierProductId: pid, error: errMessage(err) }).catch(() => {})
-    }
-  }
+  // Step 8b: decision context (spec 2026-09-03 Decisions 5, 8, 11). The Amazon snapshot was
+  // fetched at step 6b (where it now also GATES price — owner ruling 2026-09-03); here it is
+  // reused for display, never re-probed.
   const candidate = input.candidatesByPid.get(pid)
   const decisionContext = buildListingDecisionContext({
     payload,

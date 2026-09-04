@@ -1047,3 +1047,89 @@ describe('step 8b decision context', () => {
     expect(submitInput.summary).not.toContain('amzn')
   })
 })
+
+describe('step 6b — Amazon price ceiling (owner ruling 2026-09-03)', () => {
+  // Google offers whose median (5000c) lets the 5000c winner pass the Shopping gate at 1.3x —
+  // the wide-spread-category shape (strollers) where only the Amazon ceiling can catch it.
+  const googleOffers = () => marketOffers(4000, 4500, 5000, 5500, 6000)
+  const snapshot = (medianPriceCents: number | null): AmazonDemandSnapshot => ({
+    query: 'q',
+    resultsSampled: 10,
+    medianPriceCents,
+    medianReviews: 900,
+    totalReviews: 9000,
+  })
+
+  it('drops a winner priced above the Amazon ceiling even when the Google gate passes', async () => {
+    const registry = new MarketLookups()
+    const lookup = registry.record({ supplierProductId: 'cjp-1', query: 'dog stroller', offers: googleOffers() })
+    const probe = vi.fn(async () => snapshot(2500)) // ceiling floor(2500*1.3) = 3250 < typical 5000
+    const alert = vi.fn(async () => {})
+    const submit = vi.fn(async () => ({ id: 'p1', status: 'pending' as const }))
+    const deps = makeDeps({ submit, alert, marketLookups: registry, demandProbe: { key: 'serpapi_amazon', probe } })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_price_above_market' }])
+    expect(alert).toHaveBeenCalledWith(
+      'warning',
+      'sourcing_winner_price_above_market',
+      expect.objectContaining({
+        detail: expect.objectContaining({ source: 'amazon', typicalCents: 5000, amazonMedianCents: 2500, ceilingCents: 3250 }),
+      }),
+    )
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('passes at or under the Amazon ceiling, probing exactly once (step 8b reuses the snapshot)', async () => {
+    const registry = new MarketLookups()
+    const lookup = registry.record({ supplierProductId: 'cjp-1', query: 'dog stroller', offers: googleOffers() })
+    const probe = vi.fn(async () => snapshot(4000)) // ceiling 5200 >= typical 5000
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({ id: 'p1', status: 'pending' as const }))
+    const deps = makeDeps({ submit, marketLookups: registry, demandProbe: { key: 'serpapi_amazon', probe } })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    expect(probe).toHaveBeenCalledTimes(1)
+    const [, submitInput] = submit.mock.calls[0]!
+    const decisionContext = ListingDecisionContextSchema.parse(submitInput.decisionContext)
+    expect(decisionContext.demand.amazon!.medianPriceCents).toBe(4000)
+  })
+
+  it('an inconclusive Amazon price (null median) never gates — winner submits with the snapshot on display', async () => {
+    const registry = new MarketLookups()
+    const lookup = registry.record({ supplierProductId: 'cjp-1', query: 'dog stroller', offers: googleOffers() })
+    const probe = vi.fn(async () => snapshot(null))
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({ id: 'p1', status: 'pending' as const }))
+    const deps = makeDeps({ submit, marketLookups: registry, demandProbe: { key: 'serpapi_amazon', probe } })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    const [, submitInput] = submit.mock.calls[0]!
+    const decisionContext = ListingDecisionContextSchema.parse(submitInput.decisionContext)
+    expect(decisionContext.demand.amazon!.medianPriceCents).toBeNull()
+  })
+})
