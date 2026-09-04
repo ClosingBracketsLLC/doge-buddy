@@ -16,6 +16,7 @@
     "backfill-listings": "tsx scripts/backfill-listings.ts",
     "seed-proposal": "tsx scripts/seed-proposal.ts",
     "deprecate-product": "tsx scripts/deprecate-product.ts",
+    "reprice": "tsx scripts/reprice.ts",
     "run-sourcing": "tsx scripts/run-sourcing.ts",
     "inspect-mailbox": "tsx scripts/inspect-mailbox.ts",
     "seed-refund-proposal": "tsx scripts/seed-refund-proposal.ts",

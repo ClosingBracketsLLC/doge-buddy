@@ -1126,3 +1126,41 @@ export async function metafieldsSet(
   const data = await client.graphql<MetafieldsSetData>(METAFIELDS_SET_MUTATION, { metafields })
   assertNoUserErrors(data, 'metafieldsSet')
 }
+
+// ---------------------------------------------------------------------------
+// productVariantsBulkUpdatePrice
+// ---------------------------------------------------------------------------
+
+// Mutation shape from the 2026-07 Admin schema (`productVariantsBulkUpdate(productId,
+// variants: [ProductVariantsBulkInput!]!)`); house rule applies — introspection is not
+// live-verification for a mutation, so the FIRST live `reprice` run is the verifying call
+// (userErrors surface loudly through assertNoUserErrors, nothing is retried blindly).
+const PRODUCT_VARIANTS_BULK_UPDATE_MUTATION = `#graphql
+  mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id }
+      userErrors { field message }
+    }
+  }
+`
+
+interface ProductVariantsBulkUpdateData {
+  productVariantsBulkUpdate: {
+    productVariants: { id: string }[]
+    userErrors: ShopifyUserErrorEntry[]
+  }
+}
+
+/** Updates one variant's price (and optionally compareAtPrice; null CLEARS it). Amounts are
+ *  decimal strings ("16.99") per the Admin API's Money conventions. */
+export async function productVariantsBulkUpdatePrice(
+  client: ShopifyAdminClient,
+  productGid: string,
+  variant: { id: string; price: string; compareAtPrice?: string | null },
+): Promise<void> {
+  const data = await client.graphql<ProductVariantsBulkUpdateData>(PRODUCT_VARIANTS_BULK_UPDATE_MUTATION, {
+    productId: productGid,
+    variants: [variant],
+  })
+  assertNoUserErrors(data, 'productVariantsBulkUpdate')
+}
