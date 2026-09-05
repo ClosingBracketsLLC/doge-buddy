@@ -110,11 +110,75 @@ try {
       console.log(`  ${hit ? '✓' : '✗'} ${method}${hit ? ` → ${hit.name}` : ''}`)
     }
   }
-  console.log(
-    `\nprobe-zendrop: done. Paste this whole output to Claude — the ✗ rows in "must have" groups\n` +
-      `decide whether an adapter is viable, or whether Zendrop stays a catalog-only lane.`,
-  )
   void names
+
+  // --deep: CALL a handful of strictly READ-ONLY tools to answer the three questions the tool
+  // list alone can't (2026-09-03 analysis): (1) does catalog search filter/report US warehouses,
+  // (2) does catalog detail carry per-variant stock BEFORE a product is linked — our Stage 6 gate
+  // needs verified US stock before listing — and (3) what shape does the shipping estimate take
+  // (price only, or price + day range, which our delivery-window gate needs). Also lists connected
+  // stores, because Zendrop pulling orders from a store we ALSO fulfil via CJ is the one integration
+  // risk that could double-ship a real customer order.
+  if (!process.argv.includes('--deep')) {
+    console.log(
+      `\nprobe-zendrop: done. Re-run with --deep to call the read-only catalog/store tools and\n` +
+        `capture their response shapes (nothing is imported, ordered, or charged).`,
+    )
+  } else {
+    const preview = (label: string, value: unknown): void => {
+      const text = JSON.stringify(value, null, 1) ?? 'undefined'
+      console.log(`\n--- ${label} ---\n${text.slice(0, 2600)}${text.length > 2600 ? '\n…(truncated)' : ''}`)
+    }
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const body = (await rpc('tools/call', { name, arguments: args })) as {
+        result?: { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown; isError?: boolean }
+        error?: unknown
+      }
+      if (body.error) return { ERROR: body.error }
+      if (body.result?.structuredContent) return body.result.structuredContent
+      const text = body.result?.content?.find((c) => c.type === 'text')?.text
+      if (!text) return body.result
+      try {
+        return JSON.parse(text) as unknown
+      } catch {
+        return text
+      }
+    }
+
+    console.log('\n\n================ DEEP PROBE (read-only) ================')
+
+    const stores = await call('get_stores', {})
+    preview('get_stores — which stores Zendrop can pull orders from (double-fulfilment risk check)', stores)
+
+    const search = await call('get_catalog_products', { keyword: 'dog harness', limit: 3 })
+    preview('get_catalog_products keyword="dog harness" — does a result carry warehouse / ship-from / stock?', search)
+
+    // Pull an id out of whatever shape the search returned, without assuming the field name.
+    const idMatch = JSON.stringify(search).match(/"(?:id|product_id|productId)"\s*:\s*"?([\w-]{4,})"?/)
+    const productId = idMatch?.[1]
+    if (productId) {
+      const detail = await call('get_catalog_product', { product_id: productId, id: productId })
+      preview(`get_catalog_product id=${productId} — per-variant stock + warehouse country BEFORE linking?`, detail)
+
+      const ship = await call('get_catalog_shipping_estimate', {
+        product_id: productId,
+        id: productId,
+        country: 'US',
+        destination_country: 'US',
+      })
+      preview('get_catalog_shipping_estimate → US — price only, or price + delivery days?', ship)
+    } else {
+      console.log('\n(no product id found in the search response — paste the search output and I will adapt)')
+    }
+
+    const trending = await call('get_catalog_trending_products', { limit: 3 })
+    preview('get_catalog_trending_products — supplier-native demand signal for the keyword system', trending)
+
+    console.log(
+      `\nprobe-zendrop: deep probe done. Paste everything above — these shapes decide the adapter\n` +
+        `spec (and become its test fixtures, per the house "fixtures are authoritative" rule).`,
+    )
+  }
 } catch (err) {
   console.error('probe-zendrop: FAILED —', err instanceof Error ? err.message.slice(0, 400) : String(err))
   process.exit(1)
