@@ -590,3 +590,64 @@ All four are estimation-based dashboards, not ground-truth data. None has been c
 
 ## Biggest overall finding
 Every TikTok Shop "analytics" platform (Kalodata, FastMoss, EchoTik, Shoplus) is built on **estimated, non-official data** — none has real TikTok Shop transaction access, and their own users/Reddit describe the numbers as sometimes "completely inaccurate." Meanwhile, official TikTok trend APIs are commercially closed. So there is no clean, accurate, agent-integrable TikTok trend API at any price in 2026 — the realistic move is triangulation (cheap/free TikTok dashboard spot-checks + Amazon BSR signal we already have access to via SerpApi + Pinterest's free trend scraper) rather than buying a single "TikTok trends" subscription and trusting its numbers.
+
+---
+
+## UPDATE 2026-09-03 — Zendrop PROBED WITH A REAL TOKEN. Verdict: do NOT build the adapter.
+
+Robert bought Zendrop **Plus** ($79/mo) on 2026-09-03 and generated an access token; the
+`probe-zendrop` script (`apps/ops/scripts/probe-zendrop.ts`, `--deep` for read-only tool calls)
+captured the real MCP surface and catalog shapes. The 2026-09-02 recommendation above
+("#1 — Zendrop") is **SUPERSEDED by this section**: the API is real and better than expected, but
+the CATALOG behind it does not fit this store.
+
+### What the API actually exposes (38 tools, verified)
+
+Good: `get_catalog_products` (with a real `ships_from` ISO-country filter), `get_catalog_product`,
+`get_catalog_shipping_estimate`, `get_order` + `get_tracking_events`, `get_billing_credit_balance`,
+a **full dispute suite** (`create_order_issue` / `get_order_issues` / `reply_order_issue` /
+`process_order_issue` — stronger than CJ's), `get_order_fulfillment_cost` (two-step cost preview),
+and `link_my_product` — which would have let us keep our own listing pipeline (create the Shopify
+product our way, then LINK it for fulfilment) instead of Zendrop's import-list flow.
+Absent: reviews and webhooks (both degradable — we already poll for CJ).
+
+### Why it fails anyway — the catalog census (the decisive data)
+
+`get_catalog_products keyword="dog" ships_from=US`, 5 pages x 60 = **281 products**:
+
+| Supplier | Products | Note |
+|---|---|---|
+| **Amazon Products (id 417)** | **276 (98%)** | a reseller of Amazon goods |
+| NexoraUSA (id 416) | 5 | furniture-style dog cages, $86+ |
+
+A 19-product US sample across harness/bed/toy/leash/bowl:
+
+- **Landed cost is at or above Amazon retail.** Dog harnesses came back $12.86-$21.05 + $6.99
+  freight = **$19.85-$28.04 landed**, against the **$16.98 Amazon median** measured the same night
+  by our own gate. Buying from an Amazon reseller to undersell Amazon is arithmetically impossible.
+- **1 of 19 shipping options carried a delivery estimate** (`estimated_delivery: null` on the rest).
+  The storefront promises 3-7 day delivery on every product page and the freight gate filters
+  options by `maxDays` - neither can be honoured from this data.
+- **0 of 19 had numeric or tracked stock** (`available: null, tracked: false`). Stage 6 requires
+  verified US stock >= 1; the only signal available is an untracked `in_stock` boolean.
+- **0 of 19 had more than one catalog variant**, and catalog variants carry no SKU, options, or
+  per-variant price - so the v2 multi-variant listing pipeline has nothing to build from, and
+  margin cannot be computed per variant at sourcing time.
+- `get_stores` returned **zero connected stores**: the entire order path (`fulfill_order` operates
+  on orders Zendrop pulled from a connected store) requires connecting our Shopify store, which
+  would let Zendrop see and potentially fulfil **CJ-sourced orders too** - a double-shipping hazard
+  that would need `update_store_settings` fulfilment-mode discipline plus supplier-aware routing.
+
+### Ruling
+
+**Do not build a `ZendropSupplierAdapter`.** Cancel or downgrade the Plus subscription before it
+renews unless it is being kept for its *human* value: Zendrop's private-listing/sourcing-agent
+service (the Plus feature) is a manual workflow, not an API surface - nothing in the searchable
+catalog is exclusive. Re-open this only if Zendrop later exposes delivery estimates, numeric
+per-variant stock, and per-variant catalog pricing.
+
+**What this means for supplier breadth:** the constraint was never the number of vendors - it is
+that commodity dropship catalogs (CJ's *and* Zendrop's) resell the same goods Amazon sells cheaper.
+The escape is DIFFERENTIATED product, not another commodity API: Shopify Collective (branded US
+goods, gated at $50k trailing-12-month sales) remains the strongest lane, with a real private-label
+or US-distributor relationship as the alternative. Both are post-launch moves.
