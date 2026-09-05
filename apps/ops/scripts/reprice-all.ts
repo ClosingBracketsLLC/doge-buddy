@@ -1,4 +1,4 @@
-import { auditLog, createDb, products, productVariants, proposals, supplierVariantMappings } from '@doge-buddy/db'
+import { auditLog, createDb, deprecationQueue, products, productVariants, proposals, supplierVariantMappings } from '@doge-buddy/db'
 import { eq } from 'drizzle-orm'
 import { productVariantsBulkUpdatePrice, ShopifyAdminClient, ShopifyTokenManager } from '@doge-buddy/shopify-admin'
 import { CJSupplierAdapter, CjHttpClient, type SupplierAdapter } from '@doge-buddy/supplier'
@@ -190,6 +190,15 @@ try {
           `# ${title} [${v.sku}]: amazon ${usd(snap.medianPriceCents)} → cap ${usd(capCents)}; cost ${usd(v.supplierCostCents)} + freight ${usd(freightCents)} → ${marginBps}bps < ${marginFloorBps}bps floor\n` +
             `pnpm --filter @doge-buddy/ops deprecate-product --product ${productId} --reason not-competitive-vs-amazon`,
         )
+        if (apply) {
+          // Owner ask 2026-09-03: non-competitive products drip out via the nightly
+          // catalog.deprecation-drip cron rather than a big-bang purge. Idempotent — a product
+          // already queued (or once processed) is left alone.
+          await db
+            .insert(deprecationQueue)
+            .values({ productId, reason: 'not-competitive-vs-amazon' })
+            .onConflictDoNothing()
+        }
         break
       }
       plan.push({ sku: v.sku, from: v.priceCents, to, variantId: v.variantId, variantGid: v.variantGid, marginBps })

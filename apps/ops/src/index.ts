@@ -40,6 +40,7 @@ import {
   type InventorySyncDeps,
   type InventorySyncShopifyOps,
 } from './jobs/inventory-sync.ts'
+import { deprecationDripHandler } from './jobs/deprecation-drip.ts'
 import { proposalExpireSweepHandler } from './jobs/proposal-expire-sweep.ts'
 import { scoringNightlyHandler, SCORING_NIGHTLY_QUEUE, type ScoringNightlyDeps } from './jobs/scoring-nightly.ts'
 import { scoringWeeklyHandler, SCORING_WEEKLY_QUEUE, type ScoringWeeklyDeps } from './jobs/scoring-weekly-digest.ts'
@@ -390,6 +391,20 @@ await registerCron(queue.boss, 'proposal.expire-sweep', '30 6 * * *', proposalEx
 // `ANTHROPIC_API_KEY` to gate.
 const scoringNightlyDeps: ScoringNightlyDeps = { db, settings, alert }
 await registerCron(queue.boss, SCORING_NIGHTLY_QUEUE, '0 3 * * *', scoringNightlyHandler(scoringNightlyDeps))
+
+// `catalog.deprecation-drip` (owner ask 2026-09-03): drains the deprecation_queue at ≥ 1
+// product/night (scaled so a long queue empties within ~a week) via normal deprecate_product
+// proposals honoring `workflow.deprecation.mode`. Registered unconditionally — no LLM step.
+await registerCron(
+  queue.boss,
+  'catalog.deprecation-drip',
+  '15 4 * * *',
+  deprecationDripHandler({
+    db,
+    alert,
+    submitDeps: { db, settings, notify, enqueue, alert, adminBaseUrl: config.adminBaseUrl },
+  }),
+)
 app.log.info(`${SCORING_NIGHTLY_QUEUE} cron ARMED — 03:00 UTC daily`)
 
 // `scoring.weekly-digest` (Phase 7, Task 9): the Monday deprecation digest — pre-revenue gate,

@@ -254,6 +254,20 @@ export const productScores = pgTable('product_scores', {
   updatedAt: updatedAt(),
 }, (t) => [uniqueIndex('product_scores_product_date_uq').on(t.productId, t.scoreDate)])
 
+/** Nightly deprecation drip (owner ask 2026-09-03): products queued for retirement, drained by
+ *  the `catalog.deprecation-drip` cron at ≥ 1/night via the normal deprecate_product proposal
+ *  flow. One live (unprocessed) entry per product; `processedAt` set when a proposal was
+ *  submitted (or the product was found already deprecated/gone). */
+export const deprecationQueue = pgTable('deprecation_queue', {
+  id: id(),
+  productId: uuid('product_id').notNull().references(() => products.id),
+  reason: text('reason').notNull(),
+  enqueuedAt: timestamp('enqueued_at', { withTimezone: true }).notNull().defaultNow(),
+  processedAt: timestamp('processed_at', { withTimezone: true }),
+  proposalId: uuid('proposal_id'),
+  createdAt: createdAt(),
+}, (t) => [uniqueIndex('deprecation_queue_product_uq').on(t.productId)])
+
 export const sourcingSignals = pgTable('sourcing_signals', {
   id: id(),
   source: signalSource('source').notNull(),
