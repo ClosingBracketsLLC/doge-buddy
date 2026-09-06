@@ -61,6 +61,15 @@ describe('NewListingPayloadSchema', () => {
       }).success,
     ).toBe(true)
   })
+
+  it('accepts CN as a product origin (affordable-catalog pivot 2026-09-03)', () => {
+    expect(NewListingPayloadSchema.safeParse({ ...validListing, shipsFrom: 'CN' }).success).toBe(true)
+  })
+
+  it('still accepts US and still rejects anything else', () => {
+    expect(NewListingPayloadSchema.safeParse({ ...validListing, shipsFrom: 'US' }).success).toBe(true)
+    expect(NewListingPayloadSchema.safeParse({ ...validListing, shipsFrom: 'GB' }).success).toBe(false)
+  })
 })
 
 describe('SupportReplyPayloadSchema', () => {

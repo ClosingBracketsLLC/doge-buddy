@@ -19,6 +19,22 @@ describe('POLICY_COPY', () => {
     expect(text).not.toContain('prepaid return label')
   })
 
+  it('shipping policy no longer promises a blanket 3-7 day window', () => {
+    const shipping = POLICY_COPY.find((p) => p.handle === 'shipping')!
+    const text = shipping.sections.flatMap((s) => s.paragraphs).join(' ')
+    // The pivot (spec 2026-09-03 §2): a site-wide window is a claim we cannot keep once CN
+    // products list, and the FTC mail-order rule prices that mistake per late order.
+    expect(text).not.toMatch(/3[\u2013-]7/)
+    expect(text).toMatch(/delivery window/i)
+  })
+
+  it('returns policy carries the late-order cancel right (FTC mail-order rule)', () => {
+    const returns = POLICY_COPY.find((p) => p.handle === 'returns')!
+    const text = returns.sections.flatMap((s) => s.paragraphs).join(' ')
+    expect(text).toMatch(/cancel/i)
+    expect(text).toMatch(/refund/i)
+  })
+
   it('every policy has a non-empty title and at least one section with paragraphs', () => {
     for (const policy of POLICY_COPY) {
       expect(policy.title.length).toBeGreaterThan(0)

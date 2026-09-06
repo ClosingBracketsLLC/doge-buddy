@@ -24,9 +24,11 @@ export const POLICY_COPY: PolicyCopy[] = [
     sections: [
       {
         paragraphs: [
-          "All orders ship from US warehouses. Standard delivery arrives in 3–7 business days after your order is processed (processing up to 1 business day). Tracking is emailed as soon as your order ships, and also appears in your account's order history.",
-          'We currently ship within the United States only.',
-          "If your order hasn't arrived within the promised window, contact us with your order number and we'll reship it at no charge. If we can't reship it, we'll refund it.",
+          "Every product page shows that item's own delivery window before you buy — most orders arrive in 7 to 14 days, and some US-warehouse items arrive in 3 to 7. The window is on the product page, in your cart, and in your order confirmation.",
+          "Some of our gear ships from our overseas partner warehouse. That's the honest trade: it takes a little longer, and it's why the price is what it is. There are no customs charges or extra fees on delivery — the price you pay at checkout is the price.",
+          'Tracking is emailed as soon as your order ships and appears in your account. First tracking scans can take a few days to show up, which is normal.',
+          'We ship within the United States only.',
+          "If an order runs past its window we'll email you with an updated estimate and you can choose to keep waiting or cancel for a full refund. If it never arrives, we reship at no charge — and refund you if we can't.",
         ],
       },
     ],
@@ -40,6 +42,7 @@ export const POLICY_COPY: PolicyCopy[] = [
         paragraphs: [
           "We don't accept returns or give refunds for change of mind — a product that arrived as described but didn't suit you or your dog is yours to keep. All sales are final.",
           "If something isn't working out, write to us anyway: at our discretion we'll offer a discount code toward a future order.",
+          "One exception, and we'll tell you about it rather than wait to be asked: if your order hasn't shipped within the delivery window shown when you bought it, you can cancel it for a full refund. We'll email you first with the new estimate so you can decide.",
         ],
       },
       {
