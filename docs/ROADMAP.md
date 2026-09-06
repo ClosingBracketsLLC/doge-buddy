@@ -129,3 +129,12 @@ same wall.
 - **Deprecation is drip, not purge:** ≥1/night through `catalog.deprecation-drip`, always via a
   normal proposal honoring `workflow.deprecation.mode`.
 - **Never dropship ingestibles** without the Phase E compliance work.
+- **US and CN are the only viable warehouses, and that is settled.** All 18 CJ warehouse countries
+  probed 2026-09-03: only US (median $97.60), CN ($1.45), GB ($15.56) and AU ($21.56) stock dog
+  goods at all — the other 14 (DE, FR, ES, IT, CZ, PL, TH, ID, JP, CA, MX, BR, VN, IN) returned
+  zero. GB and AU quote **no shipping options to a US customer at all**; they serve their own
+  regions. There is no third origin to find.
+- **We ship to the US only** (owner ruling 2026-09-03). Selling INTO Canada/UK/EU is the real
+  version of "more countries" — it needs no new supplier and would make CJ's GB/AU warehouses
+  useful — but it carries EU VAT/IOSS + UK VAT registration, per-destination customs, currency and
+  multi-timezone support. **Parked until the US store is earning**; revisit alongside Phase D.
