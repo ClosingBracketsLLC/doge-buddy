@@ -3,6 +3,7 @@ import {Money, Pagination} from '@shopify/hydrogen';
 import {urlWithTrackingParams, type RegularSearchReturn} from '~/lib/search';
 import {EmptyState} from '~/components/brand/EmptyState';
 import {ProductCardImage} from '~/components/brand/ProductCardImage';
+import {DeliveryLine} from '~/components/brand/DeliveryLine';
 
 type SearchItems = RegularSearchReturn['result']['items'];
 type PartialSearchResult<ItemType extends keyof SearchItems> = Pick<
@@ -130,6 +131,7 @@ function SearchResultsProducts({
                 <p className="mt-1 font-bold text-ink">
                   {price && <Money data={price} />}
                 </p>
+                <DeliveryLine maxDays={product.deliveryMaxDays?.value} />
               </Link>
             );
           });

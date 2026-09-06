@@ -92,6 +92,9 @@ export default function SearchPage() {
  */
 const SEARCH_PRODUCT_FRAGMENT = `#graphql
   fragment SearchProduct on Product {
+    deliveryMaxDays: metafield(namespace: "dogebuddy", key: "delivery_max_days") {
+      value
+    }
     __typename
     handle
     id

@@ -100,6 +100,12 @@ const PRODUCT_ITEM_FRAGMENT = `#graphql
     currencyCode
   }
   fragment ProductItem on Product {
+    shipsFrom: metafield(namespace: "dogebuddy", key: "ships_from") {
+      value
+    }
+    deliveryMaxDays: metafield(namespace: "dogebuddy", key: "delivery_max_days") {
+      value
+    }
     id
     handle
     title

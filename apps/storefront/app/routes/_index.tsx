@@ -85,6 +85,12 @@ function NewArrivals({
 
 const NEW_ARRIVALS_QUERY = `#graphql
   fragment RecommendedProduct on Product {
+    shipsFrom: metafield(namespace: "dogebuddy", key: "ships_from") {
+      value
+    }
+    deliveryMaxDays: metafield(namespace: "dogebuddy", key: "delivery_max_days") {
+      value
+    }
     id
     title
     handle
