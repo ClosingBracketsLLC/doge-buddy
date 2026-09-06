@@ -43,7 +43,7 @@ function mcpServer() {
 }
 
 function candidates(): HarvestCandidate[] {
-  return [{ supplierProductId: 'cjp-1', title: 'Dog Toy', categoryName: 'Toys', sellPriceCents: 2999, listedNum: 120, imageUrl: 'https://x/y.png', keyword: 'dog toy' }]
+  return [{ supplierProductId: 'cjp-1', title: 'Dog Toy', categoryName: 'Toys', sellPriceCents: 2999, listedNum: 120, imageUrl: 'https://x/y.png', keyword: 'dog toy', shipsFrom: 'US' }]
 }
 function trendSignals(): TrendSignal[] {
   return [{ keyword: 'dog toy', score: 75, snapshot: {} }]

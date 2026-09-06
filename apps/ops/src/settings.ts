@@ -38,7 +38,7 @@ export const SETTINGS_DEFAULTS = {
   // of these on /admin/settings for a catalog-build week.
   'sourcing.max_winners': 3,
   'sourcing.candidate_target': 15,
-  'sourcing.max_pages': 10,
+  'sourcing.max_pages': 20,
   'sourcing.max_budget_cents': 200,
   // Price-to-market ceiling for sourcing winners (spec 2026-09-01 market-price Decision 6):
   // median variant price must be <= this many bps of the Google Shopping market median. 13000 =

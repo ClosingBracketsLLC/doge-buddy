@@ -1,4 +1,5 @@
 import { proposals, sourcingSignals, supplierVariantMappings, type createDb } from '@doge-buddy/db'
+import type { ProductOrigin } from '@doge-buddy/core'
 import type { SupplierAdapter, SupplierProductSummary } from '@doge-buddy/supplier'
 import { and, eq, inArray, or, sql } from 'drizzle-orm'
 import { matchExcludedCategory } from './guards.ts'
@@ -15,6 +16,9 @@ export interface HarvestCandidate {
   imageUrl: string | null
   /** The run's keyword whose pass first fetched this product. */
   keyword: string
+  /** The warehouse whose pass fetched this product. Every origin-sensitive gate downstream
+   *  (stock check, freight quote, delivery window) reads THIS, never a global assumption. */
+  shipsFrom: ProductOrigin
 }
 
 /**
@@ -25,13 +29,18 @@ export interface HarvestCandidate {
  */
 export const HARVEST_KEYWORDS = ['dog toy', 'dog leash', 'dog bed', 'dog grooming', 'dog'] as const
 
-/** Hard ceiling on total CJ searchProducts pages fetched (all keyword passes combined) in one run. */
-export const HARVEST_MAX_PAGES_TOTAL = 10
+/** Hard ceiling on total CJ searchProducts pages fetched (all passes combined) in one run.
+ *  Raised 10 -> 20 with the affordable-catalog pivot (2026-09-03): passes are now keywords x
+ *  ORIGINS, so the old budget gave each keyword half its former coverage and silently starved the
+ *  trailing (trend-expanded) keywords of any pass at all. 20 restores per-keyword parity. */
+export const HARVEST_MAX_PAGES_TOTAL = 20
 /** How many ranked candidates a full harvest run aims to hand off to the next stage. */
 export const CANDIDATE_TARGET = 15
 /** Below this many survivors, the ORCHESTRATOR (Task 14) short-circuits the rest of the pipeline
  * — runHarvest itself has no opinion about it and just returns whatever it found. */
 export const MIN_CANDIDATES = 3
+/** Warehouses searched when the caller names none — see `HarvestDeps.origins`. */
+export const HARVEST_ORIGINS = ['US', 'CN'] as const satisfies readonly ProductOrigin[]
 
 export interface HarvestDeps {
   db: Db
@@ -46,6 +55,12 @@ export interface HarvestDeps {
   candidateTarget?: number
   /** Hard ceiling on total pages fetched across all passes. Defaults to `HARVEST_MAX_PAGES_TOTAL`. */
   maxPages?: number
+  /** Warehouses to search, round-robin alongside keywords. Default BOTH (spec 2026-09-03): CN
+   *  goods are 6-40x cheaper and are what make impulse pricing possible; US goods keep the fast
+   *  windows. Each candidate remembers which warehouse produced it — every later gate uses that
+   *  origin, never a global assumption. NOTE `maxPages` is a total across ALL passes, so two
+   *  origins halve the pages per keyword unless the caller raises it (`--pages`). */
+  origins?: readonly ProductOrigin[]
 }
 
 const PAGE_SIZE = 50
@@ -58,6 +73,7 @@ const STALE_PROPOSAL_STATUSES = ['rejected', 'expired'] as const
 
 interface PassState {
   keyword: string
+  origin: ProductOrigin
   page: number
   ended: boolean
 }
@@ -74,12 +90,17 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
   const keywords = deps.keywords ?? HARVEST_KEYWORDS
   const candidateTarget = deps.candidateTarget ?? CANDIDATE_TARGET
   const maxPages = deps.maxPages ?? HARVEST_MAX_PAGES_TOTAL
+  const origins = deps.origins ?? HARVEST_ORIGINS
 
-  const order: PassState[] = keywords.map((keyword) => ({ keyword, page: 1, ended: false }))
+  // One pass per keyword x origin, round-robin: a slow warehouse or an exhausted keyword can
+  // never starve the others of the shared page budget.
+  const order: PassState[] = keywords.flatMap((keyword) =>
+    origins.map((origin) => ({ keyword, origin, page: 1, ended: false })),
+  )
 
   let pagesFetched = 0
   let turn = 0
-  const fetchedByPid = new Map<string, { summary: SupplierProductSummary; keyword: string }>()
+  const fetchedByPid = new Map<string, { summary: SupplierProductSummary; keyword: string; origin: ProductOrigin }>()
 
   while (pagesFetched < maxPages && order.some((p) => !p.ended)) {
     const pass = order[turn % order.length]!
@@ -88,13 +109,13 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
 
     let pageSummaries: SupplierProductSummary[]
     try {
-      // countryCode US: the store ships from US only, and Stage 4 drops any winner without a US
-      // stock row — first live Tier-2 run (2026-08-24) proved an unfiltered harvest pool is 100%
-      // CN-warehoused, so without this filter every winner is doomed before the agent ever runs.
-      pageSummaries = await deps.adapter.searchProducts({ keyword: pass.keyword, countryCode: 'US', page: pass.page, pageSize: PAGE_SIZE })
+      // countryCode is the pass's OWN warehouse. An unfiltered search returns a pool CJ hasn't
+      // scoped to any warehouse (live 2026-08-24: 100% CN-stocked, every winner doomed at the
+      // stock gate) — so each pass names its origin and the candidate carries it forward.
+      pageSummaries = await deps.adapter.searchProducts({ keyword: pass.keyword, countryCode: pass.origin, page: pass.page, pageSize: PAGE_SIZE })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      await deps.alert('warning', 'sourcing_harvest_page_failed', { pass: pass.keyword, page: pass.page, error: message })
+      await deps.alert('warning', 'sourcing_harvest_page_failed', { pass: pass.keyword, origin: pass.origin, page: pass.page, error: message })
       pass.ended = true
       continue
     }
@@ -108,7 +129,7 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
 
     for (const s of pageSummaries) {
       if (!fetchedByPid.has(s.supplierProductId)) {
-        fetchedByPid.set(s.supplierProductId, { summary: s, keyword: pass.keyword })
+        fetchedByPid.set(s.supplierProductId, { summary: s, keyword: pass.keyword, origin: pass.origin })
       }
     }
     pass.page += 1
@@ -160,7 +181,7 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
 
   // Step 3c + candidate shaping.
   const survivors: HarvestCandidate[] = []
-  for (const { summary: s, keyword } of fetched) {
+  for (const { summary: s, keyword, origin } of fetched) {
     if (mappedPids.has(s.supplierProductId)) continue
     if (excludedProposalPids.has(s.supplierProductId)) continue
     if (matchExcludedCategory(s.title, s.categoryName ?? null)) continue
@@ -173,6 +194,7 @@ export async function runHarvest(deps: HarvestDeps): Promise<{ candidates: Harve
       listedNum: s.listedCount ?? null,
       imageUrl: s.imageUrl ?? null,
       keyword,
+      shipsFrom: origin,
     })
   }
 

@@ -125,14 +125,38 @@ describe('runHarvest', () => {
     expect([...queried].sort()).toEqual([...HARVEST_KEYWORDS].sort())
   })
 
-  it('every searchProducts call requests US-warehouse products (countryCode US)', async () => {
+  it('searches both origins and tags each candidate with the warehouse that produced it', async () => {
+    const p = `h${uid()}`
+    seededPids = [`${p}-us`, `${p}-cn`]
+
+    // Affordable-catalog pivot 2026-09-03: the harvest is no longer US-only. Each pass names its
+    // warehouse, and the candidate remembers which one produced it — every later gate reads that
+    // origin instead of assuming US.
+    const calls: SearchCall[] = []
+    const searchProducts = vi.fn(async (q: SearchCall): Promise<SupplierProductSummary[]> => {
+      calls.push(q)
+      if ((q.page ?? 1) > 1) return []
+      return q.countryCode === 'CN'
+        ? [summary(`${p}-cn`, { title: 'Squeaky Bone Toy' })]
+        : [summary(`${p}-us`, { title: 'Rope Tug Toy' })]
+    })
+    const alert = vi.fn(async () => {})
+
+    const { candidates } = await runHarvest({ db, adapter: { searchProducts }, alert, keywords: ['dog toy'] })
+
+    expect(new Set(calls.map((q) => q.countryCode))).toEqual(new Set(['US', 'CN']))
+    expect(candidates.find((c) => c.supplierProductId === `${p}-cn`)!.shipsFrom).toBe('CN')
+    expect(candidates.find((c) => c.supplierProductId === `${p}-us`)!.shipsFrom).toBe('US')
+  })
+
+  it('honours an explicit origins list (US-only runs stay possible)', async () => {
     const p = `h${uid()}`
     seededPids = [`${p}-a`]
 
     const adapter = makeAdapter({ 'dog toy': [[summary(`${p}-a`, { title: 'Squeaky Bone Toy' })], []] })
     const alert = vi.fn(async () => {})
 
-    await runHarvest({ db, adapter, alert })
+    await runHarvest({ db, adapter, alert, origins: ['US'] })
 
     const calls = adapter.searchProducts.mock.calls.map(([q]) => q)
     expect(calls.length).toBeGreaterThan(0)
@@ -160,7 +184,7 @@ describe('runHarvest', () => {
     expect(byPid.get(bedPid)?.keyword).toBe('dog bed')
   })
 
-  it('dedupe matrix: mapped, pending, 30d-rejected drop; 100d-rejected and clean survive; calming/flea guards drop', async () => {
+  it('dedupe matrix: mapped, pending, 30d-rejected drop; 100d-rejected, clean and calming survive; flea guard drops', async () => {
     const p = `h${uid()}`
     const mappedPid = `${p}-mapped`
     const pendingPid = `${p}-pending`
@@ -199,9 +223,11 @@ describe('runHarvest', () => {
     expect(candidatePids).not.toContain(mappedPid)
     expect(candidatePids).not.toContain(pendingPid)
     expect(candidatePids).not.toContain(rejected30Pid)
-    expect(candidatePids).not.toContain(calmingPid)
+    // 'calming' left EXCLUDED_CATEGORY_TERMS on the 2026-09-03 owner ruling — a calming-style bed
+    // is merchandising, not a consumable. 'anxiety' positioning and real consumables still drop.
+    expect(candidatePids).toContain(calmingPid)
     expect(candidatePids).not.toContain(fleaPid)
-    expect(candidatePids).toHaveLength(2)
+    expect(candidatePids).toHaveLength(3)
   })
 
   it('writes one sourcing_signals row per unique pid, source cj_trending, keyword = first pass that fetched it', async () => {
@@ -246,10 +272,13 @@ describe('runHarvest', () => {
     })
     const alert = vi.fn(async () => {})
 
-    const result = await runHarvest({ db, adapter, alert })
+    // Single-origin: this test is about ONE pass ending while its siblings keep fetching, and the
+    // two-origin default would spend the shared page budget on duplicate passes of the same stub.
+    const result = await runHarvest({ db, adapter, alert, origins: ['US'] })
 
     expect(alert).toHaveBeenCalledWith('warning', 'sourcing_harvest_page_failed', {
       pass: 'dog toy',
+      origin: 'US',
       page: 2,
       error: expect.stringContaining('CJ 429'),
     })

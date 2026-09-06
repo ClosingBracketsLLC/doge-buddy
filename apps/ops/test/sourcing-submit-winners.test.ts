@@ -31,6 +31,7 @@ function candidate(pid: string, overrides: Partial<HarvestCandidate> = {}): Harv
     listedNum: 100,
     imageUrl: null,
     keyword: 'dog bed',
+    shipsFrom: 'US',
     ...overrides,
   }
 }
