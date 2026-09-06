@@ -131,20 +131,54 @@ sender: a `customer.lifecycle` cron reading order + tracking state, sending thro
 Gmail integration (the same machinery the support agent already uses), with each send recorded so
 nothing double-fires. Unique discount codes come from Shopify's `discountCodeBasicCreate`.
 
-## 6. BLOCKING verification before a single CN product lists
+## 6. Customs and duty — researched 2026-09-03, and it REINFORCES the cheap-goods strategy
 
-**Do CJ's CN→US freight quotes include US import duties (DDP), or will the customer be billed on
-delivery (DDU)?** The US removed the de-minimis exemption in 2025 (noted in the supplier research
-memo), so low-value China→US parcels are no longer automatically duty-free. If a customer who paid
-$16.99 receives a customs bill, that is a chargeback, a support crisis, and a review disaster —
-and it would be entirely our fault for not checking.
+**Current rules (verified by web research this session, not from training data):** the US ended
+de-minimis for China/Hong Kong on 2 May 2025 and for all other origins on 29 Aug 2025. The
+flat-fee-per-parcel option ($100, later $200) expired **28 Feb 2026 — only ad-valorem duty is
+permitted now**, with low-value parcels moving by commercial carrier attracting roughly **30%**.
+A new CBP postal informal-entry process (customs bond + electronic data set) began 24 Jul 2026,
+with full compliance required by 22 Oct 2026.
 
-CJ's CJPacket lines are generally sold as delivered-duty-paid, but **"generally" is not a basis for
-launching a catalog.** The check: place the canary order through a CN-warehouse product and confirm
-(a) CJ's charge matches the quote, (b) nothing is collected on delivery, and (c) CJ's own
-documentation states DDP for the chosen line. Until that is confirmed live, no CN product goes on
-sale. If it turns out to be DDU, the pivot still works but the duty must be priced into landed cost
-and disclosed — a different design.
+**Why Robert has never personally been billed:** sellers ship **DDP** — the duty is prepaid by the
+seller/platform and baked into the price or freight. The buyer sees nothing. (This is also why
+Temu/Shein raised prices through 2025 rather than surprising customers at the door.)
+
+**The duty math, on our actual numbers:**
+
+| | CN toy | A $50 CN product |
+|---|---|---|
+| Goods | $1.95 | $50.00 |
+| Duty @ ~30% | **$0.59** | **$15.00** |
+| Freight | $4.94 | ~$7.00 |
+| **Landed** | **$7.48** | **$72.00** |
+| Sells at | $14.99 → **50% margin** ✅ | would need $120 ❌ |
+
+**Duty is proportional, so it barely touches cheap goods and destroys expensive ones — it makes
+Robert's sub-$100 (really sub-$30) instinct *more* correct, not less.** Thirty percent of $2 is
+sixty cents; the de-minimis change devastates $50–500 parcels, not $2 ones. Room to make money
+paying the duty in full: comfortable, provided we price the duty into landed cost rather than
+discovering it later.
+
+### Still BLOCKING before a CN product lists — three questions, in writing from CJ
+
+1. **Is the chosen line (CJPacket etc.) genuinely DDP** — i.e. is the customer guaranteed to be
+   billed nothing on delivery? A $16.99 buyer receiving a customs bill is a chargeback, a bad
+   review, and our fault for not asking.
+2. **Does the quoted freight already include the duty**, or is duty charged separately to our CJ
+   wallet after the fact? This decides whether `quoteShipping`'s number is the true landed freight
+   or an understatement — and our entire margin gate reads that number.
+3. **Who is the declared Importer of Record on the CBP entry?** This is the one that can bite
+   hardest: industry reporting notes that some DDP suppliers name themselves IOR using bond/EIN
+   arrangements they don't actually hold, and **when CBP finds a misdeclaration the US-based seller
+   typically inherits the liability**. Get CJ's answer in writing and keep it.
+
+**How to verify:** CJ support ticket for all three in writing, then the canary order placed through
+a **CN-warehouse** product to confirm empirically that (a) CJ's charge matches the quote, (b)
+nothing is collected on delivery, (c) the parcel arrives inside the quoted window. Until 1 and 2
+are answered, no CN product is purchasable. If duty turns out to be charged separately, the fix is
+small — add a duty estimate to landed cost in the margin gate — but it must be known first, not
+discovered from a wallet balance.
 
 ## 7. Other risks, accepted with mitigations
 
