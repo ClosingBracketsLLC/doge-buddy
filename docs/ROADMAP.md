@@ -15,7 +15,14 @@ document that owns it. When they disagree, the detail doc wins and this one gets
 
 ---
 
-## Phase A — Launch (now → this weekend)
+## Phase A — Launch (gated on the CJ wallet, not on a date)
+
+> **Revised 2026-09-03 evening: the storefront is deliberately back behind the Oxygen login wall
+> and STAYS there until the CJ wallet is funded (~$150).** The top-up is a bank transfer with a
+> verification wait, so launch is Mon–Wed next week, not the weekend. This is the correct call:
+> a reachable store that cannot fulfil an order is worse than no store, especially under an
+> all-sales-final policy. **Treat the wait as a gift** — it converts a rushed weekend launch into
+> a week with time for catalog depth, the mobile/Lighthouse pass, and Phase B builds.
 
 **A1. Catalog blitz [R].** Sourcing runs from Robert's machine on subscription auth until the
 catalog is stocked. Command + keyword sets in `LAUNCH-PLAN.md` §L2. Watch each run's closing
@@ -27,9 +34,10 @@ Amazon and queues non-competitive products into the nightly deprecation drip
 (`catalog.deprecation-drip`, ≥1/night). Re-run it once more to queue the 11 already identified.
 
 **A3. Launch gates [R].** Ordered in `LAUNCH-PLAN.md` §L4. Live status:
-CJ wallet top-up (bank transfer in flight — canary can proceed with per-order manual payment) ·
-policies pasted ✅ · About page ✅ · Payments + bank verification in flight · storefront public ✅ ·
-canary self-purchase pending · Fold eyeball + Lighthouse fix list pending · DMARC pending.
+**CJ wallet top-up — THE launch gate, bank transfer in flight, everything else waits on it** ·
+policies pasted ✅ · About page ✅ · Shopify Payments + bank verification in flight ·
+storefront intentionally WALLED until the wallet clears · canary self-purchase blocked on the
+wallet · Fold eyeball + Lighthouse fix list pending (do during the wait) · DMARC pending.
 
 **A4. Housekeeping [R].** Dev-DB hygiene SQL (4 known-benign test failures until run) ·
 `workflow.deprecation.mode` back to `manual` · cancel Zendrop Plus + remove `ZENDROP_ACCESS_TOKEN`
