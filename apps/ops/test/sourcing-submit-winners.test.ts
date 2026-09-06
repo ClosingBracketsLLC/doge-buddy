@@ -142,9 +142,10 @@ function runFor(winners: SourcingWinner[]): {
   candidatesByPid: Map<string, HarvestCandidate>
   winners: SourcingWinner[]
   maxPriceToMarketBps: number
+  maxPriceCents: number
 } {
   const { candidateIds, candidatesByPid } = candidateSet(['pid-1'])
-  return { runId: RUN_ID, candidateIds, candidatesByPid, maxPriceToMarketBps: 13000, winners }
+  return { runId: RUN_ID, candidateIds, candidatesByPid, maxPriceToMarketBps: 13000, maxPriceCents: 10_000, winners }
 }
 
 describe('validateAndSubmitWinners', () => {
@@ -162,6 +163,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -191,6 +193,73 @@ describe('validateAndSubmitWinners', () => {
     )
   })
 
+  it('drops a winner whose dearest variant exceeds the price cap (owner rule: nothing over $100)', async () => {
+    const alert = vi.fn(async () => {})
+    const submit = vi.fn(async () => ({ id: 'p', status: 'pending' as const }))
+    const deps = makeDeps({ alert, submit })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 50_000,
+      maxPriceCents: 10_000,
+      winners: [
+        winnerFor('cjp-1', {
+          payload: {
+            variants: [
+              {
+                sku: 'A',
+                priceCents: 10_100,
+                supplierCostCents: 1000,
+                supplier: 'cj',
+                supplierProductId: 'cjp-1',
+                supplierVariantId: 'cjp-1-v1',
+              },
+            ],
+          },
+        }),
+      ],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_price_above_cap' }])
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('allows a winner priced exactly at the cap', async () => {
+    const submit = vi.fn(async () => ({ id: 'p', status: 'pending' as const }))
+    const deps = makeDeps({ submit })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 50_000,
+      maxPriceCents: 10_000,
+      winners: [
+        winnerFor('cjp-1', {
+          payload: {
+            variants: [
+              {
+                sku: 'A',
+                priceCents: 10_000,
+                supplierCostCents: 1000,
+                supplier: 'cj',
+                supplierProductId: 'cjp-1',
+                supplierVariantId: 'cjp-1-v1',
+              },
+            ],
+          },
+        }),
+      ],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    expect(submit).toHaveBeenCalledTimes(1)
+  })
+
   it('allowance spends 10+10+10 per fully-verified winner (getProduct + getVariantStock + quoteShipping)', async () => {
     const allowance = new PointsAllowance()
     const deps = makeDeps({ allowance })
@@ -201,6 +270,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -226,6 +296,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1'), winnerFor('cjp-2')],
     })
 
@@ -252,6 +323,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-999')],
     })
 
@@ -280,6 +352,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winner],
     })
 
@@ -296,6 +369,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { payload: { deliveryMinDays: 10, deliveryMaxDays: 3 } })],
     })
 
@@ -331,6 +405,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { payload: { descriptionHtml: '<p onclick="x">bad</p>' } })],
     })
 
@@ -352,6 +427,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { payload: { title: 'Flea Collar Deluxe' } })],
     })
 
@@ -373,6 +449,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -396,6 +473,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { payload: { title: 'Hypoallergenic Dog Bed' } })],
     })
 
@@ -416,6 +494,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { winner: { rationale: 'Vet approved and clinically proven durability.' } })],
     })
 
@@ -472,6 +551,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -501,6 +581,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -523,6 +604,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -550,6 +632,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [
         winnerFor('cjp-1', {
           payload: { variants: [{ sku: 'SKU-cjp-1', priceCents: 1000, supplierCostCents: 510, supplier: 'cj', supplierProductId: 'cjp-1', supplierVariantId: 'cjp-1-v1' }] },
@@ -578,6 +661,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -597,6 +681,7 @@ describe('validateAndSubmitWinners', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -679,6 +764,7 @@ describe('step 6: price-to-market gate', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -698,6 +784,7 @@ describe('step 6: price-to-market gate', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')], // no marketLookupId
     })
 
@@ -726,6 +813,7 @@ describe('step 6: price-to-market gate', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { winner: { marketLookupId: 'mkt_1' } })],
     })
 
@@ -754,6 +842,7 @@ describe('step 6: price-to-market gate', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { winner: { marketLookupId: 'mkt_1' } })],
     })
 
@@ -807,6 +896,7 @@ describe('step 6: price-to-market gate', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [atCeiling, oneCentAbove],
     })
 
@@ -881,6 +971,7 @@ describe('step 6: price-to-market gate', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [dropped, passed],
     })
 
@@ -926,6 +1017,7 @@ describe('step 8b decision context', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 50000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
     })
 
@@ -958,6 +1050,7 @@ describe('step 8b decision context', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 50000,
+      maxPriceCents: 10_000,
       // cjp-1 has NO marketLookupId -> dropped at step 6, never reaches the probe.
       winners: [winnerFor('cjp-1'), winnerFor('cjp-2', { winner: { marketLookupId: lookup2.lookupId } })],
     })
@@ -987,6 +1080,7 @@ describe('step 8b decision context', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 50000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
     })
 
@@ -1013,6 +1107,7 @@ describe('step 8b decision context', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -1036,6 +1131,7 @@ describe('step 8b decision context', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1')],
     })
 
@@ -1074,6 +1170,7 @@ describe('step 6b — Amazon price ceiling (owner ruling 2026-09-03)', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
     })
 
@@ -1101,6 +1198,7 @@ describe('step 6b — Amazon price ceiling (owner ruling 2026-09-03)', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
     })
 
@@ -1124,6 +1222,7 @@ describe('step 6b — Amazon price ceiling (owner ruling 2026-09-03)', () => {
       candidateIds,
       candidatesByPid,
       maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
       winners: [winnerFor('cjp-1', { winner: { marketLookupId: lookup.lookupId } })],
     })
 

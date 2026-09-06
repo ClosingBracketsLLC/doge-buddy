@@ -58,6 +58,8 @@ export interface ValidateAndSubmitWinnersInput {
   winners: SourcingWinner[]
   /** Resolved `sourcing.max_price_to_market_bps` knob (Stage 0) — the step-6 ceiling in bps. */
   maxPriceToMarketBps: number
+  /** Resolved `sourcing.max_price_cents` knob (Stage 0) — the step-2c hard price cap. */
+  maxPriceCents: number
 }
 
 function errMessage(err: unknown): string {
@@ -123,6 +125,14 @@ async function processWinner(
       hasHighlights: Boolean(payload.highlights),
       hasSpecs: Boolean(payload.specs),
     })
+  }
+
+  // Step 2c: owner price cap (spec 2026-09-03 §3). Nothing over $100 lists — the store sells
+  // impulse-priced goods, and expensive items neither convert nor survive the Amazon ceiling.
+  // Free to check, so it runs before anything that spends points or SerpApi quota.
+  const dearestCents = Math.max(...payload.variants.map((v) => v.priceCents))
+  if (dearestCents > input.maxPriceCents) {
+    return drop('sourcing_winner_price_above_cap', { dearestCents, maxPriceCents: input.maxPriceCents })
   }
 
   // Step 3: descriptionHtml allowlist. Agent-authored HTML later renders in the storefront, so

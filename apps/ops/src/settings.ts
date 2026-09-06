@@ -45,6 +45,9 @@ export const SETTINGS_DEFAULTS = {
   // 1.3x. Enforced in Stage 6 only when SERPAPI_KEY is configured; the default is pinned to
   // DEFAULT_MAX_PRICE_TO_MARKET_BPS by sourcing-knobs.test.ts.
   'sourcing.max_price_to_market_bps': 13000,
+  // Owner rule 2026-09-03 (affordable-catalog pivot §3): nothing over $100 lists. The store sells
+  // impulse-priced goods — an expensive item neither converts nor survives the Amazon ceiling.
+  'sourcing.max_price_cents': 10_000,
   // Pre-triage spam short-circuit (pre-publish anti-spam hardening). A ticket whose latest inbound
   // sat in Gmail's SPAM folder, from a sender with no order on file and no tripwire hit, is always
   // triaged AFTER real mail; with this false (default) it still gets a Haiku verdict while the

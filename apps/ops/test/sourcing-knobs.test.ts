@@ -25,6 +25,18 @@ describe('resolveSourcingKnobs', () => {
     expect(SETTINGS_DEFAULTS['sourcing.max_budget_cents'] / 100).toBe(SOURCING_MAX_BUDGET_USD)
   })
 
+  it('maxPriceCents defaults to $100 and range-checks (owner rule: nothing over $100 lists)', async () => {
+    const knobs = await resolveSourcingKnobs(fakeSettings())
+    expect(knobs.maxPriceCents).toBe(10_000)
+    expect(SETTINGS_DEFAULTS['sourcing.max_price_cents']).toBe(10_000)
+    await expect(resolveSourcingKnobs(fakeSettings({ 'sourcing.max_price_cents': 400 }))).rejects.toThrow(
+      /sourcing\.max_price_cents/,
+    )
+    await expect(resolveSourcingKnobs(fakeSettings({ 'sourcing.max_price_cents': 100_001 }))).rejects.toThrow(
+      /sourcing\.max_price_cents/,
+    )
+  })
+
   it('constants are the baseline when no setting row and no override exists', async () => {
     const knobs = await resolveSourcingKnobs(fakeSettings())
 
