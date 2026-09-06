@@ -194,6 +194,88 @@ describe('validateAndSubmitWinners', () => {
     )
   })
 
+  it('CN winner: stock checked in CN, freight quoted from CN, window taken from the chosen option', async () => {
+    const quoteShipping = vi.fn(async (): Promise<ShippingOption[]> => [
+      { name: 'CJPacket', priceCents: 494, minDays: 7, maxDays: 14 },
+    ])
+    const getVariantStock = vi.fn(async (): Promise<WarehouseStock[]> => [
+      { countryCode: 'CN', quantity: 40, verified: true },
+    ])
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({
+      id: 'p',
+      status: 'pending' as const,
+    }))
+    const deps = makeDeps({ submit, adapter: makeAdapter({ quoteShipping, getVariantStock }) })
+    const candidatesByPid = new Map([['cjp-1', candidate('cjp-1', { shipsFrom: 'CN' })]])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds: new Set(['cjp-1']),
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
+      // The agent proposed a 2-4 day window; the real quote says 7-14 and the quote wins.
+      winners: [winnerFor('cjp-1', { payload: { shipsFrom: 'CN', deliveryMinDays: 2, deliveryMaxDays: 4 } })],
+    })
+
+    expect(outcomes).toEqual([{ supplierProductId: 'cjp-1', outcome: 'submitted' }])
+    expect(quoteShipping).toHaveBeenCalledWith(expect.objectContaining({ fromCountry: 'CN', toCountry: 'US' }))
+    const [, submitInput] = submit.mock.calls[0]!
+    const submitted = submitInput.payload as { shipsFrom: string; deliveryMinDays: number; deliveryMaxDays: number }
+    expect(submitted.deliveryMinDays).toBe(7)
+    expect(submitted.deliveryMaxDays).toBe(14)
+    expect(submitted.shipsFrom).toBe('CN')
+  })
+
+  it('CN winner with only US stock is dropped (origin stock is what matters)', async () => {
+    const getVariantStock = vi.fn(async (): Promise<WarehouseStock[]> => [
+      { countryCode: 'US', quantity: 10, verified: true },
+    ])
+    const submit = vi.fn(async () => ({ id: 'p', status: 'pending' as const }))
+    const deps = makeDeps({ submit, adapter: makeAdapter({ getVariantStock }) })
+    const candidatesByPid = new Map([['cjp-1', candidate('cjp-1', { shipsFrom: 'CN' })]])
+
+    const outcomes = await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds: new Set(['cjp-1']),
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
+      winners: [winnerFor('cjp-1', { payload: { shipsFrom: 'CN' } })],
+    })
+
+    expect(outcomes).toEqual([
+      { supplierProductId: 'cjp-1', outcome: 'dropped', reason: 'sourcing_winner_unverifiable' },
+    ])
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('a US winner still quotes from US and keeps its US window', async () => {
+    const submit = vi.fn(async (_deps: SubmitProposalDeps, _input: SubmitProposalInput) => ({
+      id: 'p',
+      status: 'pending' as const,
+    }))
+    const deps = makeDeps({ submit })
+    const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
+
+    await validateAndSubmitWinners(deps, {
+      runId: RUN_ID,
+      candidateIds,
+      candidatesByPid,
+      maxPriceToMarketBps: 13000,
+      maxPriceCents: 10_000,
+      winners: [winnerFor('cjp-1')],
+    })
+
+    expect(deps.adapter.quoteShipping).toHaveBeenCalledWith(expect.objectContaining({ fromCountry: 'US' }))
+    const [, submitInput] = submit.mock.calls[0]!
+    const submitted = submitInput.payload as { shipsFrom: string; deliveryMinDays: number; deliveryMaxDays: number }
+    expect(submitted.shipsFrom).toBe('US')
+    // The default adapter option is 3-7 days; the payload's own 3-7 is confirmed by it, not trusted.
+    expect(submitted.deliveryMinDays).toBe(3)
+    expect(submitted.deliveryMaxDays).toBe(7)
+  })
+
   it('drops a winner whose dearest variant exceeds the price cap (owner rule: nothing over $100)', async () => {
     const alert = vi.fn(async () => {})
     const submit = vi.fn(async () => ({ id: 'p', status: 'pending' as const }))
@@ -649,10 +731,12 @@ describe('validateAndSubmitWinners', () => {
     )
   })
 
-  it('step 8 — sourcing_winner_margin_below_floor: no freight option lands within deliveryMaxDays', async () => {
+  it('step 8 — sourcing_winner_margin_below_floor: no freight option lands within MAX_DELIVERY_DAYS', async () => {
     const deps = makeDeps({
       adapter: makeAdapter({
-        quoteShipping: async () => [{ name: 'Slow Boat', priceCents: 100, minDays: 10, maxDays: 20 }], // deliveryMaxDays is 7
+        // Past the 20-day hard ceiling. (Since the pivot the AGENT's proposed window no longer
+        // filters options — the quote sets the window — so only this ceiling can reject one.)
+        quoteShipping: async () => [{ name: 'Slow Boat', priceCents: 100, minDays: 20, maxDays: 35 }],
       }),
     })
     const { candidateIds, candidatesByPid } = candidateSet(['cjp-1'])
