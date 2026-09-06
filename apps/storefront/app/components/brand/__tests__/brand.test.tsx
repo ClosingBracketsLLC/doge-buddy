@@ -4,9 +4,11 @@ import {TrustStrip} from '../TrustStrip';
 import {EmptyState} from '../EmptyState';
 import {ProductCardImage} from '../ProductCardImage';
 
-it('trust strip carries the exact promise copy', () => {
+it('trust strip promises free shipping and a per-item window, never a site-wide one', () => {
   render(<TrustStrip />);
-  expect(screen.getByText('Ships from US warehouses · 3–7 day delivery')).toBeInTheDocument();
+  expect(
+    screen.getByText('Free US shipping · every item shows its delivery window'),
+  ).toBeInTheDocument();
 });
 
 it('empty state shows title, message, optional CTA', () => {

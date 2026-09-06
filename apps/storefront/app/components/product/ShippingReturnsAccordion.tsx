@@ -1,5 +1,6 @@
 import {Link} from 'react-router';
 import {POLICY_COPY} from '@doge-buddy/core';
+import {originLabel} from '../brand/DeliveryBadge';
 
 /**
  * <details> summaries of the shipping + returns policies (product-page-v2 spec B2). Every
@@ -28,7 +29,7 @@ export function ShippingReturnsAccordion({
         <summary className={summaryClass}>Shipping</summary>
         {shipsFrom && minDays && maxDays ? (
           <p className="mt-2 text-sm font-medium text-ink">
-            Ships from {shipsFrom} · {minDays}–{maxDays} days
+            Arrives in {minDays}–{maxDays} days · ships from {originLabel(shipsFrom)}
           </p>
         ) : null}
         {shipping.sections[0]!.paragraphs.slice(0, 2).map((paragraph) => (

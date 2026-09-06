@@ -12,8 +12,8 @@ function renderWithRouter(ui: React.ReactElement) {
 describe('ValueProps', () => {
   it('renders the three value props with the returns-policy link', () => {
     renderWithRouter(<ValueProps />);
-    expect(screen.getByText('Ships from US warehouses')).toBeInTheDocument();
-    expect(screen.getByText('3–7 day delivery')).toBeInTheDocument();
+    expect(screen.getByText('Free shipping on every order')).toBeInTheDocument();
+    expect(screen.getByText('Delivery window shown before you buy')).toBeInTheDocument();
     expect(screen.getByRole('link', {name: /returns policy/i})).toHaveAttribute(
       'href',
       '/policies/returns',

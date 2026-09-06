@@ -37,12 +37,12 @@ export function TrustBadges() {
   return (
     <ul className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
       <li className={badgeClass}>
-        <BadgeIcon path={ICONS.warehouse} />
-        US warehouses
+        <BadgeIcon path={ICONS.truck} />
+        Delivery window shown on every item
       </li>
       <li className={badgeClass}>
-        <BadgeIcon path={ICONS.truck} />
-        3–7 day delivery
+        <BadgeIcon path={ICONS.warehouse} />
+        Free US shipping
       </li>
       <li className={badgeClass}>
         <BadgeIcon path={ICONS.lock} />

@@ -45,7 +45,7 @@ test('home renders hero and products', async ({page}) => {
   await expect(
     page
       .getByRole('contentinfo')
-      .getByText('Ships from US warehouses · 3–7 day delivery'),
+      .getByText('Free US shipping · every item shows its delivery window'),
   ).toBeVisible();
   await expect(main(page).locator('a[href^="/products/"]').first()).toBeVisible();
 });

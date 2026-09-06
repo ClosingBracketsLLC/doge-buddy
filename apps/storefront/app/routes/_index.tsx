@@ -14,7 +14,7 @@ export const meta: Route.MetaFunction = () => {
     {
       name: 'description',
       content:
-        'Toys, walks, beds, and grooming gear for happy dogs, shipped fast from US warehouses with 3–7 day delivery.',
+        'Toys, walks, beds, and grooming gear for happy dogs, with the delivery window shown on every product before you buy.',
     },
   ];
 };
