@@ -1,5 +1,9 @@
 # Growth lanes — strategy map (written 2026-09-03, Robert's brain-dump)
 
+> **This doc owns POST-LAUNCH strategy** (the why and the economics of each lane). The ordered
+> execution sequence lives in `docs/ROADMAP.md` (Phases B–E); the launch slice is
+> `docs/LAUNCH-PLAN.md`.
+
 Robert's ask, verbatim in substance: sell **hyped/trending** products that don't fit the
 price-competitive model; do **white/private label**; eventually an **MRR private-label lane**
 (dog vitamins, shampoo); **automate outreach** for wholesale and white-label deals, dropship or

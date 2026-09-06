@@ -506,6 +506,30 @@ The product-scoring subsystem is built and reviewed. What it means for you day o
 is its live tier — canary is still next after that). When you complete an item, check it off and
 tell Claude — especially the credential items, so live verification can run.*
 
+**Next build session starts here →** **`docs/ROADMAP.md` is now the master ordered list**
+(written 2026-09-03 launch day) — it indexes every other planning doc and says what happens next,
+from tonight through month 3+. Read it first each session.
+
+**Where things stand 2026-09-03 (launch day):** dogebuddy.com is PUBLIC. L1 decision-support and
+storefront P1 polish are merged + deployed. The Amazon price ceiling is binding (owner ruling after
+the 3x-stroller catch), the margin floor is 40%, the pre-gate catalog is deprecated, and
+`reprice-all` + the nightly `catalog.deprecation-drip` keep prices competitive and retire what
+can't be. Sourcing can be run from `/admin` ("Run sourcing now") or locally on subscription auth.
+Zendrop was probed with a real token and RULED OUT — CJ remains the only supplier.
+
+**Robert's immediate queue:** (1) keep the blitz running until the catalog is stocked; (2) rerun
+`reprice-all --apply` to queue the 11 known non-competitive products into the drip; (3) the Phase A
+launch gates in `ROADMAP.md` — CJ wallet, canary self-purchase, Fold eyeball, DMARC; (4) the
+housekeeping list there (dev-DB hygiene SQL, deprecation mode back to `manual`, cancel Zendrop +
+remove its token from `apps/ops/.env`).
+
+**Queued builds:** keyword intelligence (spec written, ready), supplier outreach agent + trend lane
+(specs needed) — all in `ROADMAP.md` Phase B, strategy in `docs/GROWTH-LANES.md`.
+
+---
+
+<details><summary>Historical pointer (pre-launch, kept for provenance)</summary>
+
 **Next build session starts here →** **L1 IS BUILT (2026-09-03, branch `sourcing-decision-support`
 merged to local main; spec `2026-09-03-sourcing-decision-support-design.md`, plan
 `2026-09-03-sourcing-decision-support.md`): Trends rising-query keyword expansion (Stage 1b),
@@ -535,3 +559,6 @@ the SQL. Test-address rule: repeat-complainant counts tickets (the form too), so
 address only ever reply on existing threads; Outlook.com silently drops first-contact mail from
 support@ until reputation builds. Contact form: LIVE 2026-08-31 (spec
 `2026-08-31-contact-form-design.md`, findings A/B/C at its end).
+
+
+</details>

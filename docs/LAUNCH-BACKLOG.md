@@ -1,5 +1,8 @@
 # Launch backlog — what stands between "the plumbing works" and "a shop worth opening"
 
+> **This doc owns storefront/catalog WORK ITEMS (P0/P1/P2).** P0 and P1 shipped 2026-09-01/03.
+> The master ordered list is `docs/ROADMAP.md`; post-launch strategy is `docs/GROWTH-LANES.md`.
+
 Audited 2026-08-31 against the REAL store through a local Hydrogen dev server + the Admin API
 (read-only). Companion to `OWNER-CHECKLIST.md`'s "Launch runway" (which covers plumbing); this file
 is the storefront/catalog work. **P0** = the site is broken or unshoppable without it. **P1** = do

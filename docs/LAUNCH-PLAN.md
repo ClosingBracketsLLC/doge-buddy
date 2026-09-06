@@ -1,5 +1,9 @@
 # Launch plan (written 2026-09-03, Robert's launch call)
 
+> **This doc owns the LAUNCH slice (L1–L4).** The master ordered list across all phases —
+> launch, enhancement week, trend testing, wholesale, private-label MRR — is `docs/ROADMAP.md`;
+> post-launch business strategy lives in `docs/GROWTH-LANES.md`.
+
 Robert's directives (2026-09-03 chat): (1) every proposal carries decision numbers — economics
 AND approximate demand signals — before he approves; (2) the catalog will be ENTIRELY re-sourced
 through the new pipeline (market gate + fixed scrubber + freight-aware pricing) — all 22
