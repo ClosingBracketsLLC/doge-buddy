@@ -110,15 +110,16 @@ export function createSourcingToolHandlers(deps: SourcingMcpDeps) {
       }
     },
 
-    async quote_freight(args: { supplierVariantId: string }, _extra?: unknown): Promise<CallToolResult> {
+    async quote_freight(args: { supplierVariantId: string; origin?: string }, _extra?: unknown): Promise<CallToolResult> {
       const exhausted = trySpend(allowance, TOOL_POINT_COSTS.quote_freight, 'quote_freight')
       if (exhausted) return exhausted
       try {
         const result = await adapter.quoteShipping({
-          // US-origin freight, mirroring the order-time gate in run-place-order.ts and Stage 4.6's
-          // re-quote: these listings ship from US, so a CN quote would return China-origin options
-          // that fail the delivery window and mislead the agent's margin math (FIX C5).
-          fromCountry: 'US',
+          // The CANDIDATE's own warehouse, mirroring the order-time gate in run-place-order.ts and
+          // Stage 4.6's re-quote (FIX C5, amended by the 2026-09-03 pivot). Quoting the wrong
+          // origin misleads the agent's margin math with options for a shipment we'd never make.
+          // US remains the default: a caller that names no origin gets exactly the old behaviour.
+          fromCountry: args.origin === 'CN' ? 'CN' : 'US',
           toCountry: 'US',
           items: [{ supplierVariantId: args.supplierVariantId, quantity: 1 }],
         })
@@ -182,8 +183,10 @@ export function createSourcingMcpServer(deps: SourcingMcpDeps): ReturnType<typeo
     ),
     tool(
       'quote_freight',
-      'US shipping options (price cents + day range) for a CJ variant, qty 1.',
-      { supplierVariantId: z.string().min(1) },
+      'Shipping options to the US (price cents + day range) for a CJ variant, qty 1. Pass the ' +
+        "candidate's own `shipsFrom` as `origin` — a CN candidate quoted from US returns a shipment " +
+        'we will never make, and plain code re-quotes from the real origin anyway.',
+      { supplierVariantId: z.string().min(1), origin: z.enum(['US', 'CN']).optional() },
       handlers.quote_freight,
     ),
   ]
