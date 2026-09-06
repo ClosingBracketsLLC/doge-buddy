@@ -21,6 +21,10 @@ export const SOURCING_MAX_BUDGET_USD = 2.0
 export const SOURCING_WATCHDOG_MS = 15 * 60 * 1000
 /** Freight-inclusive margin floor (bps) stated to the agent; Stage 4 re-enforces the live value. */
 export const SOURCING_MARGIN_FLOOR_BPS = 6000
+/** Price cap (cents) stated to the agent when the caller passes no knobs — mirrors the
+ *  `sourcing.max_price_cents` setting default, which Stage 4's step-2c gate actually enforces
+ *  (pinned to it by `sourcing-knobs.test.ts`). */
+export const DEFAULT_MAX_PRICE_CENTS = 10_000
 
 export interface AgentRunResult {
   status: 'succeeded' | 'failed' | 'aborted'
@@ -83,6 +87,7 @@ function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
   const signalLines = input.trendSignals.map((s) => JSON.stringify(s)).join('\n')
 
   const bps = input.knobs?.maxPriceToMarketBps ?? DEFAULT_MAX_PRICE_TO_MARKET_BPS
+  const maxPriceCents = input.knobs?.maxPriceCents ?? DEFAULT_MAX_PRICE_CENTS
   const ratio = String(bps / 10_000)
   const exampleCeiling = (Math.floor(2499 * bps / 10_000) / 100).toFixed(2)
   const marketSection = input.marketGateArmed
@@ -113,7 +118,13 @@ function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
     '## Store context',
     `Category tags (pick exactly one per listing): ${CATEGORY_TAGS.join(', ')}.`,
     `categoryTag must be one of ${CATEGORIES.map((c) => c.tag).join('|')} (the store's CATEGORIES); match the keyword's intent when obvious.`,
-    'Prices and costs are integer cents. Ships from US only; buyers expect a few-days delivery window.',
+    'Prices and costs are integer cents.',
+    "Products ship from either our US or our CN warehouse — the candidate's own `shipsFrom` says which.",
+    'CN items are far cheaper and take longer; both are fine. Quote freight for the candidate\'s OWN origin.',
+    'Delivery days: propose your best estimate, but plain code REPLACES it with the real quoted window —',
+    'never invent a fast window to make a product look better; it will simply be overwritten.',
+    `HARD CAP: no variant may be priced above $${(maxPriceCents / 100).toFixed(0)}. This store sells impulse-priced`,
+    'gear — an expensive item is dropped no matter how good its margin looks.',
     'A winner must clear the freight-inclusive margin floor. For every variant:',
     `  floor((priceCents - supplierCostCents - freightCents) * 10000 / priceCents) >= ${SOURCING_MARGIN_FLOOR_BPS} bps.`,
     'Get freightCents from your quote_freight calls. Plain code re-checks this exactly — do not guess.',
@@ -136,13 +147,14 @@ function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
     '(durable, non-slip, easy to clean, 60cm, machine-washable), never a health/therapeutic benefit.',
     'Before you output, re-read every title, description, and rationale and remove any of these terms.',
     '',
-    '## US stock — HARD RULE',
-    'Every variant you propose MUST show a US warehouse row with quantity >= 1 in its get_stock',
-    'result. A variant whose get_stock returns only CN (or any non-US) rows is DISQUALIFIED, no',
-    'matter how good its freight quote looks — quote_freight returns US shipping options even for',
-    'CN-only variants, so a freight quote is NOT evidence of US stock. Plain code re-checks the US',
-    'stock row exactly and silently drops any winner without one: pick a different variant of the',
-    'same product that does have US stock, or a different candidate.',
+    '## Origin stock — HARD RULE',
+    "Every variant you propose MUST show a warehouse row for the candidate's OWN `shipsFrom`",
+    'country with quantity >= 1 in its get_stock result. A US candidate with only CN rows — or a CN',
+    'candidate with only US rows — is DISQUALIFIED, no matter how good its freight quote looks:',
+    'quote_freight answers for whatever origin you ask about, so a freight quote is NOT evidence of stock',
+    'in any warehouse. Plain code re-checks that same origin row exactly and silently drops any winner',
+    'without one: pick a different variant of the same product that has stock in its origin, or a',
+    'different candidate.',
     '',
     ...marketSection,
     '',
@@ -151,7 +163,8 @@ function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
     `1. Pick your ~${maxWinners}-${maxWinners + 2} most promising candidates from the list above (best demand signal, price band`,
     '   that can clear the margin floor, not in an excluded category).',
     '2. For EACH, call get_product_detail (variants, supplier costs, description, images), get_stock',
-    '   (confirm real US warehouse stock), and quote_freight (US shipping cost + days). Use get_reviews',
+    "   (confirm real stock in the candidate's own shipsFrom warehouse), and quote_freight with that",
+    '   same `origin` (shipping cost + days). Use get_reviews',
     '   and web search to judge demand and competition. You cannot fill in a valid payload without this.',
     '3. Build a complete new_listing payload for each candidate that clears the margin floor: one',
     '   categoryTag, real variants with SKUs/priceCents/supplierCostCents from the detail call, at',
@@ -159,7 +172,8 @@ function buildPrompt(input: SourcingRunInput, maxWinners: number): string {
     "   variant's variantImage in get_product_detail (omit it for variants CJ shows no image for),",
     '   3-5 factual `highlights` bullets (what the item IS: material, size, cleaning, use), a',
     '   `specs` table as [{label, value}] rows from CJ detail data (size/material/weight), an',
-    '   optional one-line `whatsInBox`, US-appropriate delivery days, and clean marketing copy',
+    '   optional one-line `whatsInBox`, the delivery days your own quote_freight call returned, and',
+    '   clean marketing copy',
     '   (no disallowed claims).',
     `4. Return up to ${maxWinners} winners in the required structured output, each with rationale, marginPct,`,
     '   and freightEstimateCents (from your quote_freight call).',

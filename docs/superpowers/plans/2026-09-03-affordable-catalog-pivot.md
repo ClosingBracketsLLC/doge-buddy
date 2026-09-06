@@ -10,6 +10,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-03-affordable-catalog-pivot-design.md`
 
+> **EXECUTED 2026-09-06** on branch `affordable-catalog-pivot`, all 8 tasks TDD, one commit each.
+> Suites: core 64/64, ops 1621/1624 (the 3 known dev-DB failures), storefront 97/97, supplier
+> 124/125, db 7/7, `pnpm -r typecheck` clean. Three things the plan did not anticipate, all
+> resolved in the commits: (1) `sourcing.max_pages` had to go 10 -> 20 — passes are keywords x
+> ORIGINS now, and at 10 the trend-expanded keywords got no pass at all; (2) the agent's
+> `quote_freight` MCP tool hard-coded US, so the prompt's "quote your own origin" instruction had
+> nothing to call — it now takes an optional `origin` (default US); (3) `run-place-order.ts` still
+> places every supplier order `fromCountry: 'US'`, so CN products are listable but NOT yet
+> fulfillable — recorded as a blocking owner item alongside the duty verification.
+
 **Scope note:** the spec's §5 post-purchase comfort system (lifecycle emails, coupons) is a separate subsystem with its own infrastructure and gets **its own plan** after this one lands. This plan delivers a store that can *list* CN products honestly; that plan delivers the reassurance around the wait.
 
 ## Global Constraints
@@ -35,7 +45,7 @@
 **Interfaces:**
 - Produces: `NewListingPayloadSchema.shipsFrom` accepts `'US' | 'CN'`; `ProductOrigin` type exported as `export type ProductOrigin = 'US' | 'CN'`. Tasks 3–5 rely on both.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `packages/core/test/proposals.test.ts`:
 
@@ -69,12 +79,12 @@ it('returns policy carries the late-order cancel right (FTC mail-order rule)', (
 })
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `pnpm --filter @doge-buddy/core test`
 Expected: the CN case fails (literal 'US'), and both policy assertions fail.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `proposals.ts`:
 
@@ -109,11 +119,11 @@ and in the payload schema replace `shipsFrom: z.literal('US'),` with:
           "One exception, and we'll tell you about it rather than wait to be asked: if your order hasn't shipped within the delivery window shown when you bought it, you can cancel it for a full refund. We'll email you first with the new estimate so you can decide.",
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `pnpm --filter @doge-buddy/core test` → PASS. Then `pnpm -r typecheck` — expect errors ONLY where `shipsFrom` was assumed to be the literal `'US'` (seed fixtures, ops tests). Fix each by using `'US' as const` / the `ProductOrigin` type; do not weaken any gate.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/core apps/ops/src/seed
@@ -133,7 +143,7 @@ git commit -m "feat(core): shipsFrom accepts CN; shipping policy states per-prod
 **Interfaces:**
 - Produces: setting `sourcing.max_price_cents` (default `10000`); `SourcingKnobs.maxPriceCents: number`; `ValidateAndSubmitWinnersInput.maxPriceCents: number`; drop reason `sourcing_winner_price_above_cap`. Task 5's prompt quotes the same number.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `sourcing-knobs.test.ts`:
 
@@ -171,9 +181,9 @@ it('allows a winner exactly at the cap', async () => {
 
 Every existing call in that file needs `maxPriceCents: 10_000` added to its input — do that in the same edit so the suite compiles.
 
-- [ ] **Step 2: Run to verify they fail** — `cd apps/ops && npx vitest run test/sourcing-knobs.test.ts test/sourcing-submit-winners.test.ts` → FAIL.
+- [x] **Step 2: Run to verify they fail** — `cd apps/ops && npx vitest run test/sourcing-knobs.test.ts test/sourcing-submit-winners.test.ts` → FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `settings.ts`: add `'sourcing.max_price_cents': 10_000,` to `SETTINGS_DEFAULTS` and `| 'sourcing.max_price_cents'` to the `SettingKey` union.
 
@@ -201,9 +211,9 @@ add `maxPriceCents: number` to `SourcingKnobs`, read `settings.get('sourcing.max
 
 `pipeline.ts`: pass `maxPriceCents: knobs.maxPriceCents` in the `validateAndSubmitWinners` input.
 
-- [ ] **Step 4: Run to verify pass** — same two files + `npx vitest run test/sourcing-pipeline.test.ts`; then `pnpm --filter @doge-buddy/ops typecheck`.
+- [x] **Step 4: Run to verify pass** — same two files + `npx vitest run test/sourcing-pipeline.test.ts`; then `pnpm --filter @doge-buddy/ops typecheck`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/settings.ts apps/ops/src/sourcing/knobs.ts apps/ops/src/sourcing/submit-winners.ts apps/ops/src/sourcing/pipeline.ts apps/ops/test
@@ -222,7 +232,7 @@ git commit -m "feat(sourcing): \$100 price cap gate (sourcing.max_price_cents) �
 - Consumes: `ProductOrigin` (Task 1).
 - Produces: `HarvestCandidate.shipsFrom: ProductOrigin`; `HarvestDeps.origins?: readonly ProductOrigin[]` (default `['US', 'CN']`). Tasks 4–5 read `candidate.shipsFrom`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 it('searches both origins and tags each candidate with the warehouse that produced it', async () => {
@@ -237,9 +247,9 @@ it('searches both origins and tags each candidate with the warehouse that produc
 
 (`summary()` = the file's existing fake-summary helper; `db` = its existing harness.)
 
-- [ ] **Step 2: Run to verify it fails** — `npx vitest run test/sourcing-harvest.test.ts` → FAIL (only US searched; no `shipsFrom`).
+- [x] **Step 2: Run to verify it fails** — `npx vitest run test/sourcing-harvest.test.ts` → FAIL (only US searched; no `shipsFrom`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add to `HarvestCandidate`: `shipsFrom: ProductOrigin`.
 Add to `HarvestDeps`:
@@ -256,9 +266,9 @@ Widen `PassState` to `{ keyword, origin, page, ended }` and build `order` as the
 
 Note for the implementer: `maxPages` is a total across all passes, so doubling the passes halves pages-per-pass unless the caller raises it — that is intended and the run script's `--pages` flag already exists to compensate.
 
-- [ ] **Step 4: Run to verify pass** — that file + `npx vitest run test/sourcing-pipeline.test.ts`; typecheck.
+- [x] **Step 4: Run to verify pass** — that file + `npx vitest run test/sourcing-pipeline.test.ts`; typecheck.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/sourcing/harvest.ts apps/ops/test/sourcing-harvest.test.ts
@@ -277,7 +287,7 @@ git commit -m "feat(sourcing): harvest both US and CN warehouses; candidates car
 - Consumes: `HarvestCandidate.shipsFrom` (Task 3).
 - Produces: submitted payloads whose `shipsFrom` and `deliveryMinDays`/`deliveryMaxDays` come from the candidate's origin and the chosen freight option — Task 6/7 render exactly these.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 it('CN winner: stock checked in CN, freight quoted from CN, window taken from the chosen option', async () => {
@@ -309,9 +319,9 @@ it('US winner still quotes from US and keeps the US behaviour', async () => {
 })
 ```
 
-- [ ] **Step 2: Run to verify they fail** — `npx vitest run test/sourcing-submit-winners.test.ts` → FAIL.
+- [x] **Step 2: Run to verify they fail** — `npx vitest run test/sourcing-submit-winners.test.ts` → FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Near the top of `processWinner`, after the candidate lookup exists:
 
@@ -348,9 +358,9 @@ export const MAX_DELIVERY_DAYS = 20
     const eligible = options.filter((o) => o.maxDays <= MAX_DELIVERY_DAYS)
 ```
 
-- [ ] **Step 4: Run to verify pass** — that file + `npx vitest run test/sourcing-pipeline.test.ts`; typecheck.
+- [x] **Step 4: Run to verify pass** — that file + `npx vitest run test/sourcing-pipeline.test.ts`; typecheck.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/sourcing/submit-winners.ts apps/ops/test/sourcing-submit-winners.test.ts
@@ -365,7 +375,7 @@ git commit -m "feat(sourcing): origin-aware stock+freight gates; delivery window
 - Modify: `apps/ops/src/agents/sourcing-run.ts` (store-context + task sections)
 - Test: `apps/ops/test/agents-sourcing-run.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 it('prompt states the price cap and that delivery windows come from freight quotes', () => {
@@ -377,9 +387,9 @@ it('prompt states the price cap and that delivery windows come from freight quot
 })
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `npx vitest run test/agents-sourcing-run.test.ts` → FAIL.
+- [x] **Step 2: Run to verify it fails** — `npx vitest run test/agents-sourcing-run.test.ts` → FAIL.
 
-- [ ] **Step 3: Implement** — in `buildPrompt`'s store-context block, replace the `Ships from US only` line with:
+- [x] **Step 3: Implement** — in `buildPrompt`'s store-context block, replace the `Ships from US only` line with:
 
 ```ts
     `Products ship from either our US or our CN warehouse — the candidate's own \`shipsFrom\` says which.`,
@@ -392,9 +402,9 @@ it('prompt states the price cap and that delivery windows come from freight quot
 
 Thread `maxPriceCents` in via `input.knobs?.maxPriceCents ?? 10_000` next to the existing knob reads.
 
-- [ ] **Step 4: Run to verify pass** — that file; typecheck.
+- [x] **Step 4: Run to verify pass** — that file; typecheck.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/agents/sourcing-run.ts apps/ops/test/agents-sourcing-run.test.ts
@@ -413,7 +423,7 @@ git commit -m "feat(agents): prompt states origin awareness, the \$100 cap, and 
 **Interfaces:**
 - Produces: `DeliveryBadge` renders origin-aware copy from per-product values only.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```tsx
 it('renders the product’s own window and names the origin honestly', () => {
@@ -439,9 +449,9 @@ it('no component hard-codes a site-wide delivery promise', () => {
 })
 ```
 
-- [ ] **Step 2: Run to verify they fail** — `cd apps/storefront && npx vitest run app/components` → FAIL.
+- [x] **Step 2: Run to verify they fail** — `cd apps/storefront && npx vitest run app/components` → FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `DeliveryBadge.tsx`:
 
@@ -467,10 +477,10 @@ export function DeliveryBadge({shipsFrom, minDays, maxDays}: {shipsFrom?: string
 
 `e2e/smoke.spec.ts`: update the asserted string to the new TrustStrip copy.
 
-- [ ] **Step 4: Run to verify pass** — `npx vitest run app/components` and `pnpm --filter @doge-buddy/storefront typecheck`. Then grep to prove the claim is gone:
+- [x] **Step 4: Run to verify pass** — `npx vitest run app/components` and `pnpm --filter @doge-buddy/storefront typecheck`. Then grep to prove the claim is gone:
 `grep -rn "3–7\|3-7 day" apps/storefront/app packages/core/src` → only unrelated hits (e.g. `support/ingest.ts`'s "Steps 3–7" comment).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/storefront/app apps/storefront/e2e
@@ -488,7 +498,7 @@ git commit -m "feat(storefront): per-product delivery windows replace the blanke
 **Interfaces:**
 - Consumes: the `dogebuddy` metafields already written at listing time (`ships_from`, `delivery_max_days`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```tsx
 it('shows the delivery window on the card when the metafields are present', () => {
@@ -503,9 +513,9 @@ it('renders no delivery line when the metafields are absent', () => {
 
 (`renderWithRouter` = the `createRoutesStub` helper used by `related-products.test.tsx`.)
 
-- [ ] **Step 2: Run to verify it fails** → FAIL.
+- [x] **Step 2: Run to verify it fails** → FAIL.
 
-- [ ] **Step 3: Implement** — add to the `ProductItem` fragment in `collections.$handle.tsx` and the equivalent fragment in `search.tsx`:
+- [x] **Step 3: Implement** — add to the `ProductItem` fragment in `collections.$handle.tsx` and the equivalent fragment in `search.tsx`:
 
 ```graphql
     shipsFrom: metafield(namespace: "dogebuddy", key: "ships_from") { value }
@@ -524,9 +534,9 @@ In `ProductItem.tsx`, after the price line:
 
 (Widen the component's prop type to include the two optional metafield fields; run `pnpm --filter @doge-buddy/storefront codegen` before typecheck.)
 
-- [ ] **Step 4: Run to verify pass** — `npx vitest run app/components` + codegen + typecheck.
+- [x] **Step 4: Run to verify pass** — `npx vitest run app/components` + codegen + typecheck.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/storefront/app apps/storefront/storefrontapi.generated.d.ts
@@ -540,13 +550,13 @@ git commit -m "feat(storefront): product cards show the delivery window before t
 **Files:**
 - Modify: `docs/ROADMAP.md` (Phase A), `docs/OWNER-CHECKLIST.md` (new owner item)
 
-- [ ] **Step 1: Full suites** — `pnpm --filter @doge-buddy/core test`, `pnpm --filter @doge-buddy/ops test`, `pnpm --filter @doge-buddy/storefront test`, `pnpm -r typecheck`. Expected: green except the two known dev-DB failures.
+- [x] **Step 1: Full suites** — `pnpm --filter @doge-buddy/core test`, `pnpm --filter @doge-buddy/ops test`, `pnpm --filter @doge-buddy/storefront test`, `pnpm -r typecheck`. Expected: green except the two known dev-DB failures.
 
-- [ ] **Step 2: Docs** —
+- [x] **Step 2: Docs** —
   - `OWNER-CHECKLIST.md`: add the blocking owner item — *"Before any CN product goes on sale: get CJ's written answers on (1) is the line DDP so the customer is never billed on delivery, (2) does the quoted freight include duty, (3) who is the declared Importer of Record — then confirm empirically on the canary order (place it through a CN product)."*
   - `ROADMAP.md` Phase A: note the pivot is built and gated on that verification; link the spec.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/

@@ -43,7 +43,7 @@ function mcpServer() {
 }
 
 function candidates(): HarvestCandidate[] {
-  return [{ supplierProductId: 'cjp-1', title: 'Dog Toy', categoryName: 'Toys', sellPriceCents: 2999, listedNum: 120, imageUrl: 'https://x/y.png', keyword: 'dog toy' }]
+  return [{ supplierProductId: 'cjp-1', title: 'Dog Toy', categoryName: 'Toys', sellPriceCents: 2999, listedNum: 120, imageUrl: 'https://x/y.png', keyword: 'dog toy', shipsFrom: 'US' }]
 }
 function trendSignals(): TrendSignal[] {
   return [{ keyword: 'dog toy', score: 75, snapshot: {} }]
@@ -94,8 +94,8 @@ describe('runSourcingAgent (fake SDK stream)', () => {
     yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
   }
 
-  it('prompt pins the US-stock hard rule: CN-only variants are disqualified, freight is not stock evidence', async () => {
-    const runId = await claimRow('us-stock-rule')
+  it("prompt pins the origin-stock hard rule against the candidate's OWN warehouse", async () => {
+    const runId = await claimRow('origin-stock-rule')
     let capturedPrompt: string | undefined
     async function* stream(): AsyncGenerator<Record<string, unknown>> {
       yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
@@ -104,12 +104,29 @@ describe('runSourcingAgent (fake SDK stream)', () => {
 
     await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: trendSignals() })
 
-    // First live Tier-2 run (2026-08-24): the agent saw CN-only get_stock results and proposed the
-    // variants anyway, trusting quote_freight's US options — every winner then died on Stage 4's US
-    // stock gate. The prompt must make both halves explicit.
-    expect(capturedPrompt).toContain('US stock — HARD RULE')
+    // First live Tier-2 run (2026-08-24): the agent saw stock rows for the wrong warehouse and
+    // proposed the variants anyway, trusting a freight quote as if it were stock. Since the
+    // 2026-09-03 pivot the rule is the same, applied to the candidate's own origin.
+    expect(capturedPrompt).toContain('Origin stock — HARD RULE')
     expect(capturedPrompt).toContain('DISQUALIFIED')
-    expect(capturedPrompt).toContain('NOT evidence of US stock')
+    expect(capturedPrompt).toContain('NOT evidence of stock')
+    expect(capturedPrompt).toContain('shipsFrom')
+  })
+
+  it('prompt states the price cap, both origins, and that windows come from freight quotes', async () => {
+    const runId = await claimRow('pivot-prompt')
+    let capturedPrompt: string | undefined
+    async function* stream(): AsyncGenerator<Record<string, unknown>> {
+      yield { type: 'result', subtype: 'success', total_cost_usd: 0.01, modelUsage: { 'claude-sonnet-5': { costUSD: 0.01 } }, num_turns: 1, session_id: 's1', structured_output: { winners: [] } }
+    }
+    const d = deps((args) => { capturedPrompt = args.prompt; return stream() })
+
+    await runSourcingAgent(d, { runId, candidates: candidates(), trendSignals: trendSignals() })
+
+    expect(capturedPrompt).toContain('$100')
+    expect(capturedPrompt).toContain('quote_freight')
+    expect(capturedPrompt).toMatch(/never invent|plain code REPLACES/i)
+    expect(capturedPrompt).toContain('CN')
   })
 
   it('prompt demands v2 content: >=3 images, per-variant imageUrl, highlights, specs, and names them in the HARD RULE', async () => {
@@ -143,7 +160,7 @@ describe('runSourcingAgent (fake SDK stream)', () => {
       runId,
       candidates: candidates(),
       trendSignals: trendSignals(),
-      knobs: { keywords: ['dog toy'], maxWinners: 8, maxBudgetUsd: 6.5, candidateTarget: 40, maxPages: 20, maxPriceToMarketBps: 13_000 },
+      knobs: { keywords: ['dog toy'], maxWinners: 8, maxBudgetUsd: 6.5, candidateTarget: 40, maxPages: 20, maxPriceToMarketBps: 13_000, maxPriceCents: 10_000 },
     })
 
     expect(capturedPrompt).toContain('up to 8 winners')

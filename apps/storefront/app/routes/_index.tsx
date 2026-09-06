@@ -14,7 +14,7 @@ export const meta: Route.MetaFunction = () => {
     {
       name: 'description',
       content:
-        'Toys, walks, beds, and grooming gear for happy dogs, shipped fast from US warehouses with 3–7 day delivery.',
+        'Toys, walks, beds, and grooming gear for happy dogs, with the delivery window shown on every product before you buy.',
     },
   ];
 };
@@ -85,6 +85,12 @@ function NewArrivals({
 
 const NEW_ARRIVALS_QUERY = `#graphql
   fragment RecommendedProduct on Product {
+    shipsFrom: metafield(namespace: "dogebuddy", key: "ships_from") {
+      value
+    }
+    deliveryMaxDays: metafield(namespace: "dogebuddy", key: "delivery_max_days") {
+      value
+    }
     id
     title
     handle

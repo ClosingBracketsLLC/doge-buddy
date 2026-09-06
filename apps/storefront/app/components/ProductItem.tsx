@@ -8,15 +8,20 @@ import type {
 } from 'storefrontapi.generated';
 import {useVariantUrl} from '~/lib/variants';
 import {ProductCardImage} from '~/components/brand/ProductCardImage';
+import {DeliveryLine} from '~/components/brand/DeliveryLine';
 
 export function ProductItem({
   product,
 }: {
-  product:
+  product: (
     | CollectionItemFragment
     | ProductItemFragment
     | RecommendedProductFragment
-    | RelatedProductFragment;
+    | RelatedProductFragment
+  ) & {
+    /** Written at listing time by apply-new-listing.ts; absent on anything listed pre-pivot. */
+    deliveryMaxDays?: {value?: string | null} | null;
+  };
   loading?: 'eager' | 'lazy';
 }) {
   const variantUrl = useVariantUrl(product.handle);
@@ -31,6 +36,7 @@ export function ProductItem({
       <div className="mt-1.5 inline-block rounded border-2 border-ink bg-badge px-2 py-0.5 font-display text-ink">
         <Money data={product.priceRange.minVariantPrice} />
       </div>
+      <DeliveryLine maxDays={product.deliveryMaxDays?.value} />
     </Link>
   );
 }

@@ -1,3 +1,4 @@
+import type { ProductOrigin } from '@doge-buddy/core'
 import { formatCents, NewListingPayloadSchema, type NewListingPayload } from '@doge-buddy/core'
 import type { createDb } from '@doge-buddy/db'
 import type { ShippingOption, SupplierAdapter, WarehouseStock } from '@doge-buddy/supplier'
@@ -18,6 +19,10 @@ type Alert = (severity: 'info' | 'warning' | 'critical', kind: string, detail: R
 /** How far a live CJ variant cost may drift from what the agent claimed and still pass
  * re-verification (spec §Stage 4.6) — beyond this the winner is dropped as unverifiable rather
  * than trusted; the live figure (not the agent's guess) is what fulfillment will actually pay. */
+/** No listing promises a window longer than this — beyond it, the product isn't worth selling
+ *  and no amount of comfort copy fixes the wait (spec 2026-09-03 §3). */
+export const MAX_DELIVERY_DAYS = 20
+
 export const COST_TOLERANCE_BPS = 500
 
 export interface SubmitWinnersDeps {
@@ -58,6 +63,8 @@ export interface ValidateAndSubmitWinnersInput {
   winners: SourcingWinner[]
   /** Resolved `sourcing.max_price_to_market_bps` knob (Stage 0) — the step-6 ceiling in bps. */
   maxPriceToMarketBps: number
+  /** Resolved `sourcing.max_price_cents` knob (Stage 0) — the step-2c hard price cap. */
+  maxPriceCents: number
 }
 
 function errMessage(err: unknown): string {
@@ -104,6 +111,11 @@ async function processWinner(
     return drop('sourcing_winner_not_candidate', { claimedSupplierProductId: pid })
   }
 
+  // The candidate's warehouse decides every origin-sensitive gate below (stock, freight, window).
+  // Falling back to 'US' keeps pre-pivot callers — and any candidate harvested before the field
+  // existed — on exactly their old behaviour.
+  const origin: ProductOrigin = input.candidatesByPid.get(pid)?.shipsFrom ?? 'US'
+
   // Step 2: re-validate the payload against the real schema. SourcingWinner's zod type already
   // implies this at parse time upstream (Stage 3), but Stage 4 re-checks because nothing here is
   // trusted — including whatever validation supposedly already ran.
@@ -123,6 +135,14 @@ async function processWinner(
       hasHighlights: Boolean(payload.highlights),
       hasSpecs: Boolean(payload.specs),
     })
+  }
+
+  // Step 2c: owner price cap (spec 2026-09-03 §3). Nothing over $100 lists — the store sells
+  // impulse-priced goods, and expensive items neither convert nor survive the Amazon ceiling.
+  // Free to check, so it runs before anything that spends points or SerpApi quota.
+  const dearestCents = Math.max(...payload.variants.map((v) => v.priceCents))
+  if (dearestCents > input.maxPriceCents) {
+    return drop('sourcing_winner_price_above_cap', { dearestCents, maxPriceCents: input.maxPriceCents })
   }
 
   // Step 3: descriptionHtml allowlist. Agent-authored HTML later renders in the storefront, so
@@ -229,8 +249,9 @@ async function processWinner(
   // Step 7: ground-truth re-verification against CJ (spends from the run's shared allowance).
   // Every payload variant's supplierVariantId must exist under the live product; live cost must
   // be within tolerance of the agent's claimed cost — on pass, the LIVE figure overwrites the
-  // payload (fulfillment pays what CJ actually charges, never the agent's guess). Verified US
-  // stock is checked on the first variant only, mirroring the order-time gate's stock pool.
+  // payload (fulfillment pays what CJ actually charges, never the agent's guess). Verified stock
+  // in the candidate's OWN origin is checked on the first variant only, mirroring the order-time
+  // gate's stock pool.
   let stockRows: WarehouseStock[] = []
   try {
     deps.allowance.spend(10, `verify:${pid}`)
@@ -270,9 +291,9 @@ async function processWinner(
     const firstVid = payload.variants[0]!.supplierVariantId
     const stock = await deps.adapter.getVariantStock(firstVid)
     stockRows = stock
-    const hasUsStock = stock.some((s) => s.countryCode === 'US' && s.quantity >= 1)
-    if (!hasUsStock) {
-      throw new Error(`no verified US stock (qty >= 1) for ${firstVid}`)
+    const hasOriginStock = stock.some((s) => s.countryCode === origin && s.quantity >= 1)
+    if (!hasOriginStock) {
+      throw new Error(`no verified ${origin} stock (qty >= 1) for ${firstVid}`)
     }
   } catch (err) {
     return drop('sourcing_winner_unverifiable', { error: errMessage(err) })
@@ -287,21 +308,26 @@ async function processWinner(
     deps.allowance.spend(10, `freight:${pid}`)
     const firstVid = payload.variants[0]!.supplierVariantId
     const options = await deps.adapter.quoteShipping({
-      // US-origin freight, mirroring the live order-time gate in run-place-order.ts: these listings
-      // are shipsFrom:'US' and Stage 4.6 verified US stock above, so freight must be quoted from US.
-      // A CN quote returns China-origin (~15-30 day) options that all fail the deliveryMaxDays
-      // filter below, silently dropping every real winner (FIX C5).
-      fromCountry: 'US',
+      // The CANDIDATE'S origin decides, mirroring the live order-time gate in run-place-order.ts:
+      // step 7 verified stock in this same warehouse, so freight must be quoted from it. Quoting
+      // the wrong origin returns options that price and time a shipment we will never make (FIX C5).
+      fromCountry: origin,
       toCountry: 'US',
       items: [{ supplierVariantId: firstVid, quantity: 1 }],
     })
-    const eligible = options.filter((o) => o.maxDays <= payload.deliveryMaxDays)
+    // A HARD ceiling, not the agent's proposed window: filtering against `payload.deliveryMaxDays`
+    // would reject every real CN option whenever the agent guessed a fast window, silently
+    // emptying the cheap lane. Slow-but-real options survive; absurd ones still don't.
+    const eligible = options.filter((o) => o.maxDays <= MAX_DELIVERY_DAYS)
     if (eligible.length === 0) {
-      throw new Error('no freight within window')
+      throw new Error(`no freight within ${MAX_DELIVERY_DAYS} days`)
     }
     const chosen = eligible.reduce((a, b) => (b.priceCents < a.priceCents ? b : a))
     freightOption = chosen
     freightCents = chosen.priceCents
+    // Honesty rule (spec 2026-09-03 §3): the window the customer sees is the one the carrier
+    // actually quoted, never the agent's proposal. Stamp the real origin alongside it.
+    payload = { ...payload, shipsFrom: origin, deliveryMinDays: chosen.minDays, deliveryMaxDays: chosen.maxDays }
   } catch (err) {
     return drop('sourcing_winner_margin_below_floor', { error: errMessage(err) })
   }

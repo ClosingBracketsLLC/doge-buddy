@@ -242,7 +242,14 @@ export async function runSourcingPipeline(deps: SourcingPipelineDeps): Promise<S
         reviewsSeen,
         trendSignalsByKeyword: new Map(trendSignals.map((s) => [s.keyword, s])),
       },
-      { runId, candidateIds, candidatesByPid, winners: agentResult.output.winners, maxPriceToMarketBps: knobs.maxPriceToMarketBps },
+      {
+        runId,
+        candidateIds,
+        candidatesByPid,
+        winners: agentResult.output.winners,
+        maxPriceToMarketBps: knobs.maxPriceToMarketBps,
+        maxPriceCents: knobs.maxPriceCents,
+      },
     )
 
     const submitted = outcomes.filter((o) => o.outcome === 'submitted').length

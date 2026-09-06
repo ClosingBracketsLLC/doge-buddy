@@ -29,6 +29,13 @@ const listingVariant = z.object({
     .optional(),
 })
 
+/**
+ * Where a product ships from. 'US' = CJ US warehouse (fast, dearer goods); 'CN' = CJ China
+ * warehouse (slow, far cheaper goods — the affordable-catalog pivot, spec 2026-09-03). The
+ * delivery window is derived per product from the real freight quote, never from this value.
+ */
+export type ProductOrigin = 'US' | 'CN'
+
 export const NewListingPayloadSchema = z
   .object({
     type: z.literal('new_listing'),
@@ -42,7 +49,7 @@ export const NewListingPayloadSchema = z
           .refine((u) => u.startsWith('http://') || u.startsWith('https://'), 'imageUrls must be http(s)'),
       )
       .min(1),
-    shipsFrom: z.literal('US'),
+    shipsFrom: z.enum(['US', 'CN']),
     deliveryMinDays: z.number().int().min(1),
     deliveryMaxDays: z.number().int().min(1),
     variants: z.array(listingVariant).min(1),

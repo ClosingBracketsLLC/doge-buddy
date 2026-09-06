@@ -24,6 +24,9 @@ export type SourcingKnobs = Required<Omit<SourcingOverrides, 'keywords'>> & {
   keywords: readonly string[]
   /** No override tier: setting > constant only (spec 2026-09-01 market-price Decision 6). */
   maxPriceToMarketBps: number
+  /** Hard price cap on any listed variant (spec 2026-09-03 §3). Setting > constant, no override:
+   *  it is an owner rule about what the store sells, not a per-run dial. */
+  maxPriceCents: number
 }
 
 /** Hard ceiling on a `--keywords` override. More than this and one run's CJ page budget is spread
@@ -44,6 +47,9 @@ export const SOURCING_KNOB_RANGES = {
   maxBudgetUsd: { min: 0.5, max: 10, integer: false },
   // 10000 (never above market) .. 20000 (2x market) — outside that is an owner typo, not intent.
   maxPriceToMarketBps: { min: 10_000, max: 20_000, integer: true },
+  // Owner rule 2026-09-03: nothing over $100 lists — cheap impulse-priced goods only. Floor of
+  // $5 stops a typo emptying the catalog.
+  maxPriceCents: { min: 500, max: 100_000, integer: true },
 } as const
 
 type NumericKnob = keyof typeof SOURCING_KNOB_RANGES
@@ -107,12 +113,13 @@ export async function resolveSourcingKnobs(settings: Settings, overrides?: Sourc
       : checkRange(knob, settingValue, `setting ${settingKey}`)
   }
 
-  const [maxWinners, candidateTarget, maxPages, maxBudgetCents, maxPriceToMarketBps] = await Promise.all([
+  const [maxWinners, candidateTarget, maxPages, maxBudgetCents, maxPriceToMarketBps, maxPriceCents] = await Promise.all([
     settings.get('sourcing.max_winners'),
     settings.get('sourcing.candidate_target'),
     settings.get('sourcing.max_pages'),
     settings.get('sourcing.max_budget_cents'),
     settings.get('sourcing.max_price_to_market_bps'),
+    settings.get('sourcing.max_price_cents'),
   ])
 
   return {
@@ -123,6 +130,7 @@ export async function resolveSourcingKnobs(settings: Settings, overrides?: Sourc
     // The setting is CENTS (every money setting in SETTINGS_DEFAULTS is), the knob is USD.
     maxBudgetUsd: pick('maxBudgetUsd', overrides?.maxBudgetUsd, '--budget', maxBudgetCents / 100, 'sourcing.max_budget_cents'),
     maxPriceToMarketBps: checkRange('maxPriceToMarketBps', maxPriceToMarketBps, 'setting sourcing.max_price_to_market_bps'),
+    maxPriceCents: checkRange('maxPriceCents', maxPriceCents, 'setting sourcing.max_price_cents'),
   }
 }
 
@@ -205,5 +213,6 @@ export function describeSourcingKnobs(knobs: SourcingKnobs): string {
     `maxPages=${knobs.maxPages}`,
     `maxBudgetUsd=${knobs.maxBudgetUsd}`,
     `maxPriceToMarketBps=${knobs.maxPriceToMarketBps}`,
+    `maxPriceCents=${knobs.maxPriceCents}`,
   ].join(' ')
 }

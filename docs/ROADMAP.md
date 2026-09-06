@@ -39,6 +39,20 @@ policies pasted ✅ · About page ✅ · Shopify Payments + bank verification in
 storefront intentionally WALLED until the wallet clears · canary self-purchase blocked on the
 wallet · Fold eyeball + Lighthouse fix list pending (do during the wait) · DMARC pending.
 
+**A3b. Affordable-catalog pivot — BUILT 2026-09-06 [C], gated [R].** Spec
+`superpowers/specs/2026-09-03-affordable-catalog-pivot-design.md`, plan
+`superpowers/plans/2026-09-03-affordable-catalog-pivot.md` (part 1 of 2). The store can now LIST
+cheap CN-warehouse goods honestly: harvest searches both warehouses and every candidate carries its
+origin; the stock gate, the freight quote and the delivery window all read that origin (the window
+is the carrier's real quote, never the agent's guess); nothing over $100 lists
+(`sourcing.max_price_cents`); and no blanket "3–7 day" promise survives anywhere — policy copy,
+trust strips, product pages and product cards all show each item's own window, with the
+legally-required late-order cancel right written into the returns policy.
+**Two things gate the first CN SALE, both in `OWNER-CHECKLIST.md` §Now:** CJ's written DDP/duty/IOR
+answers confirmed on the canary, and the order-time fulfilment path (`run-place-order.ts`), which
+still quotes and places every supplier order from US. Until both clear, treat CN proposals as
+"not yet" on /admin. The spec's §5 comfort system is part 2 and unbuilt.
+
 **A4. Housekeeping [R].** Dev-DB hygiene SQL (4 known-benign test failures until run) ·
 `workflow.deprecation.mode` back to `manual` · cancel Zendrop Plus + remove `ZENDROP_ACCESS_TOKEN`
 from `apps/ops/.env` and delete the `.env.bak-*` backups · confirm `fulfillment.margin_floor_bps`

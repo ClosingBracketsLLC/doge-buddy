@@ -6,8 +6,9 @@ import {ShippingReturnsAccordion} from '../ShippingReturnsAccordion';
 describe('TrustBadges', () => {
   it('renders the four badges (Decision 11)', () => {
     const {container} = render(<TrustBadges />);
-    expect(screen.getByText('US warehouses')).toBeInTheDocument();
-    expect(screen.getByText('3–7 day delivery')).toBeInTheDocument();
+    expect(screen.getByText('Delivery window shown on every item')).toBeInTheDocument();
+    expect(screen.queryByText('US warehouses')).not.toBeInTheDocument();
+    expect(screen.getByText('Free US shipping')).toBeInTheDocument();
     expect(screen.getByText('Secure checkout by Shopify')).toBeInTheDocument();
     expect(screen.getByText(/All sales final/)).toBeInTheDocument();
     expect(container.querySelectorAll('svg')).toHaveLength(4);
@@ -20,12 +21,12 @@ describe('TrustBadges', () => {
 
 describe('ShippingReturnsAccordion', () => {
   it('builds both summaries from POLICY_COPY verbatim (no new copy authored)', () => {
-    render(<ShippingReturnsAccordion shipsFrom="US warehouse" minDays="3" maxDays="7" />);
+    render(<ShippingReturnsAccordion shipsFrom="CN" minDays="7" maxDays="14" />);
     const shippingLead = POLICY_COPY.find((p) => p.handle === 'shipping')!.sections[0]!.paragraphs[0]!;
     const returnsLead = POLICY_COPY.find((p) => p.handle === 'returns')!.sections[0]!.paragraphs[0]!;
     expect(screen.getByText(shippingLead)).toBeInTheDocument();
     expect(screen.getByText(returnsLead)).toBeInTheDocument();
-    expect(screen.getByText('Ships from US warehouse · 3–7 days')).toBeInTheDocument();
+    expect(screen.getByText('Arrives in 7–14 days · ships from our partner warehouse')).toBeInTheDocument();
   });
   it('links both full policy pages', () => {
     render(<ShippingReturnsAccordion />);
@@ -34,7 +35,7 @@ describe('ShippingReturnsAccordion', () => {
   });
   it('omits the delivery line when metafields are absent, but still renders', () => {
     render(<ShippingReturnsAccordion />);
-    expect(screen.queryByText(/Ships from/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Arrives in/)).not.toBeInTheDocument();
     expect(screen.getByText('Shipping')).toBeInTheDocument();
   });
 });

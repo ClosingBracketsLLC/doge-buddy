@@ -116,6 +116,27 @@ Legend: 🔴 **BLOCKER** (something specific stalls until done) · 🟡 soon (ne
 
 ## Now / this week
 
+- [ ] 🔴 **BLOCKING before ANY CN product goes on sale — CJ duty/DDP + fulfilment origin.** The
+  affordable-catalog pivot (built 2026-09-06, spec `2026-09-03-affordable-catalog-pivot-design.md`)
+  lets the store LIST CN-warehouse products honestly; it deliberately does not make them safe to
+  SELL yet. Two things gate the first CN listing:
+  1. **Get CJ's written answers** to (a) is the line DDP, so the customer is never billed on
+     delivery? (b) does the quoted freight include duty? (c) who is the declared Importer of
+     Record? Then confirm it empirically on the canary — place that order through a CN product.
+     The shipping policy now says in writing "no customs charges or extra fees on delivery", so a
+     surprise duty bill on a customer's doorstep is a broken promise, not just a cost.
+  2. **Order-time fulfilment is still US-only in code.** `run-place-order.ts` quotes freight and
+     places every supplier order with `fromCountry: 'US'` (two call sites). Sourcing is now
+     origin-aware end to end, but fulfilment is not — a sold CN product would be quoted and
+     ordered from the wrong warehouse. That is a small build (read the product's `ships_from`
+     metafield / mapping and thread it through), and it belongs with the pivot's part-2 plan.
+     **Until it lands, keep the catalog US-only: `sourcing.max_pages` and the harvest will surface
+     CN candidates, so review CN proposals as "not yet" on /admin.**
+- [ ] ⚪ **Knob change to know about (2026-09-06):** `sourcing.max_pages` default is now **20**, not
+  10 — a harvest pass is keywords × warehouses since the pivot, so at 10 each keyword got half its
+  old coverage and the trend-expanded keywords got no pass at all. New setting on /admin/settings:
+  `sourcing.max_price_cents` (default **10000** = the $100 owner cap; nothing above it can list).
+
 - [x] ✅ **Admin control center shipped (2026-09-01).** `/admin` is mobile-first for the Fold: bottom tabs
   with badges (pending proposals, escalated tickets) on the cover screen, a left rail on the inner
   screen/desktop; the home page is a card board — Needs you · Money · Switches · Agents & jobs ·

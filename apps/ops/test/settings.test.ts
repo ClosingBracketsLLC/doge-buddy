@@ -94,12 +94,14 @@ describe('settings', () => {
     await s.set('scoring.max_refund_rate_bps', 2500) // restore default
   })
 
-  it('defaults the four catalog-build sourcing knobs to today behaviour (3/15/10/200c)', async () => {
+  it('defaults the catalog-build sourcing knobs (3/15/20 pages/200c/$100 cap)', async () => {
     const s = createSettings(db)
     expect(await s.get('sourcing.max_winners')).toBe(3)
     expect(await s.get('sourcing.candidate_target')).toBe(15)
-    expect(await s.get('sourcing.max_pages')).toBe(10)
+    // 20, not 10, since the 2026-09-03 pivot: passes are keywords x origins.
+    expect(await s.get('sourcing.max_pages')).toBe(20)
     expect(await s.get('sourcing.max_budget_cents')).toBe(200)
+    expect(await s.get('sourcing.max_price_cents')).toBe(10_000)
   })
 
   it('round-trips a number for sourcing.max_winners', async () => {

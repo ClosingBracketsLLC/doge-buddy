@@ -164,6 +164,20 @@ describe('agents/mcp-tools', () => {
       expect(allowance.spent()).toBe(10)
     })
 
+    it('quote_freight quotes from the origin the agent names (CN candidates)', async () => {
+      const adapter = makeStubAdapter()
+      const allowance = new PointsAllowance(100)
+      const handlers = createSourcingToolHandlers({ adapter, allowance })
+
+      await handlers.quote_freight({ supplierVariantId: 'v1', origin: 'CN' }, undefined)
+
+      expect(adapter.quoteShipping).toHaveBeenCalledWith({
+        fromCountry: 'CN',
+        toCountry: 'US',
+        items: [{ supplierVariantId: 'v1', quantity: 1 }],
+      })
+    })
+
     it('quote_freight wraps quoteShipping with fromCountry US, toCountry US, qty 1', async () => {
       const adapter = makeStubAdapter()
       const allowance = new PointsAllowance(100)
@@ -171,9 +185,9 @@ describe('agents/mcp-tools', () => {
 
       const result = await handlers.quote_freight({ supplierVariantId: 'v1' }, undefined)
 
-      // FIX C5: US-origin freight, mirroring run-place-order.ts's order-time gate — these listings
-      // are shipsFrom:'US' and Stage 4.6 verifies US stock before freight, so a CN quote would
-      // return China-origin options that fail the delivery window.
+      // FIX C5, as amended by the 2026-09-03 pivot: freight is quoted from the candidate's own
+      // warehouse, and US remains the default when the agent names none. Quoting the wrong origin
+      // returns options for a shipment we will never make.
       expect(adapter.quoteShipping).toHaveBeenCalledWith({
         fromCountry: 'US',
         toCountry: 'US',
