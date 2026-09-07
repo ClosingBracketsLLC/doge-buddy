@@ -47,10 +47,15 @@ two arrivals. (Rejected: all-or-nothing, which delays a perfectly placeable ship
 auto-refunding the failed leg, which makes a money decision without the owner and collides with
 the existing refund proposal flow.)
 
-**R3 — the spend cap stays per CUSTOMER order, summed across legs.** `fulfillment.spend_cap_per_
-order_cents` (7500) is a promise about what one customer order may cost us. Enforcing it per leg
-would silently double it on every split order. Each leg is checked against *cap minus what the
-order's other legs already committed*.
+**R3 — the spend cap AND the margin floor stay per CUSTOMER order, summed across legs.**
+`fulfillment.spend_cap_per_order_cents` (7500) is a promise about what one customer order may cost
+us; enforcing it per leg would silently double it on every split order. The margin gate has the
+same flaw and it is the more dangerous one: `plan.ts` gate 6 compares a leg's cost against the
+**whole order's** revenue, so two legs each costing 45% of revenue would both pass a 6000bps floor
+while the order as a whole loses money. Both checks therefore take a `committedCents` input — what
+this order's other legs have already committed — and gate on the total. The wallet check is the
+exception and stays per leg: the balance is re-read before each leg (R4), so leg 1's spend is
+already reflected in the number leg 2 sees, and adding it again would double-count it.
 
 **R4 — the wallet is re-read before each leg.** A balance that covers leg 1 need not cover leg 2,
 and leg 1's placement is what drained it. Leg 2 then takes the planner's existing
