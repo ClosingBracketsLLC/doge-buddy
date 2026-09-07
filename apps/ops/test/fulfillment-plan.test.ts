@@ -48,7 +48,19 @@ function baseInputs(): FulfillmentInputs {
     stock,
     freightOptions,
     walletAvailableCents: 100_000,
+    origin: 'US',
+    committedCents: 0,
   }
+}
+
+function withOrigin(origin: string, stockOverrides: Record<string, WarehouseStock[]>): FulfillmentInputs {
+  const base = withStock(stockOverrides)
+  return { ...base, origin }
+}
+
+function withCommittedCents(committedCents: number, patch: Partial<FulfillmentInputs['settings']> = {}): FulfillmentInputs {
+  const base = withSettings(patch)
+  return { ...base, committedCents }
 }
 
 function withSettings(patch: Partial<FulfillmentInputs['settings']>): FulfillmentInputs {
@@ -161,9 +173,9 @@ describe('planFulfillment', () => {
   })
 
   describe('gate 4: US stock', () => {
-    it('no US stock entry at all → no_us_stock', () => {
+    it('no stock entry in the leg\'s origin at all → no_origin_stock', () => {
       const d = planFulfillment(withStock({ 'sv-1': [{ countryCode: 'CN', quantity: 999, verified: true }] }))
-      expect(d).toMatchObject({ kind: 'needs_attention', reason: 'no_us_stock' })
+      expect(d).toMatchObject({ kind: 'needs_attention', reason: 'no_origin_stock' })
       expect((d as { detail: string }).detail).toContain('sv-1')
     })
 
@@ -281,4 +293,78 @@ describe('planFulfillment', () => {
       expect(d.kind).toBe('proceed')
     })
   })
+
+  // --- affordable-catalog pivot 2026-09-03: the leg dimension -------------------------------
+  describe('origin, the leg window, and whole-order money', () => {
+    it("gate 4 checks stock in the leg's own origin, both directions", () => {
+      const cnLegUsStock = withOrigin('CN', {
+        'sv-1': [{ countryCode: 'US', quantity: 50, verified: true }],
+        'sv-2': [{ countryCode: 'US', quantity: 50, verified: true }],
+      })
+      expect(planFulfillment(cnLegUsStock)).toMatchObject({ kind: 'needs_attention', reason: 'no_origin_stock' })
+
+      const usLegCnStock = withOrigin('US', {
+        'sv-1': [{ countryCode: 'CN', quantity: 50, verified: true }],
+        'sv-2': [{ countryCode: 'CN', quantity: 50, verified: true }],
+      })
+      expect(planFulfillment(usLegCnStock)).toMatchObject({ kind: 'needs_attention', reason: 'no_origin_stock' })
+
+      const cnLegCnStock = withOrigin('CN', {
+        'sv-1': [{ countryCode: 'CN', quantity: 50, verified: true }],
+        'sv-2': [{ countryCode: 'CN', quantity: 50, verified: true }],
+      })
+      expect(planFulfillment(cnLegCnStock).kind).toBe('proceed')
+    })
+
+    it("gate 5 honours the leg's own 14-day window where a site-wide setting would say 7", () => {
+      const base = withOrigin('CN', {
+        'sv-1': [{ countryCode: 'CN', quantity: 50, verified: true }],
+        'sv-2': [{ countryCode: 'CN', quantity: 50, verified: true }],
+      })
+      const decision = planFulfillment({
+        ...base,
+        settings: { ...base.settings, promisedMaxDays: 14 },
+        freightOptions: [{ name: 'CJPacket', priceCents: 494, minDays: 7, maxDays: 14 }],
+      })
+      expect(decision).toMatchObject({ kind: 'proceed', logisticName: 'CJPacket' })
+    })
+
+    it("gate 5 still rejects freight slower than the leg's own window — never stretches it", () => {
+      const base = withOrigin('CN', {
+        'sv-1': [{ countryCode: 'CN', quantity: 50, verified: true }],
+        'sv-2': [{ countryCode: 'CN', quantity: 50, verified: true }],
+      })
+      const decision = planFulfillment({
+        ...base,
+        settings: { ...base.settings, promisedMaxDays: 14 },
+        freightOptions: [{ name: 'Slow Boat', priceCents: 100, minDays: 20, maxDays: 35 }],
+      })
+      expect(decision).toMatchObject({ kind: 'needs_attention', reason: 'no_freight_in_window' })
+    })
+
+    it('the spend cap counts the whole order: a second leg cannot spend it again', () => {
+      // This leg projects 2600c (500 + 2x800 items + 500 freight); a sibling committed 5000c.
+      const decision = planFulfillment(withCommittedCents(5000, { spendCapPerOrderCents: 7500 }))
+      expect(decision).toMatchObject({ kind: 'needs_attention', reason: 'cap_exceeded' })
+      expect((decision as { detail: string }).detail).toContain('already committed')
+    })
+
+    it('the margin floor counts the whole order: two legs that jointly lose money are rejected', () => {
+      // Revenue 5000c, this leg 2600c, sibling 2000c -> real margin 800bps, floor 2000bps.
+      // Per-leg math would have seen 4800bps and passed.
+      const decision = planFulfillment(withCommittedCents(2000))
+      expect(decision).toMatchObject({ kind: 'needs_attention', reason: 'margin_below_floor' })
+    })
+
+    it('the wallet check does NOT add committedCents — the balance is re-read per leg', () => {
+      // A sibling leg committed 5000c, but the wallet was re-read AFTER that spend — so the 3000c
+      // balance already accounts for it and only this leg's own 2600c may be charged against it.
+      // Adding committedCents here would wrongly demand 7600c and park a placeable leg.
+      // (Revenue is raised so the whole-order margin check, which DOES count the sibling, passes.)
+      const base = withCommittedCents(5000, { spendCapPerOrderCents: 100_000, marginFloorBps: 0 })
+      const inputs = { ...base, order: { ...base.order, totalCents: 50_000 }, walletAvailableCents: 3000 }
+      expect(planFulfillment(inputs).kind).toBe('proceed')
+    })
+  })
+
 })

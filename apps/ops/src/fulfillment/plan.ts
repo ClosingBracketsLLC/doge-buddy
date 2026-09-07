@@ -18,9 +18,22 @@ export interface FulfillmentInputs {
     pausedForFunds: boolean
     spendCapPerOrderCents: number
     marginFloorBps: number
+    /** The window THIS leg's buyer was actually shown — the slowest `delivery_max_days` among the
+     *  leg's variants, falling back to the `fulfillment.promised_max_days` setting only for
+     *  pre-pivot rows that store no window. Never a site-wide promise (spec 2026-09-06 §5). */
     promisedMaxDays: number
   }
   mappings: Map<string, { supplierVariantId: string; supplierCostCents: number }> // key: variantGid
+  /** The warehouse THIS leg ships from ('US' | 'CN'). Gate 4 checks stock here and nowhere else,
+   *  and the caller must have quoted `freightOptions` from the same origin — a quote from anywhere
+   *  else prices a shipment we will never make. */
+  origin: string
+  /** Cents this customer order's OTHER legs have already committed (spec 2026-09-06 R3). Gates 6's
+   *  cap and margin checks add it to this leg's projected total: checking either per leg would let
+   *  a two-leg order spend the cap twice, or pass a margin floor the order as a whole fails.
+   *  Deliberately NOT added to the wallet check — the balance is re-read before each leg and
+   *  already reflects the earlier spend, so adding it again would double-count it. */
+  committedCents: number
   stock: Map<string, WarehouseStock[]> // key: supplierVariantId
   freightOptions: ShippingOption[]
   walletAvailableCents: number
@@ -29,7 +42,7 @@ export interface FulfillmentInputs {
 export type NeedsAttentionReason =
   | 'unmapped_item'
   | 'stockout'
-  | 'no_us_stock'
+  | 'no_origin_stock'
   | 'no_freight_in_window'
   | 'cap_exceeded'
   | 'wallet_insufficient'
@@ -56,7 +69,8 @@ const REQUEUE_DELAY_SECONDS = 300
  *   1. is_test        — test orders never reach the supplier, full stop.
  *   2. killswitch / fulfillment disabled / paused for funds — requeue, don't fail.
  *   3. unmapped line items — an item with no supplier mapping can't be sourced; needs a human.
- *   4. US stock        — every supplier variant needs enough US stock to cover total demand.
+ *   4. origin stock    — every supplier variant needs enough stock IN THE LEG'S OWN warehouse
+ *                        to cover total demand.
  *   5. freight window   — cheapest freight option that still lands within the promised window.
  *   6. money            — spend cap, then wallet balance, then margin floor, in that order.
  */
@@ -99,7 +113,8 @@ export function planFulfillment(inputs: FulfillmentInputs): Decision {
     })
   }
 
-  // Gate 4: US stock must cover total demand per supplier variant. Two line items that resolve
+  // Gate 4: stock in the LEG'S OWN warehouse must cover total demand per supplier variant. Two
+  // line items that resolve
   // to the same supplier variant share one stock pool, so needed quantity is summed across line
   // items before comparing to stock — checking each line item in isolation would miss the case
   // where each individually fits but their combined demand doesn't.
@@ -111,19 +126,19 @@ export function planFulfillment(inputs: FulfillmentInputs): Decision {
     )
   }
   for (const [supplierVariantId, needed] of neededBySupplierVariant) {
-    const usEntries = (inputs.stock.get(supplierVariantId) ?? []).filter((entry) => entry.countryCode === 'US')
-    if (usEntries.length === 0) {
+    const originEntries = (inputs.stock.get(supplierVariantId) ?? []).filter((entry) => entry.countryCode === inputs.origin)
+    if (originEntries.length === 0) {
       return {
         kind: 'needs_attention',
-        reason: 'no_us_stock',
-        detail: `No US stock entry for supplier variant ${supplierVariantId}`,
+        reason: 'no_origin_stock',
+        detail: `No ${inputs.origin} stock entry for supplier variant ${supplierVariantId}`,
       }
     }
-    if (!usEntries.some((entry) => entry.quantity >= needed)) {
+    if (!originEntries.some((entry) => entry.quantity >= needed)) {
       return {
         kind: 'needs_attention',
         reason: 'stockout',
-        detail: `Insufficient US stock for supplier variant ${supplierVariantId}: need ${needed}`,
+        detail: `Insufficient ${inputs.origin} stock for supplier variant ${supplierVariantId}: need ${needed}`,
       }
     }
   }
@@ -151,11 +166,16 @@ export function planFulfillment(inputs: FulfillmentInputs): Decision {
   const freightCents = chosenFreight.priceCents
   const projectedTotalCents = supplierItemsCents + freightCents
 
-  if (projectedTotalCents > inputs.settings.spendCapPerOrderCents) {
+  // Spec 2026-09-06 R3: the cap and the floor are promises about the whole CUSTOMER order, so both
+  // gate on this leg's cost PLUS what the order's other legs already committed. The wallet check
+  // between them stays per leg — its number was re-read after that spend.
+  const orderProjectedCents = inputs.committedCents + projectedTotalCents
+
+  if (orderProjectedCents > inputs.settings.spendCapPerOrderCents) {
     return {
       kind: 'needs_attention',
       reason: 'cap_exceeded',
-      detail: `Projected total ${projectedTotalCents}c exceeds spend cap ${inputs.settings.spendCapPerOrderCents}c`,
+      detail: `Order total ${orderProjectedCents}c (this leg ${projectedTotalCents}c + ${inputs.committedCents}c already committed) exceeds spend cap ${inputs.settings.spendCapPerOrderCents}c`,
     }
   }
   if (projectedTotalCents > inputs.walletAvailableCents) {
@@ -167,7 +187,7 @@ export function planFulfillment(inputs: FulfillmentInputs): Decision {
   }
   // Integer basis-point math, floored (never rounded), so a margin that's a hair under the floor
   // never gets rounded up into a false pass.
-  const marginBps = Math.floor(((inputs.order.totalCents - projectedTotalCents) * 10_000) / inputs.order.totalCents)
+  const marginBps = Math.floor(((inputs.order.totalCents - orderProjectedCents) * 10_000) / inputs.order.totalCents)
   if (marginBps < inputs.settings.marginFloorBps) {
     return {
       kind: 'needs_attention',
