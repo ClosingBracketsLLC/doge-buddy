@@ -10,6 +10,25 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-06-origin-aware-fulfillment-design.md`
 
+> **EXECUTED 2026-09-07** on branch `origin-aware-fulfillment`, all 8 tasks TDD. Suites: core 64/64,
+> db 9/9, supplier 124/125 (1 skipped), shopify-admin 79/79, ops 1644/1647 (the 3 known dev-DB
+> failures), storefront 97/97, `pnpm -r typecheck` clean. Four deviations from the plan as written,
+> each a correction the code demanded:
+> 1. **A second migration (0014).** Task 6 planned to re-derive a leg's promised window by joining
+>    back through the order's JSON line items. Instead the window is STAMPED on the leg at
+>    placement (`supplier_orders.promised_max_days`) — less code, no JSON gymnastics, and it judges
+>    the promise we actually made rather than one a later mapping edit could move.
+> 2. **The overdue sweep's pre-filter cutoff was inverted in the plan.** Casting the net with the
+>    LONGEST window misses rows with shorter promises; it must use the SHORTEST promise on record
+>    and judge each row against its own. Caught by the failing test, not by review.
+> 3. **`legsToProcess` — a resume guarantee the plan missed.** Legs are the union of what the
+>    current line items group into AND any leg that already has a row. Without it an order whose
+>    line items are empty or unreadable would leave an already-`created` row unconfirmed forever,
+>    with money spent and nothing to pick it up.
+> 4. **Tracking falls back to whole-fulfillment-order** when an order has one leg, or when a leg's
+>    items cannot be resolved — the pre-split behaviour, strictly better than refusing to send
+>    tracking for a parcel that really shipped.
+
 ## Global Constraints
 
 - Commands: `pnpm --filter @doge-buddy/<pkg> test`, `pnpm -r typecheck`. The dev Postgres must be up (`pnpm db:up`, port 5433) — DB-backed suites fail with `ECONNREFUSED 127.0.0.1:5433` otherwise.
@@ -34,7 +53,7 @@
 **Interfaces:**
 - Produces: `supplierVariantMappings.deliveryMaxDays: number | null`; `supplierOrders.warehouseCountry: string`; unique index `supplier_orders_order_supplier_origin_uq` on `(order_id, supplier, warehouse_country)`. Tasks 2–7 all read one of these.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `packages/db/test/schema.test.ts` (follow the file's existing `createDb`/cleanup idiom):
 
@@ -90,12 +109,12 @@ it('supplier_variant_mappings carries an origin and the window the buyer was sho
 })
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `pnpm --filter @doge-buddy/db test`
 Expected: FAIL — `deliveryMaxDays`/`warehouseCountry` are not properties of the insert type, and the two-leg insert violates `supplier_orders_order_supplier_uq`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `schema.ts`, in `supplierVariantMappings` right after `warehouseCountry`:
 
@@ -131,11 +150,11 @@ DATABASE_URL=postgres://doge:doge@localhost:5433/doge_buddy pnpm --filter @doge-
 
 Read the generated SQL before continuing: it must ADD both columns, DROP `supplier_orders_order_supplier_uq`, and CREATE the three-column index. If it drops and recreates a table, stop — that is data loss, and the fix is to adjust `schema.ts`, not the SQL.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `pnpm --filter @doge-buddy/db test` → PASS. Then `pnpm -r typecheck`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/db
@@ -154,7 +173,7 @@ git commit -m "feat(db): migration 0013 — origin on supplier_orders (one leg p
 - Consumes: `supplierVariantMappings.deliveryMaxDays` (Task 1); `NewListingPayload.shipsFrom` / `.deliveryMaxDays` (already `'US' | 'CN'` and a number since the pivot).
 - Produces: mapping rows carrying `warehouseCountry` + `deliveryMaxDays`. Tasks 3–6 read them. `readOriginStock(deps, supplierVariantId, origin)` replaces `readUsStock`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `apps/ops/test/proposal-apply.test.ts`, alongside the existing new_listing apply tests (reuse that file's proposal-seeding helper and its `applyProposal` call):
 
@@ -177,12 +196,12 @@ it('a CN listing records its origin and the window the buyer was shown', async (
 
 (`seedNewListingProposal` / `EXPECTED_SKU` = whatever that file already uses; pass the three payload fields through its overrides parameter rather than writing a new fixture.)
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `npx vitest run --root apps/ops test/proposal-apply.test.ts`
 Expected: FAIL — `warehouseCountry` is `'US'` (the column default) and `deliveryMaxDays` is null.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Rename and re-aim the stock read (the export is used by `catalog/backfill.ts` too — update that call site in the same edit):
 
@@ -230,11 +249,11 @@ At the `readOriginStock` call site inside the apply, pass `payload.shipsFrom`. I
     })
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `npx vitest run --root apps/ops test/proposal-apply.test.ts test/catalog-backfill.test.ts` → PASS. Then `pnpm --filter @doge-buddy/ops typecheck`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/proposals/apply-new-listing.ts apps/ops/src/catalog/backfill.ts apps/ops/test
@@ -254,7 +273,7 @@ git commit -m "feat(listing): record warehouse_country and the buyer's delivery 
 
 **Why this task is load-bearing:** without it a CN product syncs to quantity 0, Shopify shows it sold out, no order is ever created, and every other task in this plan is unreachable.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 import { originQuantity } from '../src/jobs/inventory-sync.ts'
@@ -291,12 +310,12 @@ it('syncs a CN mapping from its CN stock, not from US', async () => {
 })
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run --root apps/ops test/inventory-sync.test.ts`
 Expected: FAIL — `originQuantity` is not exported; the CN cycle test caches 0.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ts
 /** The quantity we are willing to promise Shopify for one variant: the LARGEST SINGLE warehouse
@@ -328,11 +347,11 @@ Delete `usQuantity` and update both call sites (this file's sync loop, and `appl
         const quantity = originQuantity(await deps.adapter.getVariantStock(row.supplierVariantId), locked.warehouseCountry)
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `npx vitest run --root apps/ops test/inventory-sync.test.ts test/proposal-apply.test.ts` → PASS. Then `pnpm --filter @doge-buddy/ops typecheck`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/jobs/inventory-sync.ts apps/ops/src/proposals/apply-new-listing.ts apps/ops/test
@@ -350,7 +369,7 @@ git commit -m "feat(inventory): sync each variant from its own warehouse (origin
 **Interfaces:**
 - Produces: `FulfillmentInputs.origin: string`, `FulfillmentInputs.committedCents: number`; `NeedsAttentionReason` gains `'no_origin_stock'` and loses `'no_us_stock'`. `settings.promisedMaxDays` keeps its name but now carries the LEG's window. Task 5 supplies all three.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 it('gate 4 checks stock in the leg’s own origin, both directions', () => {
@@ -418,12 +437,12 @@ it('the wallet check does NOT add committedCents (the balance is re-read per leg
 
 (`inputsFor(overrides)` = a small local builder over that file's existing valid-inputs fixture, deep-merging `order`/`settings`. If the file has no such builder, write one at the top of the describe from its current inline fixture — the neighbouring tests keep passing unchanged.)
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run --root apps/ops test/fulfillment-plan.test.ts`
 Expected: FAIL — `origin`/`committedCents` are not inputs, and `no_origin_stock` is not a reason.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `FulfillmentInputs`:
 
@@ -495,11 +514,11 @@ Gate 6's cap and margin (the wallet check between them is unchanged):
   const marginBps = Math.floor(((inputs.order.totalCents - orderCommittedCents) * 10_000) / inputs.order.totalCents)
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `npx vitest run --root apps/ops test/fulfillment-plan.test.ts` → PASS (expect type errors elsewhere until Task 5; that is the next task's job). Then `pnpm --filter @doge-buddy/ops typecheck` and note which call sites break — they should be exactly `run-place-order.ts` and its tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/fulfillment/plan.ts apps/ops/test/fulfillment-plan.test.ts
@@ -520,7 +539,7 @@ git commit -m "feat(fulfillment): planner gates on the leg's origin and window; 
 
 **This is the money path.** Every status write stays inside `applyTransition`; the resume switch keeps its exact semantics, it just runs per leg.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `apps/ops/test/fulfillment-place-order.test.ts` (reuse its `seedMapping`, `paidPayload` and deps builders; `seedMapping` gains a `warehouseCountry` option in this same edit):
 
@@ -630,12 +649,12 @@ and give `seedMapping` the option:
     deliveryMaxDays: opts.deliveryMaxDays ?? null,
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run --root apps/ops test/fulfillment-place-order.test.ts`
 Expected: FAIL — one leg is created, `fromCountry` is always `'US'`, and the second mapping's origin is ignored.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Keys and row claim become origin-scoped:
 
@@ -857,11 +876,11 @@ async function placeLeg(deps: PlaceOrderDeps, orderRow: OrderRow, shippingAddres
 
 Keep the `isTest` shell guard and the shipping-address guard where they are — both are order-level and must run before any leg exists.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `npx vitest run --root apps/ops test/fulfillment-place-order.test.ts test/fulfillment-plan.test.ts` → PASS. Then the whole fulfillment surface, which has E2E suites that drive this executor through pg-boss: `npx vitest run --root apps/ops test/fulfillment-*.test.ts test/e2e-*.test.ts`. Then `pnpm --filter @doge-buddy/ops typecheck`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/fulfillment/run-place-order.ts apps/ops/test
@@ -879,7 +898,7 @@ git commit -m "feat(fulfillment): split a mixed-origin order into one supplier o
 **Interfaces:**
 - Consumes: `supplier_variant_mappings.delivery_max_days` (Tasks 1–2), `supplier_orders.warehouse_country` (Task 1).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 it('a 14-day CN leg is not overdue on day 8, and a 7-day US leg is', async () => {
@@ -907,12 +926,12 @@ it('the alert names the window that was actually breached', async () => {
 
 (`seedLegPaidDaysAgo` / `reloadLeg` = small helpers over that file's existing seeding; the mapping's `deliveryMaxDays` must be seeded on a variant that the leg's order actually contains.)
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run --root apps/ops test/fulfillment-reconcile.test.ts`
 Expected: FAIL — the CN leg is parked on day 8 against the global 7.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 The single-cutoff query cannot express a per-row window, so select the candidates and their windows, then filter in code (the sweep is already a per-row loop with per-row try/catch, so this changes shape, not safety):
 
@@ -977,11 +996,11 @@ async function legPromisedMaxDays(db: Db, supplierOrder: typeof supplierOrders.$
 
 **Implementer's note:** `orders.lineItems` is stored JSON, not a table, so the join above is written against however this file already resolves an order's variants (see `run-place-order.ts`'s `extractLineItems` + `loadMappings` pair — reuse them rather than inventing a join if no relational path exists; a small in-code lookup is fine and clearer than SQL gymnastics over JSON).
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `npx vitest run --root apps/ops test/fulfillment-reconcile.test.ts` → PASS. Then `pnpm --filter @doge-buddy/ops typecheck`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/ops/src/fulfillment/run-reconcile.ts apps/ops/test/fulfillment-reconcile.test.ts
@@ -1003,7 +1022,7 @@ git commit -m "feat(reconcile): overdue measured against each leg's own promised
 
 **Why:** today `fulfillmentCreate` fulfils a whole Shopify fulfillment order with no line-item selection. On a split order leg 1 would close it, and leg 2 would find a `CLOSED` node, trip `hasSuspiciousClosedNode`, and be reported as a suspected duplicate — a leg that shipped perfectly well, parked and never tracked.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `packages/shopify-admin/test/operations.test.ts`:
 
@@ -1055,12 +1074,12 @@ it('each leg fulfils only its own line items, and the second leg is not a suspec
 })
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run --root packages/shopify-admin` and `npx vitest run --root apps/ops test/fulfillment-sync-tracking.test.ts`
 Expected: FAIL — the query returns no line items and the mutation takes no selection.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Query:
 
@@ -1134,11 +1153,11 @@ In `createFulfillment`, resolve the leg's line items before calling, and only tr
 
 `hasSuspiciousClosedNode` is now redundant for split orders but stays for the case where NO node is creatable at all; keep it, and let the emptier `legLineItems` check above run first.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `npx vitest run --root packages/shopify-admin` and `npx vitest run --root apps/ops test/fulfillment-sync-tracking.test.ts` → PASS. Then `pnpm -r typecheck`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/shopify-admin apps/ops/src/fulfillment/run-sync-tracking.ts apps/ops/test
@@ -1152,7 +1171,7 @@ git commit -m "feat(tracking): one Shopify fulfillment per leg, scoped to that l
 **Files:**
 - Modify: `docs/ROADMAP.md` (Phase A3b), `docs/OWNER-CHECKLIST.md` (the blocking CN item)
 
-- [ ] **Step 1: Full suites**
+- [x] **Step 1: Full suites**
 
 ```bash
 pnpm --filter @doge-buddy/core test
@@ -1165,13 +1184,13 @@ pnpm -r typecheck
 
 Expected: green except the three known dev-DB failures (`admin-dashboard` 8 and 13, `scoring-weekly-digest` freshness).
 
-- [ ] **Step 2: Docs**
+- [x] **Step 2: Docs**
 
 - `OWNER-CHECKLIST.md`: the blocking CN item loses its half about `run-place-order.ts` — that half is now built. What REMAINS blocking is CJ's written DDP/duty/IOR answers, confirmed empirically on the canary. Say so explicitly rather than deleting the item.
 - `ROADMAP.md` Phase A3b: origin-aware fulfillment is built; the CN lane is gated on the duty verification alone. Link this plan and its spec.
 - Note the new migration in the deploy path: **0013 must be applied to Railway BEFORE the code that reads the new columns is deployed** — the same strict order as 0008/0009 (a redeploy first means every place-order job throws on a missing column while `/healthz` stays green).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/
