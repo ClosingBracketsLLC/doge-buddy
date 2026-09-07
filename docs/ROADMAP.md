@@ -48,10 +48,19 @@ is the carrier's real quote, never the agent's guess); nothing over $100 lists
 (`sourcing.max_price_cents`); and no blanket "3–7 day" promise survives anywhere — policy copy,
 trust strips, product pages and product cards all show each item's own window, with the
 legally-required late-order cancel right written into the returns policy.
-**Two things gate the first CN SALE, both in `OWNER-CHECKLIST.md` §Now:** CJ's written DDP/duty/IOR
-answers confirmed on the canary, and the order-time fulfilment path (`run-place-order.ts`), which
-still quotes and places every supplier order from US. Until both clear, treat CN proposals as
-"not yet" on /admin. The spec's §5 comfort system is part 2 and unbuilt.
+**A3c. Origin-aware fulfillment — BUILT 2026-09-07 [C].** Spec
+`superpowers/specs/2026-09-06-origin-aware-fulfillment-design.md`, plan
+`superpowers/plans/2026-09-06-origin-aware-fulfillment.md`. The other half of A3b: a CN product is
+now not just listable but SELLABLE. Inventory syncs from the product's own warehouse (without it a
+CN product publishes as sold out); the planner checks stock, freight and the promised window per
+warehouse; a mixed-origin cart splits into one supplier order per warehouse, each placed from its
+own origin and tracked as its own Shopify fulfillment; a leg that can't ship parks while its
+sibling goes out; the spend cap and margin floor count the whole customer order across legs; and
+overdue is measured per leg. Migrations **0013 + 0014** must be applied BEFORE the code deploys.
+
+**The first CN SALE is now gated on ONE thing** (`OWNER-CHECKLIST.md` §Now): CJ's written
+DDP/duty/IOR answers, confirmed empirically on the canary. Until that clears, treat CN proposals as
+"not yet" on /admin. The affordable-catalog spec's §5 comfort system is part 2 and unbuilt.
 
 **A4. Housekeeping [R].** Dev-DB hygiene SQL (4 known-benign test failures until run) ·
 `workflow.deprecation.mode` back to `manual` · cancel Zendrop Plus + remove `ZENDROP_ACCESS_TOKEN`

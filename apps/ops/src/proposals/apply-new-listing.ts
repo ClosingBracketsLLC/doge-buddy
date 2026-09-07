@@ -2,7 +2,7 @@ import { categoryByTag, categoryTagValue, centsToUsd, NewListingPayloadSchema } 
 import { auditLog, products, productVariants, supplierVariantMappings } from '@doge-buddy/db'
 import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { eq, sql } from 'drizzle-orm'
-import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts, usQuantity } from '../jobs/inventory-sync.ts'
+import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts, originQuantity } from '../jobs/inventory-sync.ts'
 import { findClaimViolations } from '../sourcing/guards.ts'
 import { buildSupplierReviews } from './supplier-reviews.ts'
 import { applyProposalTransition } from './transitions.ts'
@@ -62,7 +62,7 @@ export function seoDescription(descriptionHtml: string): string {
     .slice(0, SEO_DESCRIPTION_MAX)
 }
 
-/** The two deps `readUsStock` below actually uses — see its docstring for why it is a structural
+/** The two deps `readOriginStock` below actually uses — see its docstring for why it is a structural
  * subset of `ApplyProposalDeps` rather than the interface itself. */
 export interface StockReadDeps {
   adapter: Pick<SupplierAdapter, 'getVariantStock'>
@@ -70,9 +70,10 @@ export interface StockReadDeps {
 }
 
 /**
- * `usQuantity` (the LARGEST SINGLE US warehouse, floored at 0 — see its doc comment in
- * `jobs/inventory-sync.ts`, which now owns it) over a live CJ read, or `null` when the read itself
- * failed.
+ * `originQuantity` (the LARGEST SINGLE warehouse row in the product's OWN origin, floored at 0 —
+ * see its doc comment in `jobs/inventory-sync.ts`, which owns it) over a live CJ read, or `null`
+ * when the read itself failed. Origin-aware since the 2026-09-03 pivot: reading a CN product's US
+ * rows returns 0, i.e. a brand-new listing published as "sold out".
  *
  * `null` is NOT the same as 0 and the two must not be conflated. Shopify's brand-new listing still
  * gets 0 for a failed read (safe: it under-sells, and the sync job corrects it on its next pass) —
@@ -87,13 +88,18 @@ export interface StockReadDeps {
  * interface with. `ApplyProposalDeps` structurally satisfies `StockReadDeps`, so the call sites
  * below are unchanged.
  */
-export async function readUsStock(deps: StockReadDeps, supplierVariantId: string): Promise<number | null> {
+export async function readOriginStock(
+  deps: StockReadDeps,
+  supplierVariantId: string,
+  origin: string,
+): Promise<number | null> {
   try {
-    return usQuantity(await deps.adapter.getVariantStock(supplierVariantId))
+    return originQuantity(await deps.adapter.getVariantStock(supplierVariantId), origin)
   } catch (err) {
     await deps
       .alert('warning', 'listing_stock_read_failed', {
         supplierVariantId,
+        origin,
         error: err instanceof Error ? err.message : String(err),
       })
       .catch(() => {})
@@ -176,12 +182,12 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
    * nothing cached to match, always pushes.
    */
   const stockCheckedAt = new Date()
-  // `null` = the read failed (see `readUsStock`); 0 = CJ genuinely has none.
+  // `null` = the read failed (see `readOriginStock`); 0 = CJ genuinely has none.
   const stockBySku = new Map<string, number | null>()
   let variantGids: { id: string; sku?: string; inventoryItemId: string }[] = []
   if (!productGid) {
     for (const v of payload.variants) {
-      stockBySku.set(v.sku, await readUsStock(deps, v.supplierVariantId))
+      stockBySku.set(v.sku, await readOriginStock(deps, v.supplierVariantId, payload.shipsFrom))
     }
     // The location every `inventoryQuantities` entry below is addressed to. Resolved lazily, and
     // only on this branch: a resumed apply that finds its product already created never touches
@@ -363,7 +369,7 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     // `last_known_stock` is worse than the new reading. But only a reading THIS RUN ALSO PUSHED TO
     // SHOPIFY counts, which is why there are exactly two ways for `observed` to be null here and
     // both write the pair as null:
-    //   - the create path's read failed (`readUsStock` returned null) — Shopify got 0, and "CJ was
+    //   - the create path's read failed (`readOriginStock` returned null) — Shopify got 0, and "CJ was
     //     unreachable for 30 seconds" is not an observation that the warehouse is empty;
     //   - this is the RESUME path, which by step 2's ruling never reads CJ at all — there is no
     //     `productSet` on this path, so any number cached here would be one Shopify never got.
@@ -376,10 +382,19 @@ export async function applyNewListing(deps: ApplyProposalDeps, row: ProposalRow)
     await db.insert(supplierVariantMappings).values({
       variantId: variantRow!.id, supplier: v.supplier,
       supplierProductId: v.supplierProductId, supplierVariantId: v.supplierVariantId,
+      // The origin and the window the BUYER was shown, from the approved payload — every gate
+      // after this point (inventory sync, the fulfillment planner, the overdue sweep) reads them
+      // instead of assuming US and a site-wide 7 days.
+      warehouseCountry: payload.shipsFrom, deliveryMaxDays: payload.deliveryMaxDays,
       lastKnownStock: observed, stockCheckedAt: observed === null ? null : stockCheckedAt,
     }).onConflictDoUpdate({
       target: [supplierVariantMappings.variantId, supplierVariantMappings.supplier],
       set: {
+        // Unlike the supplier ids above (first-write-wins identity), these two are re-asserted on
+        // conflict: a re-apply of an edited listing must be able to correct an origin or a window,
+        // and a stale one would mis-route real money at order time.
+        warehouseCountry: sql`excluded.warehouse_country`,
+        deliveryMaxDays: sql`excluded.delivery_max_days`,
         lastKnownStock: sql`coalesce(excluded.last_known_stock, ${supplierVariantMappings.lastKnownStock})`,
         stockCheckedAt: sql`coalesce(excluded.stock_checked_at, ${supplierVariantMappings.stockCheckedAt})`,
       },

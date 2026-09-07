@@ -111,26 +111,21 @@ export interface InventorySyncResult {
 }
 
 /**
- * The sellable quantity for one supplier variant: the LARGEST SINGLE US warehouse, floored at 0.
+ * The quantity we are willing to promise Shopify for one variant: the LARGEST SINGLE warehouse
+ * row in the product's OWN origin, floored at 0 — never the sum of warehouses, because the
+ * fulfillment planner can only draw from one warehouse per order (gate 4 applies the same rule).
  *
- * Not the sum, and this is the whole subtlety. `fulfillment/plan.ts`'s Gate 4 refuses an order
- * unless ONE US warehouse entry covers the entire needed quantity
- * (`usEntries.some((entry) => entry.quantity >= needed)`) — CJ ships an order from a single
- * warehouse, not by splitting it. Advertising 4 + 3 = 7 units across two warehouses would
- * therefore promise stock that the fulfillment pipeline will later refuse to ship: an oversell
- * that surfaces as a `stockout` needs-attention *after* the customer has paid.
- *
- * US-only for a separate reason: a listing's own `ships_from`/delivery metafields promise a
- * US-warehouse dispatch, so CN stock is not stock we can sell against without breaking that
- * promise.
+ * Origin-aware since the affordable-catalog pivot (2026-09-03). Reading a CN product's US rows
+ * returns 0, which publishes "sold out" to the storefront for a product CJ is holding — and no
+ * later cycle corrects it, because 0 is a perfectly stable answer to the wrong question.
  *
  * Lives here rather than in the listing worker (which is where it was born, and which now imports
  * it from here): the number this job pushes on every later pass has to mean exactly the same thing
  * as the number the listing was born with, and the sync is the one that keeps saying it.
  */
-export function usQuantity(stock: WarehouseStock[]): number {
-  const us = stock.filter((w) => w.countryCode === 'US').map((w) => w.quantity)
-  return us.length === 0 ? 0 : Math.max(0, ...us)
+export function originQuantity(stock: WarehouseStock[], origin: string): number {
+  const rows = stock.filter((w) => w.countryCode === origin).map((w) => w.quantity)
+  return rows.length === 0 ? 0 : Math.max(0, ...rows)
 }
 
 /**
@@ -183,7 +178,8 @@ async function auditVariantFailure(db: Db, variantId: string, err: unknown): Pro
  * ordered LEAST-RECENTLY-CHECKED FIRST so that bound rotates: a variant deferred by the cap has the
  * oldest `stock_checked_at` next cycle and is served first, so no tail can starve.
  *
- * **Per variant.** Read CJ stock, take `usQuantity`, and compare with `last_known_stock`:
+ * **Per variant.** Read CJ stock, take `originQuantity` for the mapping's own warehouse, and
+ * compare with `last_known_stock`:
  * unchanged means NO Shopify call at all (the common case by far — most variants don't move in six
  * hours) but still a fresh `stock_checked_at`, so "we looked" and "it changed" stay separable.
  * Changed means one `inventorySetQuantities` setting the `available` quantity at the store's one
@@ -377,7 +373,10 @@ export async function executeInventorySync(
        */
       const outcome = await db.transaction(async (tx) => {
         const [locked] = await tx
-          .select({ lastKnownStock: supplierVariantMappings.lastKnownStock })
+          .select({
+            lastKnownStock: supplierVariantMappings.lastKnownStock,
+            warehouseCountry: supplierVariantMappings.warehouseCountry,
+          })
           .from(supplierVariantMappings)
           .where(eq(supplierVariantMappings.id, row.mappingId))
           .limit(1)
@@ -387,7 +386,7 @@ export async function executeInventorySync(
         // unsyncable rows rather than inventing a failure.
         if (!locked) return 'gone' as const
 
-        const quantity = usQuantity(await deps.adapter.getVariantStock(row.supplierVariantId))
+        const quantity = originQuantity(await deps.adapter.getVariantStock(row.supplierVariantId), locked.warehouseCountry)
         if (quantity === locked.lastKnownStock) {
           // Nothing to push, but the observation is still worth recording: `stock_checked_at` is
           // how an operator tells "CJ says 4" from "nobody has looked since Tuesday".

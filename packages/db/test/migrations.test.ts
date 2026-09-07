@@ -65,6 +65,52 @@ describe('migrations', () => {
     await c.end()
   })
 
+  it('allows two legs of one order (migration 0013) and still rejects a duplicate leg', async () => {
+    const c = new Client({ connectionString: testUrl })
+    await c.connect()
+    const { rows: orderRows } = await c.query(
+      `INSERT INTO orders (shopify_order_gid, is_test, email) VALUES ('gid://shopify/Order/legs', false, 'x@y.z') RETURNING id`,
+    )
+    const orderId = orderRows[0].id
+    // A mixed-origin cart is one supplier order per warehouse — the split the affordable-catalog
+    // pivot needs, and the reason the unique key carries the warehouse.
+    for (const origin of ['US', 'CN']) {
+      await c.query(
+        `INSERT INTO supplier_orders (order_id, supplier, idempotency_key, status, warehouse_country)
+         VALUES ($1, 'cj', $2, 'pending', $3)`,
+        [orderId, `db-legs-${origin}`, origin],
+      )
+    }
+    const { rows: legs } = await c.query(`SELECT warehouse_country FROM supplier_orders WHERE order_id = $1 ORDER BY 1`, [orderId])
+    expect(legs.map((r) => r.warehouse_country)).toEqual(['CN', 'US'])
+
+    // The same (order, supplier, warehouse) is still exactly one row.
+    await expect(
+      c.query(
+        `INSERT INTO supplier_orders (order_id, supplier, idempotency_key, status, warehouse_country)
+         VALUES ($1, 'cj', 'db-legs-dup', 'pending', 'US')`,
+        [orderId],
+      ),
+    ).rejects.toThrow(/unique|duplicate/i)
+    await c.end()
+  })
+
+  it('supplier_variant_mappings carries the origin and the buyer window (migration 0013)', async () => {
+    const c = new Client({ connectionString: testUrl })
+    await c.connect()
+    const res = await c.query(
+      `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'supplier_variant_mappings'
+       AND column_name IN ('warehouse_country', 'delivery_max_days') ORDER BY column_name`,
+    )
+    await c.end()
+    expect(res.rows).toEqual([
+      // Nullable: every pre-pivot row has no stored window and falls back to the setting.
+      { column_name: 'delivery_max_days', data_type: 'integer', is_nullable: 'YES', column_default: null },
+      { column_name: 'warehouse_country', data_type: 'text', is_nullable: 'NO', column_default: "'US'::text" },
+    ])
+  })
+
   it('bumps updated_at on a drizzle update via $onUpdate', async () => {
     const { db, pool } = createDb(testUrl)
     try {

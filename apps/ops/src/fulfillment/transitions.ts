@@ -72,6 +72,7 @@ export type SupplierOrderPatch = Partial<{
   productAmountCents: number
   postageAmountCents: number
   totalAmountCents: number
+  promisedMaxDays: number
   trackingNumber: string
   lastError: string
   paidAt: Date

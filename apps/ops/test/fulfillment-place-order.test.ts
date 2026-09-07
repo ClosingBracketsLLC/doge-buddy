@@ -122,6 +122,8 @@ describe('executePlaceOrder', () => {
     variantGid: string
     supplierVariantId: string
     supplierCostCents: number
+    warehouseCountry?: string
+    deliveryMaxDays?: number
   }): Promise<void> {
     const [product] = await db.insert(products).values({ title: 'Test product', status: 'active' }).returning({ id: products.id })
     const [variant] = await db
@@ -139,8 +141,19 @@ describe('executePlaceOrder', () => {
       supplier: 'mock',
       supplierProductId: 'mock-p1',
       supplierVariantId: opts.supplierVariantId,
-      warehouseCountry: 'US',
+      warehouseCountry: opts.warehouseCountry ?? 'US',
+      deliveryMaxDays: opts.deliveryMaxDays ?? null,
     })
+  }
+
+  /** Every leg of an order, ordered by warehouse so assertions are stable. A mixed-origin cart
+   *  produces one row per warehouse since the 2026-09-06 split. */
+  async function loadSupplierOrderLegs(orderRowId: string) {
+    return db
+      .select()
+      .from(supplierOrders)
+      .where(and(eq(supplierOrders.orderId, orderRowId), eq(supplierOrders.supplier, 'mock')))
+      .orderBy(supplierOrders.warehouseCountry)
   }
 
   async function loadSupplierOrder(orderRowId: string) {
@@ -219,7 +232,10 @@ describe('executePlaceOrder', () => {
     expect(row?.productAmountCents).toBe(620)
     expect(row?.postageAmountCents).toBe(499)
     expect(row?.totalAmountCents).toBe(1119)
-    expect(row?.idempotencyKey).toBe(`db-${orderGid.replace(/\D/g, '')}`)
+    // The key carries the leg's warehouse since the 2026-09-06 split: two legs of one customer
+    // order are two independent CJ orders and must not share a key.
+    expect(row?.idempotencyKey).toBe(`db-${orderGid.replace(/\D/g, '')}-US`)
+    expect(row?.warehouseCountry).toBe('US')
 
     expect(enqueue).toHaveBeenCalledTimes(1)
     expect(enqueue).toHaveBeenCalledWith(
@@ -554,4 +570,175 @@ describe('executePlaceOrder', () => {
     const row = await loadSupplierOrder(upsertedOrderRow!.id)
     expect(row?.status).toBe('confirmed')
   })
+
+  // --- the origin split (spec 2026-09-06) ---------------------------------------------------
+  describe('mixed-origin orders split into one supplier order per warehouse', () => {
+    /** A US variant and a CN variant, each mapped to its own warehouse. */
+    async function seedMixedOrder(opts: { totalCents?: number; cnDeliveryMaxDays?: number } = {}) {
+      const usVariantId = nextId()
+      const cnVariantId = nextId()
+      await seedMapping({ variantGid: variantGidFor(usVariantId), supplierVariantId: 'mock-v1', supplierCostCents: 620, warehouseCountry: 'US', deliveryMaxDays: 7 })
+      await seedMapping({ variantGid: variantGidFor(cnVariantId), supplierVariantId: 'mock-v3', supplierCostCents: 480, warehouseCountry: 'CN', deliveryMaxDays: opts.cnDeliveryMaxDays ?? 14 })
+      const seeded = await seedOrder({
+        totalCents: opts.totalCents ?? 20_000,
+        lineItems: [
+          { variantId: usVariantId, quantity: 1 },
+          { variantId: cnVariantId, quantity: 1 },
+        ],
+      })
+      return seeded
+    }
+
+    it('places one supplier order per warehouse, each quoted and ordered from its own origin', async () => {
+      const { orderGid, orderRowId } = await seedMixedOrder()
+      const adapter = new MockSupplierAdapter()
+      const spies = spyAdapter(adapter)
+      const { deps } = makeDeps(adapter)
+
+      await executePlaceOrder(deps, orderGid)
+
+      const legs = await loadSupplierOrderLegs(orderRowId)
+      expect(legs.map((r) => r.warehouseCountry)).toEqual(['CN', 'US'])
+      expect(legs.every((r) => r.status === 'confirmed')).toBe(true)
+      // Two CJ orders, two distinct keys — which is what two shipments from two warehouses are.
+      expect(new Set(legs.map((r) => r.idempotencyKey)).size).toBe(2)
+      expect(legs.map((r) => r.idempotencyKey).sort()).toEqual([
+        `db-${orderGid.replace(/\D/g, '')}-CN`,
+        `db-${orderGid.replace(/\D/g, '')}-US`,
+      ])
+
+      const quotedOrigins = (spies.quoteShipping.mock.calls as [{ fromCountry: string }][]).map(([q]) => q.fromCountry)
+      expect(quotedOrigins.sort()).toEqual(['CN', 'US'])
+      const placedOrigins = (spies.placeOrder.mock.calls as [{ fromCountry: string }][]).map(([r]) => r.fromCountry)
+      expect(placedOrigins.sort()).toEqual(['CN', 'US'])
+      // The wallet is re-read per leg (spec R4): leg 1's spend has to be visible to leg 2.
+      expect(spies.getBalance).toHaveBeenCalledTimes(2)
+    })
+
+    it('a leg that cannot place does not stop its sibling (spec R2)', async () => {
+      const { orderGid, orderRowId } = await seedMixedOrder()
+      // No CN stock anywhere: the CN leg fails gate 4 while the US leg is perfectly placeable.
+      const adapter = new MockSupplierAdapter()
+      vi.spyOn(adapter, 'getVariantStock').mockResolvedValue([{ countryCode: 'US', quantity: 50, verified: true }])
+      const { deps } = makeDeps(adapter)
+
+      await executePlaceOrder(deps, orderGid)
+
+      const legs = await loadSupplierOrderLegs(orderRowId)
+      const cn = legs.find((r) => r.warehouseCountry === 'CN')!
+      const us = legs.find((r) => r.warehouseCountry === 'US')!
+      expect(cn.status).toBe('needs_attention')
+      expect(cn.lastError).toContain('no_origin_stock')
+      expect(us.status).toBe('confirmed')
+      expect(us.supplierOrderId).not.toBeNull()
+    })
+
+    it('re-running after a failure between legs does not re-place the leg that succeeded', async () => {
+      const { orderGid, orderRowId } = await seedMixedOrder()
+      const adapter = new MockSupplierAdapter()
+      const real = adapter.placeOrder.bind(adapter)
+      // The CN leg (second, since US is placed first) throws on the first run — the crash-between-
+      // legs case, which must never re-place the leg that already succeeded.
+      const placeSpy = vi
+        .spyOn(adapter, 'placeOrder')
+        .mockImplementation(async (req: Parameters<MockSupplierAdapter['placeOrder']>[0]) => {
+          if (req.fromCountry === 'CN') throw new Error('CJ 500 on the CN leg')
+          return real(req)
+        })
+      const { deps } = makeDeps(adapter)
+
+      await expect(executePlaceOrder(deps, orderGid)).rejects.toThrow()
+      const originsBefore = placeSpy.mock.calls.map(([r]) => r.fromCountry)
+      expect(originsBefore.filter((o) => o === 'US')).toHaveLength(1)
+
+      // Second run, adapter healthy: the US leg resumes past placement and only CN is placed.
+      placeSpy.mockImplementation(real)
+      placeSpy.mockClear()
+      await executePlaceOrder(deps, orderGid)
+
+      expect(placeSpy.mock.calls.map(([r]) => r.fromCountry)).toEqual(['CN'])
+      const legs = await loadSupplierOrderLegs(orderRowId)
+      expect(legs.every((r) => r.status === 'confirmed')).toBe(true)
+    })
+
+    it('the spend cap counts both legs: the second leg parks rather than spending it again', async () => {
+      const { orderGid, orderRowId } = await seedMixedOrder()
+      const settings = createSettings(db)
+      const original = await settings.get('fulfillment.spend_cap_per_order_cents')
+      // Each leg costs ~1100-1200c; a 1500c cap fits the first and not both.
+      await settings.set('fulfillment.spend_cap_per_order_cents', 1500)
+      try {
+        const adapter = new MockSupplierAdapter()
+        const { deps } = makeDeps(adapter)
+        await executePlaceOrder(deps, orderGid)
+
+        const legs = await loadSupplierOrderLegs(orderRowId)
+        expect(legs.find((r) => r.warehouseCountry === 'US')!.status).toBe('confirmed')
+        const cn = legs.find((r) => r.warehouseCountry === 'CN')!
+        expect(cn.status).toBe('needs_attention')
+        expect(cn.lastError).toContain('cap_exceeded')
+      } finally {
+        await settings.set('fulfillment.spend_cap_per_order_cents', original)
+      }
+    })
+
+    it("a leg's freight is judged against ITS OWN window, not a site-wide 7 days", async () => {
+      // The CN leg's buyer was shown 14 days. The only CN freight option takes 12 — inside the
+      // buyer's window, outside the global `fulfillment.promised_max_days` of 7.
+      const { orderGid, orderRowId } = await seedMixedOrder()
+      const adapter = new MockSupplierAdapter()
+      vi.spyOn(adapter, 'quoteShipping').mockImplementation(async (q) =>
+        q.fromCountry === 'CN'
+          ? [{ name: 'CJPacket', priceCents: 494, minDays: 7, maxDays: 12 }]
+          : [{ name: 'Standard', priceCents: 499, minDays: 3, maxDays: 7 }],
+      )
+      const { deps } = makeDeps(adapter)
+
+      await executePlaceOrder(deps, orderGid)
+
+      const legs = await loadSupplierOrderLegs(orderRowId)
+      expect(legs.find((r) => r.warehouseCountry === 'CN')!.status).toBe('confirmed')
+      expect(legs.find((r) => r.warehouseCountry === 'CN')!.logisticName).toBe('CJPacket')
+    })
+
+    it('an unmapped line item parks the order without placing any leg', async () => {
+      const mappedVariantId = nextId()
+      await seedMapping({ variantGid: variantGidFor(mappedVariantId), supplierVariantId: 'mock-v1', supplierCostCents: 620 })
+      const { orderGid, orderRowId } = await seedOrder({
+        totalCents: 20_000,
+        lineItems: [
+          { variantId: mappedVariantId, quantity: 1 },
+          { variantId: nextId(), quantity: 1 }, // no mapping row at all
+        ],
+      })
+      const adapter = new MockSupplierAdapter()
+      const spies = spyAdapter(adapter)
+      const { deps } = makeDeps(adapter)
+
+      await executePlaceOrder(deps, orderGid)
+
+      const legs = await loadSupplierOrderLegs(orderRowId)
+      expect(legs).toHaveLength(1)
+      expect(legs[0]!.status).toBe('needs_attention')
+      expect(legs[0]!.lastError).toContain('unmapped_item')
+      // Nothing is placed: an unmapped item means we cannot resolve what the customer bought,
+      // and spending on the half we DO understand is the wrong call on incomplete information.
+      expect(spies.placeOrder).not.toHaveBeenCalled()
+    })
+
+    it('a single-origin order still produces exactly one leg (unchanged behaviour)', async () => {
+      const variantId = nextId()
+      await seedMapping({ variantGid: variantGidFor(variantId), supplierVariantId: 'mock-v1', supplierCostCents: 620 })
+      const { orderGid, orderRowId } = await seedOrder({ totalCents: 20_000, lineItems: [{ variantId, quantity: 1 }] })
+      const { deps } = makeDeps(new MockSupplierAdapter())
+
+      await executePlaceOrder(deps, orderGid)
+
+      const legs = await loadSupplierOrderLegs(orderRowId)
+      expect(legs).toHaveLength(1)
+      expect(legs[0]!.warehouseCountry).toBe('US')
+      expect(legs[0]!.status).toBe('confirmed')
+    })
+  })
+
 })

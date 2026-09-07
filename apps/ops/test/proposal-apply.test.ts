@@ -5,7 +5,7 @@ import { eq, inArray } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SendOpts } from '../src/fulfillment/types.ts'
 import {
-  executeInventorySync, INVENTORY_SYNC_QUEUE, type InventorySyncShopifyOps, usQuantity,
+  executeInventorySync, INVENTORY_SYNC_QUEUE, type InventorySyncShopifyOps, originQuantity,
 } from '../src/jobs/inventory-sync.ts'
 import { resetLocationCache } from '../src/proposals/apply-new-listing.ts'
 import {
@@ -1072,19 +1072,52 @@ describe('executeApplyProposal / deadLetterApplyProposal', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // 19. The listable quantity is the largest SINGLE US warehouse, never the sum — review round 1.
-  // `fulfillment/plan.ts`'s Gate 4 needs one warehouse to cover the whole order, so a summed
-  // quantity is stock the fulfillment pipeline will refuse to ship.
+  // 18b. A CN listing records the origin and the window the BUYER was shown, so every gate after
+  // this point (inventory sync, the fulfillment planner, the overdue sweep) reads real values
+  // instead of assuming US and a site-wide 7 days (affordable-catalog pivot, 2026-09-03).
   // ---------------------------------------------------------------------------
-  it('19. usQuantity takes the largest single US warehouse, ignores non-US, floors at 0', () => {
-    expect(usQuantity(fixtureStock())).toBe(4)
-    expect(usQuantity([])).toBe(0)
-    expect(usQuantity([{ countryCode: 'CN', quantity: 99, verified: true }])).toBe(0)
-    expect(usQuantity([{ countryCode: 'US', quantity: -5, verified: true }])).toBe(0)
-    expect(usQuantity([
+  it('18b. a CN listing stores warehouse_country CN and its own delivery window', async () => {
+    const payload = { ...newListingPayload(), shipsFrom: 'CN', deliveryMinDays: 7, deliveryMaxDays: 14 }
+    const row = await seedProposal({ status: 'approved', payload })
+    const shopify = fakeShopify()
+    const alert = vi.fn(async () => {})
+    // CJ holds this one in China only — reading US would have listed it at 0.
+    const adapter = fakeAdapter({
+      getVariantStock: async () => [{ countryCode: 'CN', quantity: 12, verified: true }],
+    })
+
+    await executeApplyProposal({ db, alert, shopify, adapter, ...baseDeps() }, row.id)
+
+    const productRow = await loadProduct(row.id)
+    createdProductIds.push(productRow!.id)
+    const [variantRow] = await db.select().from(productVariants).where(eq(productVariants.productId, productRow!.id))
+    const [mapping] = await db
+      .select()
+      .from(supplierVariantMappings)
+      .where(eq(supplierVariantMappings.variantId, variantRow!.id))
+
+    expect(mapping!.warehouseCountry).toBe('CN')
+    expect(mapping!.deliveryMaxDays).toBe(14)
+    expect(mapping!.lastKnownStock).toBe(12)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 19. The listable quantity is the largest SINGLE warehouse in the product's OWN origin, never
+  // the sum — review round 1, made origin-aware by the 2026-09-03 pivot. `fulfillment/plan.ts`'s
+  // Gate 4 needs one warehouse to cover the whole order, so a summed quantity is stock the
+  // fulfillment pipeline will refuse to ship.
+  // ---------------------------------------------------------------------------
+  it('19. originQuantity takes the largest single row in the given origin, ignores others, floors at 0', () => {
+    expect(originQuantity(fixtureStock(), 'US')).toBe(4)
+    expect(originQuantity([], 'US')).toBe(0)
+    expect(originQuantity([{ countryCode: 'CN', quantity: 99, verified: true }], 'US')).toBe(0)
+    expect(originQuantity([{ countryCode: 'US', quantity: -5, verified: true }], 'US')).toBe(0)
+    expect(originQuantity([
       { countryCode: 'US', quantity: 2, verified: true },
       { countryCode: 'US', quantity: 11, verified: false },
-    ])).toBe(11)
+    ], 'US')).toBe(11)
+    // The pivot's case: the same fixture read for CN answers from the CN row, not from US.
+    expect(originQuantity(fixtureStock(), 'CN')).toBe(99)
   })
 
   // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { auditLog, createDb, orders, supplierOrders } from '@doge-buddy/db'
+import { auditLog, createDb, orders, productVariants, products, supplierOrders, supplierVariantMappings } from '@doge-buddy/db'
 import { and, eq } from 'drizzle-orm'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAlerter } from '../src/alerts.ts'
@@ -27,7 +27,7 @@ describe('executeSyncTracking', () => {
   } {
     const orderFulfillmentOrders = vi.fn(
       overrides.orderFulfillmentOrders ??
-        (async () => [{ id: 'gid://shopify/FulfillmentOrder/1', status: 'OPEN' }]),
+        (async () => [{ id: 'gid://shopify/FulfillmentOrder/1', status: 'OPEN', lineItems: [] }]),
     )
     const fulfillmentCreate = vi.fn(
       overrides.fulfillmentCreate ?? (async () => ({ fulfillmentId: 'gid://shopify/Fulfillment/1' })),
@@ -61,12 +61,14 @@ describe('executeSyncTracking', () => {
     shopifyFulfillmentGid?: string | null
     trackingSyncedValue?: string | null
     trackingSyncedToShopifyAt?: Date | null
+    warehouseCountry?: string
   }): Promise<typeof supplierOrders.$inferSelect> {
     const [row] = await db
       .insert(supplierOrders)
       .values({
         orderId: opts.orderRowId,
         supplier: 'cj',
+        warehouseCountry: opts.warehouseCountry ?? 'US',
         idempotencyKey: `test-${nextId()}`,
         status: 'paid',
         trackingNumber: opts.trackingNumber === undefined ? null : opts.trackingNumber,
@@ -185,8 +187,8 @@ describe('executeSyncTracking', () => {
     const supplierOrderRow = await seedSupplierOrder({ orderRowId, trackingNumber: 'TRACK-PICK' })
     const { deps, fulfillmentCreate } = makeDeps({
       orderFulfillmentOrders: async () => [
-        { id: 'fo-in-progress', status: 'IN_PROGRESS' },
-        { id: 'fo-open-too', status: 'OPEN' },
+        { id: 'fo-in-progress', status: 'IN_PROGRESS', lineItems: [] },
+        { id: 'fo-open-too', status: 'OPEN', lineItems: [] },
       ],
     })
 
@@ -202,7 +204,7 @@ describe('executeSyncTracking', () => {
     const { orderGid, orderRowId } = await seedOrder()
     const supplierOrderRow = await seedSupplierOrder({ orderRowId, trackingNumber: 'TRACK-NONE' })
     const { deps, fulfillmentCreate } = makeDeps({
-      orderFulfillmentOrders: async () => [{ id: 'fo-cancelled', status: 'CANCELLED' }],
+      orderFulfillmentOrders: async () => [{ id: 'fo-cancelled', status: 'CANCELLED', lineItems: [] }],
     })
 
     await executeSyncTracking(deps, supplierOrderRow.id)
@@ -231,8 +233,8 @@ describe('executeSyncTracking', () => {
     const supplierOrderRow = await seedSupplierOrder({ orderRowId, trackingNumber: 'TRACK-DUP' })
     const { deps, fulfillmentCreate } = makeDeps({
       orderFulfillmentOrders: async () => [
-        { id: 'fo-closed', status: 'CLOSED' },
-        { id: 'fo-open', status: 'OPEN' },
+        { id: 'fo-closed', status: 'CLOSED', lineItems: [] },
+        { id: 'fo-open', status: 'OPEN', lineItems: [] },
       ],
     })
 
@@ -308,4 +310,76 @@ describe('executeSyncTracking', () => {
     expect(row?.trackingSyncedToShopifyAt?.getTime()).toBeGreaterThan(oldSyncedAt.getTime())
     expect(row?.status).toBe('paid') // never touched
   })
+
+  // --- the origin split (spec 2026-09-06) ---------------------------------------------------
+  describe('split orders: one fulfillment per leg', () => {
+    /** An order with a US leg and a CN leg, each mapped to its own variant. */
+    async function seedSplitOrder() {
+      const { orderGid, orderRowId } = await seedOrder()
+      const usVariantGid = `gid://shopify/ProductVariant/us-${nextId()}`
+      const cnVariantGid = `gid://shopify/ProductVariant/cn-${nextId()}`
+      const [product] = await db.insert(products).values({ title: 'split', status: 'active' }).returning({ id: products.id })
+      for (const [variantGid, origin] of [[usVariantGid, 'US'], [cnVariantGid, 'CN']] as const) {
+        const [variant] = await db
+          .insert(productVariants)
+          // supplierCostCents is required: `loadMappings` excludes a variant without one rather
+          // than defaulting it to 0, so a fixture missing it resolves to no leg items at all.
+          .values({ productId: product!.id, shopifyVariantGid: variantGid, sku: `sku-${nextId()}`, priceCents: 1499, supplierCostCents: 620 })
+          .returning({ id: productVariants.id })
+        await db.insert(supplierVariantMappings).values({
+          variantId: variant!.id, supplier: 'cj', supplierProductId: 'cjp-1',
+          supplierVariantId: `cjv-${nextId()}`, warehouseCountry: origin,
+        })
+      }
+      await db
+        .update(orders)
+        .set({
+          rawPayload: {
+            admin_graphql_api_id: orderGid,
+            line_items: [
+              { variant_id: usVariantGid.split('/').pop(), quantity: 1 },
+              { variant_id: cnVariantGid.split('/').pop(), quantity: 1 },
+            ],
+          },
+        })
+        .where(eq(orders.id, orderRowId))
+      const cnLeg = await seedSupplierOrder({ orderRowId, trackingNumber: 'CN-TRACK', warehouseCountry: 'CN' })
+      const usLeg = await seedSupplierOrder({ orderRowId, trackingNumber: 'US-TRACK', warehouseCountry: 'US' })
+      return { orderGid, orderRowId, cnLeg, usLeg, usVariantGid, cnVariantGid }
+    }
+
+    it("each leg fulfils only its own line items, so the second leg isn't a suspected duplicate", async () => {
+      const { cnLeg, usVariantGid, cnVariantGid } = await seedSplitOrder()
+      const { deps, fulfillmentCreate } = makeDeps({
+        orderFulfillmentOrders: async () => [
+          {
+            id: 'gid://shopify/FulfillmentOrder/1',
+            status: 'OPEN',
+            lineItems: [
+              { id: 'foli-us', remainingQuantity: 1, variantGid: usVariantGid },
+              { id: 'foli-cn', remainingQuantity: 1, variantGid: cnVariantGid },
+            ],
+          },
+        ],
+      })
+
+      await executeSyncTracking(deps, cnLeg.id)
+
+      expect(fulfillmentCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ fulfillmentOrderLineItems: [{ id: 'foli-cn', quantity: 1 }] }),
+      )
+    })
+
+    it('a single-leg order still fulfils the whole fulfillment order (unchanged behaviour)', async () => {
+      const { orderRowId } = await seedOrder()
+      const only = await seedSupplierOrder({ orderRowId, trackingNumber: 'TRACK1' })
+      const { deps, fulfillmentCreate } = makeDeps()
+
+      await executeSyncTracking(deps, only.id)
+
+      const [args] = fulfillmentCreate.mock.calls[0]! as [Record<string, unknown>]
+      expect(args.fulfillmentOrderLineItems).toBeUndefined()
+    })
+  })
+
 })
