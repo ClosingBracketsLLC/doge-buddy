@@ -61,6 +61,12 @@ export const supplierVariantMappings = pgTable('supplier_variant_mappings', {
   supplierProductId: text('supplier_product_id').notNull(),
   supplierVariantId: text('supplier_variant_id').notNull(),
   warehouseCountry: text('warehouse_country').notNull().default('US'),
+  // The delivery window the BUYER was shown for this variant, in days — the listing payload's
+  // deliveryMaxDays, which since the 2026-09-03 pivot is the carrier's real quoted window rather
+  // than an agent guess. Fulfillment gate 5 and the overdue sweep measure against THIS, never a
+  // site-wide constant. Nullable: pre-pivot rows have no stored window and fall back to the
+  // `fulfillment.promised_max_days` setting.
+  deliveryMaxDays: integer('delivery_max_days'),
   lastKnownStock: integer('last_known_stock'),
   stockCheckedAt: timestamp('stock_checked_at', { withTimezone: true }),
   createdAt: createdAt(),
@@ -89,6 +95,10 @@ export const supplierOrders = pgTable('supplier_orders', {
   id: id(),
   orderId: uuid('order_id').notNull().references(() => orders.id),
   supplier: supplierKey('supplier').notNull(),
+  // Which warehouse this supplier order ships FROM. A customer order whose cart mixes origins
+  // becomes one row per origin (CJ takes one origin and one carrier per order), which is what the
+  // three-column unique index below allows and the two-column one it replaced did not.
+  warehouseCountry: text('warehouse_country').notNull().default('US'),
   idempotencyKey: text('idempotency_key').notNull().unique(),
   status: supplierOrderStatus('status').notNull().default('pending'),
   supplierOrderId: text('supplier_order_id'),
@@ -111,7 +121,7 @@ export const supplierOrders = pgTable('supplier_orders', {
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, (t) => [
-  uniqueIndex('supplier_orders_order_supplier_uq').on(t.orderId, t.supplier),
+  uniqueIndex('supplier_orders_order_supplier_origin_uq').on(t.orderId, t.supplier, t.warehouseCountry),
   // Guards `findCjSupplierOrder`'s (apps/ops) unordered, unlimited SELECT keyed on
   // (supplier, supplier_order_id) — without this, a colliding supplier_order_id (e.g. from a
   // supplier-side id reuse, or a bug elsewhere) could make that lookup silently return the wrong
