@@ -126,6 +126,7 @@ describe('run-reconcile', () => {
     trackingNumber?: string | null
     logisticName?: string | null
     updatedAt?: Date
+    promisedMaxDays?: number | null
   }): Promise<typeof supplierOrders.$inferSelect> {
     const [row] = await db
       .insert(supplierOrders)
@@ -137,6 +138,7 @@ describe('run-reconcile', () => {
         supplierOrderId: opts.supplierOrderId === undefined ? `sup-${nextId()}` : opts.supplierOrderId,
         trackingNumber: opts.trackingNumber ?? null,
         logisticName: opts.logisticName ?? null,
+        promisedMaxDays: opts.promisedMaxDays ?? null,
         updatedAt: opts.updatedAt ?? now(),
       })
       .returning()
@@ -652,6 +654,43 @@ describe('run-reconcile', () => {
       expect(result).toEqual({ count: 0, failures: 0 })
       const updated = await loadSupplierOrder(row.id)
       expect(updated?.status).toBe('confirmed')
+    })
+
+    it("a 14-day CN leg is not overdue on day 8, while a 7-day US leg is", async () => {
+      // The same paid_at, two different promises: measuring both against one site-wide number
+      // would park every CN order a week before it is actually late.
+      const cnOrder = await seedOrder({ paidAt: daysBefore(8) })
+      const cn = await seedSupplierOrder({ orderRowId: cnOrder.orderRowId, status: 'confirmed', promisedMaxDays: 14 })
+      const usOrder = await seedOrder({ paidAt: daysBefore(8) })
+      const us = await seedSupplierOrder({ orderRowId: usOrder.orderRowId, status: 'confirmed', promisedMaxDays: 7 })
+
+      const { deps } = makeDeps()
+      await sweepOverdue(deps)
+
+      expect((await loadSupplierOrder(cn.id))?.status).toBe('confirmed')
+      expect((await loadSupplierOrder(us.id))?.status).toBe('needs_attention')
+    })
+
+    it('a leg with no recorded window falls back to fulfillment.promised_max_days', async () => {
+      const { orderRowId } = await seedOrder({ paidAt: daysBefore(8) })
+      const row = await seedSupplierOrder({ orderRowId, status: 'confirmed', promisedMaxDays: null })
+
+      const { deps } = makeDeps()
+      await sweepOverdue(deps)
+
+      expect((await loadSupplierOrder(row.id))?.status).toBe('needs_attention')
+    })
+
+    it('the alert names the window that was actually breached', async () => {
+      const { orderRowId } = await seedOrder({ paidAt: daysBefore(20) })
+      const row = await seedSupplierOrder({ orderRowId, status: 'confirmed', promisedMaxDays: 14 })
+
+      const { deps } = makeDeps()
+      await sweepOverdue(deps)
+
+      const alerts = await alertRowsFor('order_overdue')
+      const match = alerts.find((r) => (r.detail as { supplierOrderRowId?: string })?.supplierOrderRowId === row.id)
+      expect((match!.detail as { promisedMaxDays: number }).promisedMaxDays).toBe(14)
     })
 
     it('already shipped/delivered/cancelled/failed/needs_attention -> excluded regardless of how old paid_at is', async () => {

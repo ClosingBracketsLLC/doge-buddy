@@ -104,6 +104,11 @@ export const supplierOrders = pgTable('supplier_orders', {
   supplierOrderId: text('supplier_order_id'),
   shipmentOrderId: text('shipment_order_id'),
   logisticName: text('logistic_name'),
+  // The delivery window THIS leg's buyer was shown, in days, as it stood when the order was
+  // placed. Recorded here rather than re-derived later so the overdue sweep judges the promise we
+  // actually made — a mapping edited afterwards must not retroactively move a shipped order's
+  // deadline. Null on legs that never reached placement, which the sweep excludes anyway.
+  promisedMaxDays: integer('promised_max_days'),
   productAmountCents: integer('product_amount_cents'),
   postageAmountCents: integer('postage_amount_cents'),
   totalAmountCents: integer('total_amount_cents'),

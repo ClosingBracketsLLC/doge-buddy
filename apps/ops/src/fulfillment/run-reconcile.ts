@@ -1,6 +1,6 @@
 import { auditLog, type createDb, orders, supplierOrders, webhookEvents } from '@doge-buddy/db'
 import type { SupplierAdapter } from '@doge-buddy/supplier'
-import { and, eq, inArray, isNotNull, isNull, lt, notInArray } from 'drizzle-orm'
+import { and, eq, inArray, isNotNull, isNull, lt, notInArray, sql } from 'drizzle-orm'
 import type { createAlerter } from '../alerts.ts'
 import type { createSettings } from '../settings.ts'
 import { mapCjStatus, resolveCjTransition } from './cj-status-map.ts'
@@ -335,8 +335,20 @@ export async function sweepStatusDrift(deps: ReconcileDeps): Promise<SweepResult
  * being parked. Caught failures are counted and audited (`reconcile.row_failed`).
  */
 export async function sweepOverdue(deps: ReconcileDeps): Promise<SweepResult> {
-  const promisedMaxDays = await deps.settings.get('fulfillment.promised_max_days')
-  const cutoff = new Date(deps.now().getTime() - promisedMaxDays * 24 * 60 * 60 * 1000)
+  const fallbackMaxDays = await deps.settings.get('fulfillment.promised_max_days')
+  const now = deps.now()
+
+  // Each leg carries the window ITS buyer was shown (`promised_max_days`, stamped at placement);
+  // the setting is only the fallback for rows placed before the 2026-09-06 split. The SQL below
+  // therefore casts the WIDEST net by using the SHORTEST promise on record — nothing can be
+  // overdue before its own window elapses, so a shorter cutoff cannot miss a candidate — and each
+  // row is then judged against its own promise in the loop. A single site-wide cutoff would park
+  // every slow-lane order a week before it is actually late.
+  const [shortest] = await deps.db
+    .select({ minDays: sql<number | null>`min(${supplierOrders.promisedMaxDays})` })
+    .from(supplierOrders)
+  const shortestDays = Math.min(fallbackMaxDays, shortest?.minDays ?? fallbackMaxDays)
+  const widestCutoff = new Date(now.getTime() - shortestDays * 24 * 60 * 60 * 1000)
 
   const rows = await deps.db
     .select({ supplierOrder: supplierOrders, order: orders })
@@ -346,7 +358,7 @@ export async function sweepOverdue(deps: ReconcileDeps): Promise<SweepResult> {
       and(
         notInArray(supplierOrders.status, OVERDUE_EXCLUDED_STATUSES),
         isNotNull(orders.paidAt),
-        lt(orders.paidAt, cutoff),
+        lt(orders.paidAt, widestCutoff),
       ),
     )
 
@@ -355,6 +367,10 @@ export async function sweepOverdue(deps: ReconcileDeps): Promise<SweepResult> {
 
   for (const { supplierOrder, order } of rows) {
     if (!canTransition(supplierOrder.status, 'needs_attention')) continue
+
+    const promisedMaxDays = supplierOrder.promisedMaxDays ?? fallbackMaxDays
+    const cutoff = new Date(now.getTime() - promisedMaxDays * 24 * 60 * 60 * 1000)
+    if (order.paidAt! >= cutoff) continue
 
     try {
       const paidAtIso = order.paidAt!.toISOString()

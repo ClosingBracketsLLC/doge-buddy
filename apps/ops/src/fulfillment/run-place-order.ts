@@ -322,6 +322,7 @@ async function dispatchDecision(
   decision: Decision,
   shippingAddress: Address,
   origin: string,
+  promisedMaxDays: number,
 ): Promise<void> {
   switch (decision.kind) {
     case 'skip_test':
@@ -359,6 +360,9 @@ async function dispatchDecision(
         fromCountry: origin,
       })
       await applyTransition(deps.db, supplierOrderRow.id, 'pending', 'created', {
+        // The promise this placement was judged against, recorded as made: the overdue sweep
+        // reads it back instead of re-deriving a window that may have changed since.
+        promisedMaxDays,
         supplierOrderId: result.supplierOrderId,
         shipmentOrderId: result.shipmentOrderId,
         logisticName: decision.logisticName,
@@ -551,6 +555,10 @@ async function placeLeg(deps: PlaceOrderDeps, orderRow: OrderRow, shippingAddres
   const { availableCents: walletAvailableCents } = await deps.adapter.getBalance()
   const committedCents = await committedCentsForOtherLegs(deps.db, orderRow.id, supplierOrderRow.id)
 
+  // The window THIS leg's buyer was shown. The setting is the pre-pivot fallback and nothing else
+  // — a site-wide promise is exactly what the affordable-catalog pivot removed.
+  const promisedMaxDays = leg.promisedMaxDays ?? (await deps.settings.get('fulfillment.promised_max_days'))
+
   const inputs: FulfillmentInputs = {
     order: {
       isTest: orderRow.isTest,
@@ -566,9 +574,7 @@ async function placeLeg(deps: PlaceOrderDeps, orderRow: OrderRow, shippingAddres
       pausedForFunds: await deps.settings.get('fulfillment.paused_for_funds'),
       spendCapPerOrderCents: await deps.settings.get('fulfillment.spend_cap_per_order_cents'),
       marginFloorBps: await deps.settings.get('fulfillment.margin_floor_bps'),
-      // The window THIS leg's buyer was shown. The setting is the pre-pivot fallback and nothing
-      // else — a site-wide promise is exactly what the affordable-catalog pivot removed.
-      promisedMaxDays: leg.promisedMaxDays ?? (await deps.settings.get('fulfillment.promised_max_days')),
+      promisedMaxDays,
     },
     mappings,
     stock,
@@ -577,5 +583,5 @@ async function placeLeg(deps: PlaceOrderDeps, orderRow: OrderRow, shippingAddres
   }
 
   const decision = planFulfillment(inputs)
-  await dispatchDecision(deps, orderRow, supplierOrderRow, decision, shippingAddress, leg.origin)
+  await dispatchDecision(deps, orderRow, supplierOrderRow, decision, shippingAddress, leg.origin, promisedMaxDays)
 }

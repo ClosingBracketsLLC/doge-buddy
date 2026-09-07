@@ -1,0 +1,1 @@
+ALTER TABLE "supplier_orders" ADD COLUMN "promised_max_days" integer;
