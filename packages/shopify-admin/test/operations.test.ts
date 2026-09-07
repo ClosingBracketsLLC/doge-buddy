@@ -227,11 +227,43 @@ describe('orderRefundState', () => {
 })
 
 describe('orderFulfillmentOrders', () => {
-  it('sends the order gid, maps fulfillment orders', async () => {
+  it('sends the order gid, maps fulfillment orders and their line items', async () => {
     const { client, calls } = makeClient(() =>
-      gql({ order: { fulfillmentOrders: { nodes: [{ id: 'gid://shopify/FulfillmentOrder/3', status: 'OPEN' }] } } }))
+      gql({
+        order: {
+          fulfillmentOrders: {
+            nodes: [
+              {
+                id: 'gid://shopify/FulfillmentOrder/3',
+                status: 'OPEN',
+                lineItems: {
+                  nodes: [
+                    {
+                      id: 'gid://shopify/FulfillmentOrderLineItem/9',
+                      remainingQuantity: 2,
+                      lineItem: { variant: { id: 'gid://shopify/ProductVariant/1' } },
+                    },
+                    // A deleted product has no variant — it must map to a null gid rather than
+                    // throwing, and simply never match a leg.
+                    { id: 'gid://shopify/FulfillmentOrderLineItem/10', remainingQuantity: 1, lineItem: { variant: null } },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      }))
     const result = await orderFulfillmentOrders(client, 'gid://shopify/Order/123')
-    expect(result).toEqual([{ id: 'gid://shopify/FulfillmentOrder/3', status: 'OPEN' }])
+    expect(result).toEqual([
+      {
+        id: 'gid://shopify/FulfillmentOrder/3',
+        status: 'OPEN',
+        lineItems: [
+          { id: 'gid://shopify/FulfillmentOrderLineItem/9', remainingQuantity: 2, variantGid: 'gid://shopify/ProductVariant/1' },
+          { id: 'gid://shopify/FulfillmentOrderLineItem/10', remainingQuantity: 1, variantGid: null },
+        ],
+      },
+    ])
     const { query, variables } = lastGraphqlCall(calls)
     expect(query).toMatch(/query[\s\S]*fulfillmentOrders/)
     expect(variables).toEqual({ id: 'gid://shopify/Order/123' })
@@ -259,6 +291,30 @@ describe('fulfillmentCreate', () => {
       },
     })
   })
+  it('scopes the fulfillment to the given line items when they are supplied (split orders)', async () => {
+    const { client, calls } = makeClient(() =>
+      gql({ fulfillmentCreate: { fulfillment: { id: 'gid://shopify/Fulfillment/7' }, userErrors: [] } }))
+    await fulfillmentCreate(client, {
+      fulfillmentOrderId: 'gid://shopify/FulfillmentOrder/3',
+      notifyCustomer: true,
+      fulfillmentOrderLineItems: [{ id: 'gid://shopify/FulfillmentOrderLineItem/9', quantity: 2 }],
+    })
+    const { variables } = lastGraphqlCall(calls)
+    // Without the selection, the FIRST leg of a split order would close the whole fulfillment
+    // order and the second leg would look like a duplicate.
+    expect(variables).toEqual({
+      fulfillment: {
+        lineItemsByFulfillmentOrder: [
+          {
+            fulfillmentOrderId: 'gid://shopify/FulfillmentOrder/3',
+            fulfillmentOrderLineItems: [{ id: 'gid://shopify/FulfillmentOrderLineItem/9', quantity: 2 }],
+          },
+        ],
+        notifyCustomer: true,
+      },
+    })
+  })
+
   it('omits trackingInfo entirely when there is no tracking number', async () => {
     const { client, calls } = makeClient(() =>
       gql({ fulfillmentCreate: { fulfillment: { id: 'gid://shopify/Fulfillment/7' }, userErrors: [] } }))

@@ -352,22 +352,52 @@ const ORDER_FULFILLMENT_ORDERS_QUERY = `#graphql
   query OrderFulfillmentOrders($id: ID!) {
     order(id: $id) {
       fulfillmentOrders(first: 50) {
-        nodes { id status }
+        nodes {
+          id
+          status
+          lineItems(first: 50) {
+            nodes { id remainingQuantity lineItem { variant { id } } }
+          }
+        }
       }
     }
   }
 `
 
+interface OrderFulfillmentOrdersNode {
+  id: string
+  status: string
+  lineItems: { nodes: { id: string; remainingQuantity: number; lineItem: { variant: { id: string } | null } | null }[] }
+}
+
 interface OrderFulfillmentOrdersData {
-  order: { fulfillmentOrders: { nodes: { id: string; status: string }[] } }
+  order: { fulfillmentOrders: { nodes: OrderFulfillmentOrdersNode[] } }
+}
+
+/** One fulfillment-order line item: its own id (what `fulfillmentCreate` selects on), how much of
+ *  it is still unfulfilled, and the product variant it belongs to — the last is how a split
+ *  order's caller tells which items belong to which warehouse leg. `variantGid` is null for a
+ *  deleted product, which simply never matches a leg. */
+export interface FulfillmentOrderLineItem {
+  id: string
+  remainingQuantity: number
+  variantGid: string | null
 }
 
 export async function orderFulfillmentOrders(
   client: ShopifyAdminClient,
   orderGid: string,
-): Promise<{ id: string; status: string }[]> {
+): Promise<{ id: string; status: string; lineItems: FulfillmentOrderLineItem[] }[]> {
   const data = await client.graphql<OrderFulfillmentOrdersData>(ORDER_FULFILLMENT_ORDERS_QUERY, { id: orderGid })
-  return data.order.fulfillmentOrders.nodes.map((n) => ({ id: n.id, status: n.status }))
+  return data.order.fulfillmentOrders.nodes.map((n) => ({
+    id: n.id,
+    status: n.status,
+    lineItems: (n.lineItems?.nodes ?? []).map((li) => ({
+      id: li.id,
+      remainingQuantity: li.remainingQuantity,
+      variantGid: li.lineItem?.variant?.id ?? null,
+    })),
+  }))
 }
 
 // ---------------------------------------------------------------------------
@@ -389,10 +419,24 @@ interface FulfillmentCreateData {
 
 export async function fulfillmentCreate(
   client: ShopifyAdminClient,
-  args: { fulfillmentOrderId: string; trackingNumber?: string; trackingCompany?: string; notifyCustomer: boolean },
+  args: {
+    fulfillmentOrderId: string
+    trackingNumber?: string
+    trackingCompany?: string
+    notifyCustomer: boolean
+    /** Scope this fulfillment to specific line items of that fulfillment order. Omitted = the
+     *  WHOLE fulfillment order, which is right for a single-shipment order and wrong for one leg
+     *  of a split one: the first leg would close the fulfillment order and the second would look
+     *  like a duplicate. */
+    fulfillmentOrderLineItems?: { id: string; quantity: number }[]
+  },
 ): Promise<{ fulfillmentId: string }> {
   const fulfillment: Record<string, unknown> = {
-    lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: args.fulfillmentOrderId }],
+    lineItemsByFulfillmentOrder: [
+      args.fulfillmentOrderLineItems
+        ? { fulfillmentOrderId: args.fulfillmentOrderId, fulfillmentOrderLineItems: args.fulfillmentOrderLineItems }
+        : { fulfillmentOrderId: args.fulfillmentOrderId },
+    ],
   }
   if (args.trackingNumber) {
     fulfillment.trackingInfo = { number: args.trackingNumber, company: args.trackingCompany }

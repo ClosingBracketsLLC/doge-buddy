@@ -22,7 +22,7 @@ type SupplierOrderRow = typeof supplierOrders.$inferSelect
 /** What `loadMappings` resolves per line item: the supplier variant to order, its cost, and the
  *  two facts the 2026-09-06 split turns on — which warehouse ships it, and the delivery window
  *  its buyer was actually shown. */
-interface MappingRow {
+export interface MappingRow {
   supplierVariantId: string
   supplierCostCents: number
   warehouseCountry: string
@@ -130,7 +130,7 @@ async function loadOrCreateSupplierOrder(
 }
 
 /** Normalizes a Shopify REST line item's numeric `variant_id` into the full gid used everywhere else. */
-function extractLineItems(orderRow: OrderRow): { variantGid: string; quantity: number }[] {
+export function extractLineItems(orderRow: OrderRow): { variantGid: string; quantity: number }[] {
   const payload = (orderRow.rawPayload ?? {}) as ShopifyOrderPaidPayload
   const lineItems = payload.line_items ?? []
   return lineItems.map((item) => ({
@@ -145,7 +145,7 @@ function extractLineItems(orderRow: OrderRow): { variantGid: string; quantity: n
  * deliberately excluded rather than defaulted to 0 — that would silently misprice the order — so
  * it falls through to the planner's gate-3 unmapped-item check exactly like a missing mapping.
  */
-async function loadMappings(
+export async function loadMappings(
   db: Db,
   supplier: SupplierAdapter['key'],
   lineItems: { variantGid: string; quantity: number }[],

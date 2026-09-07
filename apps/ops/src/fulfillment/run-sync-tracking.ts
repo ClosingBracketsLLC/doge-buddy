@@ -1,6 +1,7 @@
 import { auditLog, type createDb, orders, supplierOrders } from '@doge-buddy/db'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import type { createAlerter } from '../alerts.ts'
+import { extractLineItems, loadMappings } from './run-place-order.ts'
 
 type Db = ReturnType<typeof createDb>['db']
 type OrderRow = typeof orders.$inferSelect
@@ -14,12 +15,17 @@ type SupplierOrderRow = typeof supplierOrders.$inferSelect
  * `queue.ts`); tests inject fakes (`vi.fn` spies) directly.
  */
 export interface ShopifyFulfillmentOps {
-  orderFulfillmentOrders(orderGid: string): Promise<{ id: string; status: string }[]>
+  orderFulfillmentOrders(orderGid: string): Promise<
+    { id: string; status: string; lineItems: { id: string; remainingQuantity: number; variantGid: string | null }[] }[]
+  >
   fulfillmentCreate(args: {
     fulfillmentOrderId: string
     trackingNumber?: string
     trackingCompany?: string
     notifyCustomer: boolean
+    /** Scope the fulfillment to one leg's line items. Omitted for a single-leg order, which
+     *  fulfils the whole fulfillment order exactly as it always has. */
+    fulfillmentOrderLineItems?: { id: string; quantity: number }[]
   }): Promise<{ fulfillmentId: string }>
   fulfillmentTrackingInfoUpdate(gid: string, tracking: { number: string; company?: string }): Promise<void>
   /**
@@ -94,6 +100,43 @@ function hasSuspiciousClosedNode(fulfillmentOrders: { id: string; status: string
  * `shopify_fulfillment_gid` set and takes `updateFulfillment`'s no-op/update branch instead of
  * creating a second fulfillment.
  */
+/**
+ * The fulfillment-order line items belonging to THIS leg, or null when the order has only one leg
+ * and the whole fulfillment order is the right target (every pre-split order, and every order
+ * whose cart never mixed warehouses).
+ *
+ * Returns null rather than an empty list when the leg's items cannot be resolved — an order whose
+ * `raw_payload` is unreadable, or a mapping deleted since placement. Fulfilling the whole
+ * fulfillment order is the pre-split behaviour and strictly better than refusing to send tracking
+ * for a parcel that really did ship.
+ */
+async function legLineItemsFor(
+  deps: SyncTrackingDeps,
+  orderRow: OrderRow,
+  supplierOrderRow: SupplierOrderRow,
+  fulfillmentOrderLineItems: { id: string; remainingQuantity: number; variantGid: string | null }[],
+): Promise<{ id: string; quantity: number }[] | null> {
+  const legs = await deps.db
+    .select({ id: supplierOrders.id })
+    .from(supplierOrders)
+    .where(and(eq(supplierOrders.orderId, orderRow.id), eq(supplierOrders.supplier, supplierOrderRow.supplier)))
+  if (legs.length < 2) return null
+
+  const lineItems = extractLineItems(orderRow)
+  const mappings = await loadMappings(deps.db, supplierOrderRow.supplier, lineItems)
+  const legVariantGids = new Set(
+    lineItems
+      .filter((item) => mappings.get(item.variantGid)?.warehouseCountry === supplierOrderRow.warehouseCountry)
+      .map((item) => item.variantGid),
+  )
+  if (legVariantGids.size === 0) return null
+
+  const selected = fulfillmentOrderLineItems
+    .filter((li) => li.variantGid != null && legVariantGids.has(li.variantGid) && li.remainingQuantity > 0)
+    .map((li) => ({ id: li.id, quantity: li.remainingQuantity }))
+  return selected.length > 0 ? selected : null
+}
+
 async function createFulfillment(
   deps: SyncTrackingDeps,
   orderRow: OrderRow,
@@ -125,11 +168,19 @@ async function createFulfillment(
     return
   }
 
+  // A split order (spec 2026-09-06) ships in one parcel per warehouse, so each leg must fulfil
+  // ONLY its own line items: fulfilling the whole fulfillment order on the first leg closes it,
+  // and the second leg — which shipped perfectly well — then looks like a duplicate and never
+  // gets its tracking to the customer. A single-leg order passes no selection at all and behaves
+  // exactly as it did before the split.
+  const legLineItems = await legLineItemsFor(deps, orderRow, supplierOrderRow, target.lineItems)
+
   const result = await deps.shopifyOps.fulfillmentCreate({
     fulfillmentOrderId: target.id,
     trackingNumber: supplierOrderRow.trackingNumber!,
     trackingCompany: supplierOrderRow.logisticName ?? undefined,
     notifyCustomer: true,
+    ...(legLineItems ? { fulfillmentOrderLineItems: legLineItems } : {}),
   })
 
   await deps.db
