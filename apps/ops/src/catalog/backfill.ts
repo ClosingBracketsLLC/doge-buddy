@@ -4,7 +4,7 @@ import type { SupplierAdapter } from '@doge-buddy/supplier'
 import { and, asc, eq, isNotNull, sql } from 'drizzle-orm'
 import type { SendOpts } from '../fulfillment/types.ts'
 import { INVENTORY_SYNC_QUEUE, inventorySyncSendOpts } from '../jobs/inventory-sync.ts'
-import { readUsStock, seoDescription, seoTitle } from '../proposals/apply-new-listing.ts'
+import { readOriginStock, seoDescription, seoTitle } from '../proposals/apply-new-listing.ts'
 import { proposalHandle } from '../proposals/apply-shared.ts'
 
 type Db = ReturnType<typeof createDb>['db']
@@ -40,7 +40,7 @@ export interface BackfillOps {
 export interface BackfillDeps {
   db: Db
   ops: BackfillOps
-  /** `getVariantStock` only — the same read `readUsStock` wraps for the listing worker. */
+  /** `getVariantStock` only — the same read `readOriginStock` wraps for the listing worker. */
   adapter: Pick<SupplierAdapter, 'getVariantStock'>
   alert: Alert
   /** Line printer (the script passes `console.log`) — every product's before → after handle, every
@@ -210,6 +210,7 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
           inventoryItemGid: productVariants.shopifyInventoryItemGid,
           mappingId: supplierVariantMappings.id,
           supplierVariantId: supplierVariantMappings.supplierVariantId,
+          warehouseCountry: supplierVariantMappings.warehouseCountry,
         })
         .from(productVariants)
         .leftJoin(supplierVariantMappings, eq(supplierVariantMappings.variantId, productVariants.id))
@@ -226,7 +227,7 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
         for (const local of locals) {
           log(
             `${dry}  variant ${local.sku}: inventoryItemGid=${local.inventoryItemGid ?? '(missing — will fetch)'}` +
-              ` mapping=${local.mappingId ? 'yes → track + push CJ US stock' : 'none → inventory left alone'}`,
+              ` mapping=${local.mappingId ? `yes → track + push CJ ${local.warehouseCountry ?? 'US'} stock` : 'none → inventory left alone'}`,
           )
         }
         updated += 1
@@ -285,8 +286,15 @@ export async function backfillListings(deps: BackfillDeps, opts: { dryRun: boole
         if (!local.mappingId || !local.supplierVariantId) continue
 
         // STOCK FIRST, before anything is changed on Shopify. `null` = the CJ read itself failed
-        // (see `readUsStock`); 0 = CJ genuinely has none.
-        const observed = await readUsStock({ adapter: deps.adapter, alert: deps.alert }, local.supplierVariantId)
+        // (see `readOriginStock`); 0 = CJ genuinely has none. Read the mapping's OWN warehouse:
+        // a repair that read US for a CN product would push a confident 0 to a live listing.
+        const observed = await readOriginStock(
+          { adapter: deps.adapter, alert: deps.alert },
+          local.supplierVariantId,
+          // leftJoin makes the column nullable in the row type; the guard above already proved
+          // the mapping exists, and 'US' is the column's own default for anything pre-pivot.
+          local.warehouseCountry ?? 'US',
+        )
         if (observed === null) {
           // Leave this variant EXACTLY as it is: untracked and still selling. The tempting
           // alternative — track it at 0 like a brand-new listing does — is safe there and actively
