@@ -7,6 +7,7 @@ import {
   executeInventorySync,
   INVENTORY_SYNC_QUEUE,
   inventorySyncHandler,
+  originQuantity,
   type InventorySyncDeps,
   type InventorySyncShopifyOps,
 } from '../src/jobs/inventory-sync.ts'
@@ -93,6 +94,27 @@ function fakeAdapter(script: Record<string, number | Error>) {
   }
 }
 
+describe('originQuantity', () => {
+  const mixed: WarehouseStock[] = [
+    { countryCode: 'US', quantity: 3, verified: true },
+    { countryCode: 'US', quantity: 2, verified: true },
+    { countryCode: 'CN', quantity: 40, verified: true },
+  ]
+
+  it('takes the largest single warehouse row for the requested origin, never the sum', () => {
+    expect(originQuantity(mixed, 'US')).toBe(3)
+    expect(originQuantity(mixed, 'CN')).toBe(40)
+  })
+
+  it("returns 0 when the origin has no row — never another origin's number", () => {
+    expect(originQuantity([{ countryCode: 'CN', quantity: 40, verified: true }], 'US')).toBe(0)
+  })
+
+  it('floors a negative supplier value at 0', () => {
+    expect(originQuantity([{ countryCode: 'CN', quantity: -5, verified: true }], 'CN')).toBe(0)
+  })
+})
+
 describe('executeInventorySync', () => {
   const { db, pool } = createDb(url)
   afterAll(() => pool.end())
@@ -135,7 +157,13 @@ describe('executeInventorySync', () => {
 
   async function seedVariant(
     productId: string,
-    opts: { inventoryItemGid?: string | null; mapping?: boolean; lastKnownStock?: number | null; stockCheckedAt?: Date | null } = {},
+    opts: {
+      inventoryItemGid?: string | null
+      mapping?: boolean
+      lastKnownStock?: number | null
+      stockCheckedAt?: Date | null
+      warehouseCountry?: string
+    } = {},
   ): Promise<{ variantId: string; supplierVariantId: string; inventoryItemGid: string | null }> {
     const sku = uid()
     const inventoryItemGid = opts.inventoryItemGid === undefined ? `gid://shopify/InventoryItem/${sku}` : opts.inventoryItemGid
@@ -151,6 +179,7 @@ describe('executeInventorySync', () => {
         supplier: 'cj',
         supplierProductId: `cjp-${sku}`,
         supplierVariantId,
+        warehouseCountry: opts.warehouseCountry ?? 'US',
         lastKnownStock: opts.lastKnownStock ?? null,
         stockCheckedAt: opts.stockCheckedAt ?? null,
       })
@@ -214,6 +243,29 @@ describe('executeInventorySync', () => {
     const activeAgain = await executeInventorySync(deps, { productId: activeId })
     expect(activeAgain).toEqual({ updated: 0, unchanged: 1, failed: 0, skipped: 1 })
     expect(adapter.reads.filter((id) => id.includes(PREFIX))).toEqual([live.supplierVariantId, live.supplierVariantId])
+  })
+
+  // (a2) ------------------------------------------------------------------------------------
+  it('a2. a CN mapping syncs from its CN stock, not from US (affordable-catalog pivot)', async () => {
+    const productId = await seedProduct('active')
+    const cn = await seedVariant(productId, { warehouseCountry: 'CN', lastKnownStock: 0 })
+
+    // The pivot's whole point: this product has no US stock at all. Reading US would publish
+    // "sold out" for a product CJ holds 12 of, and no later cycle would ever correct it.
+    const adapter = {
+      reads: [] as string[],
+      getVariantStock: async (supplierVariantId: string): Promise<WarehouseStock[]> => {
+        adapter.reads.push(supplierVariantId)
+        return [{ countryCode: 'CN', quantity: 12, verified: true }]
+      },
+    }
+    const shopify = fakeShopify()
+    const { deps } = makeDeps(adapter, shopify)
+
+    const result = await executeInventorySync(deps, { productId })
+
+    expect(result).toEqual({ updated: 1, unchanged: 0, failed: 0, skipped: 0 })
+    expect((await mappingRow(cn.variantId))!.lastKnownStock).toBe(12)
   })
 
   // (b) -------------------------------------------------------------------------------------
